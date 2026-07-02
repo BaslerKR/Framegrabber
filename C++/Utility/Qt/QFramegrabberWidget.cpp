@@ -5,19 +5,19 @@
 #include <QAction>
 #include <QCheckBox>
 #include <QComboBox>
+#include <QCoreApplication>
 #include <QDialog>
 #include <QDomDocument>
 #include <QDoubleSpinBox>
 #include <QFileDialog>
-#include <QFormLayout>
 #include <QHeaderView>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
 #include <QMetaObject>
 #include <QPushButton>
+#include <QScrollBar>
 #include <QSignalBlocker>
-#include <QSpinBox>
 #include <QStatusBar>
 #include <QStyle>
 #include <QTabWidget>
@@ -153,6 +153,20 @@ bool updateValueFromText(Framegrabber::ParameterValue& value, const QString& tex
         },
         value);
 }
+
+QString cameraTransportName(const Framegrabber::CameraTransport transport)
+{
+    switch (transport)
+    {
+    case Framegrabber::CameraTransport::CoaXPress:
+        return QCoreApplication::translate("QFramegrabberWidget", "CoaXPress");
+    case Framegrabber::CameraTransport::CameraLink:
+        return QCoreApplication::translate("QFramegrabberWidget", "Camera Link");
+    case Framegrabber::CameraTransport::None:
+        break;
+    }
+    return QCoreApplication::translate("QFramegrabberWidget", "Camera");
+}
 }
 
 QFramegrabberWidget::QFramegrabberWidget(QWidget* parent, Framegrabber* framegrabber)
@@ -175,9 +189,8 @@ QFramegrabberWidget::QFramegrabberWidget(QWidget* parent, Framegrabber* framegra
     {
         _boardCombo->addItem(QString::fromStdString(name));
     }
-    _configurationPathEdit->setText(
-        QString::fromStdString(_framegrabber->configurationPath()));
-    _bufferCountSpin->setValue(static_cast<int>(_framegrabber->dmaBufferCount()));
+    _appletPathEdit->setText(
+        QString::fromStdString(_framegrabber->appletPath()));
     applyConnectionState(_framegrabber->isOpened());
 }
 
@@ -279,11 +292,9 @@ void QFramegrabberWidget::buildUi()
     topLayout->addLayout(selectorLayout);
     topLayout->addLayout(toolLayout);
 
-    auto* tabs = new QTabWidget(this);
-    tabs->setObjectName(QStringLiteral("FramegrabberControlTabs"));
-    tabs->addTab(createAppletTab(), tr("Applet"));
-    tabs->addTab(createCameraTab(), tr("CXP Camera"));
-    tabs->addTab(createConfigurationTab(), tr("Configuration"));
+    _tabs = new QTabWidget(this);
+    _tabs->setObjectName(QStringLiteral("FramegrabberControlTabs"));
+    _tabs->addTab(createSetupTab(), tr("Setup"));
 
     _statusBar = new QStatusBar(this);
     _statusBar->setObjectName(QStringLiteral("FramegrabberStatusBar"));
@@ -301,7 +312,7 @@ void QFramegrabberWidget::buildUi()
     auto* rootLayout = new QVBoxLayout;
     rootLayout->setObjectName(QStringLiteral("DeviceRootLayout"));
     rootLayout->addLayout(topLayout);
-    rootLayout->addWidget(tabs);
+    rootLayout->addWidget(_tabs);
     rootLayout->addWidget(_statusBar);
     setLayout(rootLayout);
 
@@ -337,19 +348,26 @@ void QFramegrabberWidget::buildUi()
     });
 }
 
-QWidget* QFramegrabberWidget::createAppletTab()
+QWidget* QFramegrabberWidget::createSetupTab()
 {
     auto* page = new QWidget(this);
+    auto* appletLabel = new QLabel(tr("Applet"), page);
+    appletLabel->setObjectName(QStringLiteral("FramegrabberAppletPathLabel"));
+    _appletPathEdit = new QLineEdit(page);
+    _appletPathEdit->setReadOnly(true);
+    _loadAppletButton = new QPushButton(tr("Load Applet"), page);
+
+    auto* pathLayout = new QHBoxLayout;
+    pathLayout->setObjectName(QStringLiteral("FramegrabberAppletPathLayout"));
+    pathLayout->addWidget(appletLabel);
+    pathLayout->addWidget(_appletPathEdit);
+    pathLayout->addWidget(_loadAppletButton);
+
     _appletDmaCombo = new QComboBox(page);
-    _refreshAppletButton = new QToolButton(page);
-    _refreshAppletButton->setIcon(
-        QIcon(QStringLiteral(":/Resources/Icons/icons8-refresh-48.png")));
-    _refreshAppletButton->setToolTip(tr("Refresh applet features"));
 
     auto* selectorLayout = new QHBoxLayout;
     selectorLayout->setObjectName(QStringLiteral("FramegrabberAppletSelectorLayout"));
     selectorLayout->addWidget(_appletDmaCombo);
-    selectorLayout->addWidget(_refreshAppletButton);
 
     _appletTree = new QTreeWidget(page);
     _appletTree->setObjectName(QStringLiteral("FramegrabberAppletFeaturesTree"));
@@ -360,181 +378,104 @@ QWidget* QFramegrabberWidget::createAppletTab()
 
     auto* layout = new QVBoxLayout;
     layout->setObjectName(QStringLiteral("FramegrabberAppletLayout"));
+    layout->addLayout(pathLayout);
     layout->addLayout(selectorLayout);
     layout->addWidget(_appletTree);
     page->setLayout(layout);
 
+    connect(_loadAppletButton, &QPushButton::clicked, this, [this]
+    {
+        const QString path = QFileDialog::getOpenFileName(
+            this,
+            tr("Load frame grabber applet"),
+            _appletPathEdit->text(),
+            tr("Frame Grabber Applet (*.hap *.dll *.so);;All Files (*)"));
+        if (!path.isEmpty())
+        {
+            startAppletLoad(path);
+        }
+    });
     connect(_appletDmaCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this]
     {
         rebuildAppletTree();
     });
-    connect(_refreshAppletButton, &QToolButton::clicked, this, [this]
-    {
-        rebuildAppletTree();
-    });
     return page;
 }
 
-QWidget* QFramegrabberWidget::createCameraTab()
+std::unique_ptr<QFramegrabberWidget::CameraPage>
+QFramegrabberWidget::createCameraPage(
+    const Framegrabber::CameraControlCapability& capability)
 {
-    auto* page = new QWidget(this);
-    _cameraCombo = new QComboBox(page);
+    auto page = std::make_unique<CameraPage>();
+    page->capability = capability;
+    page->widget = new QWidget(this);
+    page->cameraCombo = new QComboBox(page->widget);
 
-    _refreshCamerasButton = new QToolButton(page);
-    _refreshCamerasButton->setIcon(
+    page->refreshButton = new QToolButton(page->widget);
+    page->refreshButton->setIcon(
         QIcon(QStringLiteral(":/Resources/Icons/icons8-refresh-48.png")));
-    _refreshCamerasButton->setToolTip(tr("Discover CXP cameras"));
+    page->refreshButton->setToolTip(
+        tr("Discover %1 cameras").arg(cameraTransportName(capability.transport)));
 
-    _connectCameraButton = new QToolButton(page);
-    _connectCameraButton->setIcon(
+    page->connectButton = new QToolButton(page->widget);
+    page->connectButton->setIcon(
         QIcon(QStringLiteral(":/Resources/Icons/icons8-connect-48.png")));
-    _connectCameraButton->setToolTip(tr("Connect selected CXP camera"));
+    page->connectButton->setToolTip(
+        tr("Connect selected %1 camera").arg(cameraTransportName(capability.transport)));
 
     auto* selectorLayout = new QHBoxLayout;
     selectorLayout->setObjectName(QStringLiteral("FramegrabberCameraSelectorLayout"));
-    selectorLayout->addWidget(_cameraCombo);
-    selectorLayout->addWidget(_refreshCamerasButton);
-    selectorLayout->addWidget(_connectCameraButton);
+    selectorLayout->addWidget(page->cameraCombo);
+    selectorLayout->addWidget(page->refreshButton);
+    selectorLayout->addWidget(page->connectButton);
 
-    _cameraTree = new QTreeWidget(page);
-    _cameraTree->setObjectName(QStringLiteral("FramegrabberCameraFeaturesTree"));
-    _cameraTree->setProperty("treeRole", QStringLiteral("DeviceFeatureTree"));
-    _cameraTree->setHeaderLabels({tr("Feature"), tr("Value")});
-    _cameraTree->header()->setSectionResizeMode(0, QHeaderView::Interactive);
-    _cameraTree->header()->setSectionResizeMode(1, QHeaderView::Stretch);
+    page->cameraTree = new QTreeWidget(page->widget);
+    page->cameraTree->setObjectName(QStringLiteral("FramegrabberCameraFeaturesTree"));
+    page->cameraTree->setProperty("treeRole", QStringLiteral("DeviceFeatureTree"));
+    page->cameraTree->setHeaderLabels({tr("Feature"), tr("Value")});
+    page->cameraTree->header()->setSectionResizeMode(0, QHeaderView::Interactive);
+    page->cameraTree->header()->setSectionResizeMode(1, QHeaderView::Stretch);
 
     auto* layout = new QVBoxLayout;
     layout->setObjectName(QStringLiteral("FramegrabberCameraLayout"));
     layout->addLayout(selectorLayout);
-    layout->addWidget(_cameraTree);
-    page->setLayout(layout);
+    layout->addWidget(page->cameraTree);
+    page->widget->setLayout(layout);
 
-    connect(_refreshCamerasButton, &QToolButton::clicked, this, [this]
+    CameraPage* pageState = page.get();
+    connect(page->refreshButton, &QToolButton::clicked, this, [this, pageState]
     {
-        startCameraRefresh();
+        startCameraRefresh(pageState->capability.transport);
     });
-    connect(_connectCameraButton, &QToolButton::clicked, this, [this]
+    connect(page->connectButton, &QToolButton::clicked, this, [this, pageState]
     {
-        if (!_framegrabber || _cameraCombo->currentIndex() < 0)
+        if (!_framegrabber || pageState->cameraCombo->currentIndex() < 0)
         {
             return;
         }
-        const unsigned int dmaIndex = _cameraCombo->currentData().toUInt();
-        if (_framegrabber->connectCamera(dmaIndex))
+        const unsigned int dmaIndex = pageState->cameraCombo->currentData().toUInt();
+        if (_framegrabber->connectCamera(pageState->capability.transport, dmaIndex))
         {
-            rebuildCameraTree();
-            showStatusMessage(tr("CXP camera connected."));
+            rebuildCameraTree(*pageState);
+            showStatusMessage(
+                tr("%1 camera connected.")
+                    .arg(cameraTransportName(pageState->capability.transport)));
         }
         else
         {
-            showStatusMessage(tr("Failed to connect the CXP camera."), true);
+            showStatusMessage(
+                tr("Failed to connect the %1 camera.")
+                    .arg(cameraTransportName(pageState->capability.transport)),
+                true);
         }
     });
-    connect(_cameraCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this]
+    connect(
+        page->cameraCombo,
+        QOverload<int>::of(&QComboBox::currentIndexChanged),
+        this,
+        [this, pageState]
     {
-        rebuildCameraTree();
-    });
-    return page;
-}
-
-QWidget* QFramegrabberWidget::createConfigurationTab()
-{
-    auto* page = new QWidget(this);
-    _configurationPathEdit = new QLineEdit(page);
-    _configurationPathEdit->setReadOnly(true);
-
-    _loadConfigurationButton = new QPushButton(tr("Load"), page);
-    _reloadConfigurationButton = new QPushButton(tr("Reload"), page);
-    _saveConfigurationButton = new QPushButton(tr("Save"), page);
-    _saveConfigurationAsButton = new QPushButton(tr("Save As"), page);
-
-    auto* pathLayout = new QHBoxLayout;
-    pathLayout->setObjectName(QStringLiteral("FramegrabberConfigurationPathLayout"));
-    pathLayout->addWidget(_configurationPathEdit);
-    pathLayout->addWidget(_loadConfigurationButton);
-
-    auto* actionLayout = new QHBoxLayout;
-    actionLayout->setObjectName(QStringLiteral("FramegrabberConfigurationActionLayout"));
-    actionLayout->addWidget(_reloadConfigurationButton);
-    actionLayout->addWidget(_saveConfigurationButton);
-    actionLayout->addWidget(_saveConfigurationAsButton);
-
-    _configurationStateLabel = new QLabel(tr("No configuration loaded"), page);
-    _configurationStateLabel->setObjectName(
-        QStringLiteral("FramegrabberConfigurationStateLabel"));
-    _configurationStateLabel->setProperty("state", "idle");
-
-    _bufferCountSpin = new QSpinBox(page);
-    _bufferCountSpin->setRange(1, 128);
-
-    auto* formLayout = new QFormLayout;
-    formLayout->setObjectName(QStringLiteral("FramegrabberConfigurationFormLayout"));
-    formLayout->addRow(tr("Configuration"), pathLayout);
-    formLayout->addRow(tr("DMA buffers"), _bufferCountSpin);
-    formLayout->addRow(QString(), actionLayout);
-    formLayout->addRow(tr("State"), _configurationStateLabel);
-    page->setLayout(formLayout);
-
-    connect(_loadConfigurationButton, &QPushButton::clicked, this, [this]
-    {
-        const QString path = QFileDialog::getOpenFileName(
-            this,
-            tr("Load frame grabber configuration"),
-            _configurationPathEdit->text(),
-            tr("Frame Grabber Configuration (*.mcf *.hap *.dll *.so);;All Files (*)"));
-        if (!path.isEmpty())
-        {
-            startConfigurationLoad(path);
-        }
-    });
-    connect(_reloadConfigurationButton, &QPushButton::clicked, this, [this]
-    {
-        if (!_configurationPathEdit->text().isEmpty())
-        {
-            startConfigurationLoad(_configurationPathEdit->text());
-        }
-    });
-    connect(_saveConfigurationButton, &QPushButton::clicked, this, [this]
-    {
-        if (!_framegrabber || _configurationPathEdit->text().isEmpty())
-        {
-            return;
-        }
-        if (_framegrabber->saveConfiguration(_configurationPathEdit->text().toStdString()))
-        {
-            markConfigurationDirty(false);
-            showStatusMessage(tr("Configuration saved."));
-        }
-        else
-        {
-            showStatusMessage(tr("Failed to save the configuration."), true);
-        }
-    });
-    connect(_saveConfigurationAsButton, &QPushButton::clicked, this, [this]
-    {
-        if (!_framegrabber)
-        {
-            return;
-        }
-        const QString path = QFileDialog::getSaveFileName(
-            this,
-            tr("Save frame grabber configuration"),
-            _configurationPathEdit->text(),
-            tr("MCF Configuration (*.mcf)"));
-        if (!path.isEmpty() && _framegrabber->saveConfiguration(path.toStdString()))
-        {
-            _configurationPathEdit->setText(path);
-            _framegrabber->setConfigurationPath(path.toStdString());
-            markConfigurationDirty(false);
-            showStatusMessage(tr("Configuration saved."));
-        }
-    });
-    connect(_bufferCountSpin, QOverload<int>::of(&QSpinBox::valueChanged), this, [this](const int count)
-    {
-        if (_framegrabber)
-        {
-            _framegrabber->setDMABufferCount(static_cast<std::size_t>(count));
-        }
+        rebuildCameraTree(*pageState);
     });
     return page;
 }
@@ -560,6 +501,7 @@ void QFramegrabberWidget::registerCallbacks()
                     if (status == Framegrabber::GrabbingStatus)
                     {
                         guard->updateGrabState(on);
+                        guard->rebuildAppletTree();
                     }
                     else if (!guard->_operationActive)
                     {
@@ -571,6 +513,7 @@ void QFramegrabberWidget::registerCallbacks()
 
     _nodeCallbackId = _framegrabber->registerNodeUpdatedCallback(
         [guard](const Framegrabber::FeatureSource source,
+                const Framegrabber::CameraTransport transport,
                 const unsigned int dmaIndex,
                 const std::string&)
         {
@@ -580,22 +523,24 @@ void QFramegrabberWidget::registerCallbacks()
             }
             QMetaObject::invokeMethod(
                 guard,
-                [guard, source, dmaIndex]
+                [guard, source, transport, dmaIndex]
                 {
                     if (!guard)
                     {
                         return;
                     }
-                    guard->markConfigurationDirty(true);
                     if (source == Framegrabber::FeatureSource::Applet
                         && guard->_appletDmaCombo->currentData().toUInt() == dmaIndex)
                     {
                         guard->rebuildAppletTree();
                     }
-                    else if (source == Framegrabber::FeatureSource::Camera
-                             && guard->_cameraCombo->currentData().toUInt() == dmaIndex)
+                    else if (source == Framegrabber::FeatureSource::Camera)
                     {
-                        guard->rebuildCameraTree();
+                        CameraPage* page = guard->cameraPage(transport);
+                        if (page && page->cameraCombo->currentData().toUInt() == dmaIndex)
+                        {
+                            guard->rebuildCameraTree(*page);
+                        }
                     }
                 },
                 Qt::QueuedConnection);
@@ -637,6 +582,51 @@ void QFramegrabberWidget::startBoardRefresh()
     worker->start();
 }
 
+void QFramegrabberWidget::startAppletLoad(const QString& path)
+{
+    if (!_framegrabber || _operationThread || _shuttingDown)
+    {
+        return;
+    }
+    if (_boardCombo->currentIndex() < 0)
+    {
+        showStatusMessage(tr("Select a frame grabber board first."), true);
+        return;
+    }
+
+    const QString boardName = _boardCombo->currentText();
+    const auto success = std::make_shared<bool>(false);
+    QPointer<QFramegrabberWidget> guard(this);
+    QThread* worker = QThread::create(
+        [framegrabber = _framegrabber, boardName, path, success]
+        {
+            *success = framegrabber->loadApplet(
+                path.toStdString(),
+                boardName.toStdString());
+        });
+    _operationThread = worker;
+    _connectionAttempted = true;
+    setOperationActive(true);
+    showStatusMessage(tr("Loading applet..."));
+    connect(worker, &QThread::finished, this, [guard, worker, success]
+    {
+        worker->deleteLater();
+        if (!guard)
+        {
+            return;
+        }
+        guard->_operationThread = nullptr;
+        guard->setOperationActive(false);
+        guard->_appletPathEdit->setText(
+            QString::fromStdString(guard->_framegrabber->appletPath()));
+        guard->applyConnectionState(guard->_framegrabber->isOpened());
+        guard->showStatusMessage(
+            *success ? tr("Applet loaded.") : tr("Failed to load the applet."),
+            !*success);
+    });
+    worker->start();
+}
+
 void QFramegrabberWidget::startOpenOperation(const bool open)
 {
     if (!_framegrabber || _operationThread || _shuttingDown)
@@ -646,11 +636,11 @@ void QFramegrabberWidget::startOpenOperation(const bool open)
         return;
     }
 
-    if (open && _configurationPathEdit->text().isEmpty())
+    if (open && _appletPathEdit->text().isEmpty())
     {
         QSignalBlocker blocker(_connectButton);
         _connectButton->setChecked(false);
-        showStatusMessage(tr("Load an applet or MCF configuration first."), true);
+        showStatusMessage(tr("Load an applet first."), true);
         return;
     }
 
@@ -686,7 +676,6 @@ void QFramegrabberWidget::startOpenOperation(const bool open)
         guard->applyConnectionState(open && *success);
         if (open && *success)
         {
-            guard->markConfigurationDirty(false);
             guard->showStatusMessage(tr("Frame grabber opened."));
         }
         else if (open)
@@ -701,24 +690,26 @@ void QFramegrabberWidget::startOpenOperation(const bool open)
     worker->start();
 }
 
-void QFramegrabberWidget::startConfigurationLoad(const QString& path)
+void QFramegrabberWidget::startCameraRefresh(
+    const Framegrabber::CameraTransport transport)
 {
-    if (!_framegrabber || _operationThread || _shuttingDown)
+    CameraPage* page = cameraPage(transport);
+    if (!_framegrabber || !page || _operationThread || _shuttingDown)
     {
         return;
     }
 
     const auto success = std::make_shared<bool>(false);
     QPointer<QFramegrabberWidget> guard(this);
-    QThread* worker = QThread::create(
-        [framegrabber = _framegrabber, path, success]
-        {
-            *success = framegrabber->loadConfiguration(path.toStdString());
-        });
+    QThread* worker = QThread::create([framegrabber = _framegrabber, transport, success]
+    {
+        *success = framegrabber->refreshCameras(transport);
+    });
     _operationThread = worker;
     setOperationActive(true);
-    showStatusMessage(tr("Loading configuration..."));
-    connect(worker, &QThread::finished, this, [guard, worker, path, success]
+    showStatusMessage(
+        tr("Scanning %1 cameras...").arg(cameraTransportName(transport)));
+    connect(worker, &QThread::finished, this, [guard, worker, transport, success]
     {
         worker->deleteLater();
         if (!guard)
@@ -727,49 +718,16 @@ void QFramegrabberWidget::startConfigurationLoad(const QString& path)
         }
         guard->_operationThread = nullptr;
         guard->setOperationActive(false);
-        if (*success)
-        {
-            guard->_configurationPathEdit->setText(path);
-            guard->markConfigurationDirty(false);
-            guard->applyConnectionState(guard->_framegrabber->isOpened());
-            guard->showStatusMessage(tr("Configuration loaded."));
-        }
-        else
-        {
-            guard->showStatusMessage(tr("Failed to load the configuration."), true);
-        }
-    });
-    worker->start();
-}
-
-void QFramegrabberWidget::startCameraRefresh()
-{
-    if (!_framegrabber || _operationThread || _shuttingDown)
-    {
-        return;
-    }
-
-    const auto success = std::make_shared<bool>(false);
-    QPointer<QFramegrabberWidget> guard(this);
-    QThread* worker = QThread::create([framegrabber = _framegrabber, success]
-    {
-        *success = framegrabber->refreshCameras();
-    });
-    _operationThread = worker;
-    setOperationActive(true);
-    showStatusMessage(tr("Scanning CXP cameras..."));
-    connect(worker, &QThread::finished, this, [guard, worker, success]
-    {
-        worker->deleteLater();
-        if (!guard)
+        CameraPage* currentPage = guard->cameraPage(transport);
+        if (!currentPage)
         {
             return;
         }
-        guard->_operationThread = nullptr;
-        guard->setOperationActive(false);
-        guard->refreshCameraSelector();
+        guard->refreshCameraSelector(*currentPage);
         guard->showStatusMessage(
-            *success ? tr("CXP camera scan finished.") : tr("CXP camera scan failed."),
+            *success
+                ? tr("%1 camera scan finished.").arg(cameraTransportName(transport))
+                : tr("%1 camera scan failed.").arg(cameraTransportName(transport)),
             !*success);
     });
     worker->start();
@@ -782,8 +740,14 @@ void QFramegrabberWidget::setOperationActive(const bool active)
     _boardCombo->setEnabled(!active && !opened);
     _refreshBoardsButton->setEnabled(!active && !opened);
     _connectButton->setEnabled(!active);
-    _loadConfigurationButton->setEnabled(!active && !_grabbing);
-    _reloadConfigurationButton->setEnabled(!active && !_grabbing);
+    _loadAppletButton->setEnabled(!active && !_grabbing);
+    for (const auto& page : _cameraPages)
+    {
+        page->refreshButton->setEnabled(
+            !active && opened && !_grabbing && page->capability.canDiscover);
+        page->connectButton->setEnabled(
+            !active && opened && !_grabbing && page->capability.canConnect);
+    }
 }
 
 void QFramegrabberWidget::applyConnectionState(const bool opened)
@@ -796,25 +760,20 @@ void QFramegrabberWidget::applyConnectionState(const bool opened)
     _refreshBoardsButton->setEnabled(!opened && !_operationActive);
     _grabOneButton->setEnabled(opened && !_grabbing);
     _grabLiveButton->setEnabled(opened);
-    _refreshAppletButton->setEnabled(opened);
-    _refreshCamerasButton->setEnabled(opened && !_grabbing);
-    _connectCameraButton->setEnabled(opened && !_grabbing);
-    _saveConfigurationButton->setEnabled(opened);
-    _saveConfigurationAsButton->setEnabled(opened);
 
     if (opened)
     {
         refreshDmaSelectors();
-        refreshCameraSelector();
+        rebuildCameraTabs();
         rebuildAppletTree();
     }
     else
     {
         _appletDmaCombo->clear();
-        _cameraCombo->clear();
         _appletTree->clear();
-        _cameraTree->clear();
+        clearCameraTabs();
     }
+    setOperationActive(_operationActive);
     updateStatusBubble();
 }
 
@@ -826,10 +785,14 @@ void QFramegrabberWidget::updateGrabState(const bool grabbing)
         _grabLiveButton->setChecked(grabbing);
     }
     _grabOneButton->setEnabled(_framegrabber && _framegrabber->isOpened() && !grabbing);
-    _loadConfigurationButton->setEnabled(!grabbing && !_operationActive);
-    _reloadConfigurationButton->setEnabled(!grabbing && !_operationActive);
-    _refreshCamerasButton->setEnabled(!grabbing && !_operationActive);
-    _connectCameraButton->setEnabled(!grabbing && !_operationActive);
+    _loadAppletButton->setEnabled(!grabbing && !_operationActive);
+    for (const auto& page : _cameraPages)
+    {
+        page->refreshButton->setEnabled(
+            !grabbing && !_operationActive && page->capability.canDiscover);
+        page->connectButton->setEnabled(
+            !grabbing && !_operationActive && page->capability.canConnect);
+    }
     updateStatusBubble();
 }
 
@@ -876,26 +839,79 @@ void QFramegrabberWidget::refreshDmaSelectors()
     }
 }
 
-void QFramegrabberWidget::refreshCameraSelector()
+void QFramegrabberWidget::rebuildCameraTabs()
 {
-    const QVariant previous = _cameraCombo->currentData();
-    _cameraCombo->clear();
+    clearCameraTabs();
     if (!_framegrabber)
     {
         return;
     }
-    for (const Framegrabber::CameraInfo& camera : _framegrabber->getCachedCameraList())
+
+    const auto capabilities = _framegrabber->cameraControlCapabilities();
+    for (const Framegrabber::CameraControlCapability& capability : capabilities)
     {
-        _cameraCombo->addItem(
+        if (capability.transport == Framegrabber::CameraTransport::None)
+        {
+            continue;
+        }
+        auto page = createCameraPage(capability);
+        CameraPage* pageState = page.get();
+        _tabs->addTab(
+            page->widget,
+            tr("%1 Camera").arg(cameraTransportName(capability.transport)));
+        _cameraPages.push_back(std::move(page));
+        refreshCameraSelector(*pageState);
+    }
+}
+
+void QFramegrabberWidget::clearCameraTabs()
+{
+    for (const auto& page : _cameraPages)
+    {
+        const int index = _tabs->indexOf(page->widget);
+        if (index >= 0)
+        {
+            _tabs->removeTab(index);
+        }
+        delete page->widget;
+    }
+    _cameraPages.clear();
+}
+
+QFramegrabberWidget::CameraPage*
+QFramegrabberWidget::cameraPage(const Framegrabber::CameraTransport transport) const
+{
+    for (const auto& page : _cameraPages)
+    {
+        if (page->capability.transport == transport)
+        {
+            return page.get();
+        }
+    }
+    return nullptr;
+}
+
+void QFramegrabberWidget::refreshCameraSelector(CameraPage& page)
+{
+    const QVariant previous = page.cameraCombo->currentData();
+    page.cameraCombo->clear();
+    if (!_framegrabber)
+    {
+        return;
+    }
+    for (const Framegrabber::CameraInfo& camera :
+         _framegrabber->getCachedCameraList(page.capability.transport))
+    {
+        page.cameraCombo->addItem(
             tr("DMA %1 - %2")
                 .arg(camera.dmaIndex)
                 .arg(QString::fromStdString(camera.displayName())),
             camera.dmaIndex);
     }
-    const int previousIndex = _cameraCombo->findData(previous);
+    const int previousIndex = page.cameraCombo->findData(previous);
     if (previousIndex >= 0)
     {
-        _cameraCombo->setCurrentIndex(previousIndex);
+        page.cameraCombo->setCurrentIndex(previousIndex);
     }
 }
 
@@ -908,35 +924,257 @@ void QFramegrabberWidget::rebuildAppletTree()
         return;
     }
     const unsigned int dmaIndex = _appletDmaCombo->currentData().toUInt();
+    const auto model = _framegrabber->getAppletFeatureModel(dmaIndex);
+    if (!model.empty())
+    {
+        populateAppletFeatureTree(_appletTree, model, dmaIndex);
+        return;
+    }
+
     populateFeatureTree(
         _appletTree,
         QString::fromUtf8(_framegrabber->getAppletFeatureXml(dmaIndex).c_str()),
         TreeSource::Applet,
+        Framegrabber::CameraTransport::None,
         dmaIndex);
 }
 
-void QFramegrabberWidget::rebuildCameraTree()
+void QFramegrabberWidget::rebuildCameraTree(CameraPage& page)
 {
     if (!_framegrabber || !_framegrabber->isOpened()
-        || _cameraCombo->currentIndex() < 0)
+        || !page.capability.canReadFeatures
+        || page.cameraCombo->currentIndex() < 0)
     {
-        _cameraTree->clear();
+        page.cameraTree->clear();
         return;
     }
-    const unsigned int dmaIndex = _cameraCombo->currentData().toUInt();
+    const unsigned int dmaIndex = page.cameraCombo->currentData().toUInt();
     const QString xml = QString::fromUtf8(
-        _framegrabber->getCameraFeatureXml(dmaIndex).c_str());
+        _framegrabber->getCameraFeatureXml(
+            page.capability.transport,
+            dmaIndex).c_str());
     if (xml.isEmpty())
     {
-        _cameraTree->clear();
+        page.cameraTree->clear();
         return;
     }
-    populateFeatureTree(_cameraTree, xml, TreeSource::Camera, dmaIndex);
+    populateFeatureTree(
+        page.cameraTree,
+        xml,
+        TreeSource::Camera,
+        page.capability.transport,
+        dmaIndex);
+}
+
+void QFramegrabberWidget::populateAppletFeatureTree(
+    QTreeWidget* tree,
+    const std::vector<Framegrabber::AppletFeatureNode>& nodes,
+    const unsigned int dmaIndex)
+{
+    const TreeState state = captureTreeState(tree);
+    tree->clear();
+    for (const Framegrabber::AppletFeatureNode& node : nodes)
+    {
+        addAppletFeatureNode(tree, nullptr, node, dmaIndex);
+    }
+    restoreTreeState(tree, state);
+}
+
+void QFramegrabberWidget::addAppletFeatureNode(
+    QTreeWidget* tree,
+    QTreeWidgetItem* parent,
+    const Framegrabber::AppletFeatureNode& node,
+    const unsigned int dmaIndex)
+{
+    QTreeWidgetItem* item = parent
+                                ? new QTreeWidgetItem(parent)
+                                : new QTreeWidgetItem(tree);
+    const QString name = QString::fromStdString(node.name);
+    const QString displayName = QString::fromStdString(node.displayName);
+    item->setText(0, displayName.isEmpty() ? name : displayName);
+    item->setData(0, Qt::UserRole, name);
+
+    QString toolTip = QString::fromStdString(node.toolTip);
+    const QString description = QString::fromStdString(node.description);
+    if (toolTip.isEmpty())
+    {
+        toolTip = description;
+    }
+    else if (!description.isEmpty() && description != toolTip)
+    {
+        toolTip += QStringLiteral("\n\n") + description;
+    }
+    item->setToolTip(0, toolTip);
+
+    if (node.kind == Framegrabber::AppletFeatureKind::Category)
+    {
+        for (const Framegrabber::AppletFeatureNode& child : node.children)
+        {
+            addAppletFeatureNode(tree, item, child, dmaIndex);
+        }
+        return;
+    }
+
+    if (QWidget* editor = createAppletFeatureEditor(node, dmaIndex))
+    {
+        editor->setToolTip(toolTip);
+        tree->setItemWidget(item, 1, editor);
+    }
+}
+
+QWidget* QFramegrabberWidget::createAppletFeatureEditor(
+    const Framegrabber::AppletFeatureNode& node,
+    const unsigned int dmaIndex)
+{
+    const QString featureName = QString::fromStdString(
+        node.accessName.empty() ? node.name : node.accessName);
+    Framegrabber::ParameterValue current = std::int64_t{0};
+    if (node.kind == Framegrabber::AppletFeatureKind::Float)
+    {
+        current = 0.0;
+    }
+    else if (node.kind == Framegrabber::AppletFeatureKind::Boolean)
+    {
+        current = std::uint32_t{0};
+    }
+    else if (node.kind == Framegrabber::AppletFeatureKind::String
+             || node.kind == Framegrabber::AppletFeatureKind::Enumeration)
+    {
+        current = std::string{};
+    }
+
+    if (node.kind != Framegrabber::AppletFeatureKind::Command
+        && node.parameterId < 0)
+    {
+        return new QLabel(tr("Unbound"), this);
+    }
+    if (node.kind != Framegrabber::AppletFeatureKind::Command
+        && !_framegrabber->getAppletParameterById(
+            node.parameterId,
+            dmaIndex,
+            current,
+            false))
+    {
+        return new QLabel(tr("Read failed"), this);
+    }
+
+    if (node.kind == Framegrabber::AppletFeatureKind::Boolean)
+    {
+        auto* checkBox = new QCheckBox(this);
+        checkBox->setChecked(std::visit(
+            [](const auto& value)
+            {
+                using T = std::decay_t<decltype(value)>;
+                if constexpr (std::is_integral_v<T>)
+                {
+                    return value != 0;
+                }
+                return false;
+            },
+            current));
+        checkBox->setEnabled(node.writable);
+        connect(checkBox, &QCheckBox::toggled, this, [=](const bool value)
+        {
+            Framegrabber::ParameterValue updated = current;
+            std::visit(
+                [value](auto& typed)
+                {
+                    using T = std::decay_t<decltype(typed)>;
+                    if constexpr (std::is_integral_v<T>)
+                    {
+                        typed = static_cast<T>(value ? 1 : 0);
+                    }
+                },
+                updated);
+            if (!_framegrabber->setAppletParameterById(
+                    node.parameterId,
+                    dmaIndex,
+                    updated))
+            {
+                QSignalBlocker blocker(checkBox);
+                checkBox->setChecked(!value);
+            }
+        });
+        return checkBox;
+    }
+
+    if (node.kind == Framegrabber::AppletFeatureKind::Enumeration)
+    {
+        auto* combo = new QComboBox(this);
+        for (const Framegrabber::AppletEnumEntry& entry : node.enumEntries)
+        {
+            const QString name = QString::fromStdString(entry.name);
+            const QString displayName = QString::fromStdString(entry.displayName);
+            combo->addItem(
+                displayName.isEmpty() ? name : displayName,
+                QString::number(entry.value));
+        }
+        const int currentIndex = combo->findData(valueText(current));
+        if (currentIndex >= 0)
+        {
+            combo->setCurrentIndex(currentIndex);
+        }
+        combo->setEnabled(node.writable);
+        connect(combo, &QComboBox::currentTextChanged, this, [=]
+        {
+            Framegrabber::ParameterValue updated = current;
+            if (updateValueFromText(updated, combo->currentData().toString()))
+            {
+                _framegrabber->setAppletParameterById(
+                    node.parameterId,
+                    dmaIndex,
+                    updated);
+            }
+        });
+        return combo;
+    }
+
+    if (node.kind == Framegrabber::AppletFeatureKind::Command)
+    {
+        auto* button = new QPushButton(tr("Execute"), this);
+        button->setEnabled(node.writable);
+        connect(button, &QPushButton::clicked, this, [=]
+        {
+            const bool success = _framegrabber
+                && node.parameterId >= 0
+                && _framegrabber->executeAppletCommandById(
+                    dmaIndex,
+                    node.parameterId);
+            showStatusMessage(
+                success ? tr("Command executed.") : tr("Command execution failed."),
+                !success);
+        });
+        return button;
+    }
+
+    auto* edit = new QLineEdit(valueText(current), this);
+    edit->setEnabled(node.writable);
+    connect(edit, &QLineEdit::editingFinished, this, [=]() mutable
+    {
+        Framegrabber::ParameterValue updated = current;
+        if (!updateValueFromText(updated, edit->text())
+            || !_framegrabber->setAppletParameterById(
+                node.parameterId,
+                dmaIndex,
+                updated))
+        {
+            QSignalBlocker blocker(edit);
+            edit->setText(valueText(current));
+            showStatusMessage(tr("Failed to update '%1'.").arg(featureName), true);
+        }
+        else
+        {
+            current = std::move(updated);
+            showStatusMessage(tr("Updated '%1'.").arg(featureName));
+        }
+    });
+    return edit;
 }
 
 void QFramegrabberWidget::populateFeatureTree(QTreeWidget* tree,
                                               const QString& xml,
                                               const TreeSource source,
+                                              const Framegrabber::CameraTransport transport,
                                               const unsigned int dmaIndex)
 {
     const TreeState state = captureTreeState(tree);
@@ -958,7 +1196,15 @@ void QFramegrabberWidget::populateFeatureTree(QTreeWidget* tree,
     QDomElement rootCategory = findCategoryElement(root, QStringLiteral("Root"));
     if (!rootCategory.isNull())
     {
-        addCategory(tree, nullptr, root, rootCategory, source, dmaIndex, visiting);
+        addCategory(
+            tree,
+            nullptr,
+            root,
+            rootCategory,
+            source,
+            transport,
+            dmaIndex,
+            visiting);
     }
     else
     {
@@ -969,7 +1215,15 @@ void QFramegrabberWidget::populateFeatureTree(QTreeWidget* tree,
             if (!category.parentNode().toElement().isNull()
                 && category.parentNode().toElement().tagName() == QStringLiteral("Categories"))
             {
-                addCategory(tree, nullptr, root, category, source, dmaIndex, visiting);
+                addCategory(
+                    tree,
+                    nullptr,
+                    root,
+                    category,
+                    source,
+                    transport,
+                    dmaIndex,
+                    visiting);
             }
         }
     }
@@ -981,6 +1235,7 @@ void QFramegrabberWidget::addCategory(QTreeWidget* tree,
                                       const QDomElement& root,
                                       const QDomElement& category,
                                       const TreeSource source,
+                                      const Framegrabber::CameraTransport transport,
                                       const unsigned int dmaIndex,
                                       QSet<QString>& visiting)
 {
@@ -1015,6 +1270,7 @@ void QFramegrabberWidget::addCategory(QTreeWidget* tree,
                 root,
                 childCategory,
                 source,
+                transport,
                 dmaIndex,
                 visiting);
             continue;
@@ -1030,7 +1286,8 @@ void QFramegrabberWidget::addCategory(QTreeWidget* tree,
                                     : new QTreeWidgetItem(tree);
         item->setText(0, featureDisplayName(feature, featureName));
         item->setData(0, Qt::UserRole, featureName);
-        if (QWidget* editor = createFeatureEditor(feature, featureName, source, dmaIndex))
+        if (QWidget* editor =
+                createFeatureEditor(feature, featureName, source, transport, dmaIndex))
         {
             tree->setItemWidget(item, 1, editor);
         }
@@ -1041,6 +1298,7 @@ void QFramegrabberWidget::addCategory(QTreeWidget* tree,
 QWidget* QFramegrabberWidget::createFeatureEditor(const QDomElement& node,
                                                   const QString& featureName,
                                                   const TreeSource source,
+                                                  const Framegrabber::CameraTransport transport,
                                                   const unsigned int dmaIndex)
 {
     const QString tag = node.tagName();
@@ -1059,7 +1317,7 @@ QWidget* QFramegrabberWidget::createFeatureEditor(const QDomElement& node,
     {
         current = std::string{};
     }
-    if (!readFeature(source, dmaIndex, featureName, current)
+    if (!readFeature(source, transport, dmaIndex, featureName, current)
         && tag != QStringLiteral("Command"))
     {
         return new QLabel(tr("Unavailable"), this);
@@ -1093,7 +1351,7 @@ QWidget* QFramegrabberWidget::createFeatureEditor(const QDomElement& node,
                     }
                 },
                 updated);
-            if (!writeFeature(source, dmaIndex, featureName, updated))
+            if (!writeFeature(source, transport, dmaIndex, featureName, updated))
             {
                 QSignalBlocker blocker(checkBox);
                 checkBox->setChecked(!value);
@@ -1140,7 +1398,7 @@ QWidget* QFramegrabberWidget::createFeatureEditor(const QDomElement& node,
             {
                 updated = combo->currentData().toString().toStdString();
             }
-            writeFeature(source, dmaIndex, featureName, updated);
+            writeFeature(source, transport, dmaIndex, featureName, updated);
         });
         return combo;
     }
@@ -1154,6 +1412,7 @@ QWidget* QFramegrabberWidget::createFeatureEditor(const QDomElement& node,
             if (_framegrabber && source == TreeSource::Camera)
             {
                 success = _framegrabber->executeCameraCommand(
+                    transport,
                     dmaIndex,
                     featureName.toStdString());
             }
@@ -1175,7 +1434,7 @@ QWidget* QFramegrabberWidget::createFeatureEditor(const QDomElement& node,
     {
         Framegrabber::ParameterValue updated = current;
         if (!updateValueFromText(updated, edit->text())
-            || !writeFeature(source, dmaIndex, featureName, updated))
+            || !writeFeature(source, transport, dmaIndex, featureName, updated))
         {
             QSignalBlocker blocker(edit);
             edit->setText(valueText(current));
@@ -1191,6 +1450,7 @@ QWidget* QFramegrabberWidget::createFeatureEditor(const QDomElement& node,
 }
 
 bool QFramegrabberWidget::readFeature(const TreeSource source,
+                                      const Framegrabber::CameraTransport transport,
                                       const unsigned int dmaIndex,
                                       const QString& name,
                                       Framegrabber::ParameterValue& value) const
@@ -1208,13 +1468,14 @@ bool QFramegrabberWidget::readFeature(const TreeSource source,
             true);
     }
     return _framegrabber->getCameraFeature(
-        Framegrabber::FeatureSource::Camera,
+        transport,
         dmaIndex,
         name.toStdString(),
         value);
 }
 
 bool QFramegrabberWidget::writeFeature(const TreeSource source,
+                                       const Framegrabber::CameraTransport transport,
                                        const unsigned int dmaIndex,
                                        const QString& name,
                                        const Framegrabber::ParameterValue& value)
@@ -1231,7 +1492,7 @@ bool QFramegrabberWidget::writeFeature(const TreeSource source,
             value);
     }
     return _framegrabber->setCameraFeature(
-        Framegrabber::FeatureSource::Camera,
+        transport,
         dmaIndex,
         name.toStdString(),
         value);
@@ -1248,11 +1509,19 @@ QFramegrabberWidget::TreeState QFramegrabberWidget::captureTreeState(QTreeWidget
     {
         state.currentNode = tree->currentItem()->data(0, Qt::UserRole).toString();
     }
+    state.verticalScrollValue = tree->verticalScrollBar()->value();
+    state.horizontalScrollValue = tree->horizontalScrollBar()->value();
+    if (QTreeWidgetItem* topItem = tree->itemAt(tree->viewport()->rect().topLeft()))
+    {
+        state.topVisibleNode = topItem->data(0, Qt::UserRole).toString();
+        state.topVisibleOffset = tree->visualItemRect(topItem).top();
+    }
     return state;
 }
 
 void QFramegrabberWidget::restoreTreeState(QTreeWidget* tree, const TreeState& state)
 {
+    QTreeWidgetItem* topVisibleItem = nullptr;
     QList<QTreeWidgetItem*> stack;
     for (int index = 0; index < tree->topLevelItemCount(); ++index)
     {
@@ -1267,11 +1536,28 @@ void QFramegrabberWidget::restoreTreeState(QTreeWidget* tree, const TreeState& s
         {
             tree->setCurrentItem(item);
         }
+        if (!state.topVisibleNode.isEmpty() && state.topVisibleNode == name)
+        {
+            topVisibleItem = item;
+        }
         for (int index = 0; index < item->childCount(); ++index)
         {
             stack.push_back(item->child(index));
         }
     }
+    if (topVisibleItem)
+    {
+        tree->scrollToItem(topVisibleItem, QAbstractItemView::PositionAtTop);
+        const int offsetDelta =
+            tree->visualItemRect(topVisibleItem).top() - state.topVisibleOffset;
+        tree->verticalScrollBar()->setValue(
+            tree->verticalScrollBar()->value() + offsetDelta);
+    }
+    else
+    {
+        tree->verticalScrollBar()->setValue(state.verticalScrollValue);
+    }
+    tree->horizontalScrollBar()->setValue(state.horizontalScrollValue);
 }
 
 void QFramegrabberWidget::collectExpandedNodes(QTreeWidgetItem* item,
@@ -1289,28 +1575,6 @@ void QFramegrabberWidget::collectExpandedNodes(QTreeWidgetItem* item,
     {
         collectExpandedNodes(item->child(index), nodes);
     }
-}
-
-void QFramegrabberWidget::markConfigurationDirty(const bool dirty)
-{
-    _configurationDirty = dirty;
-    if (_configurationPathEdit->text().isEmpty())
-    {
-        _configurationStateLabel->setText(tr("No configuration loaded"));
-        _configurationStateLabel->setProperty("state", "idle");
-    }
-    else if (dirty)
-    {
-        _configurationStateLabel->setText(tr("Modified"));
-        _configurationStateLabel->setProperty("state", "warning");
-    }
-    else
-    {
-        _configurationStateLabel->setText(tr("Saved"));
-        _configurationStateLabel->setProperty("state", "normal");
-    }
-    _configurationStateLabel->style()->unpolish(_configurationStateLabel);
-    _configurationStateLabel->style()->polish(_configurationStateLabel);
 }
 
 void QFramegrabberWidget::showStatusMessage(const QString& message, const bool error)

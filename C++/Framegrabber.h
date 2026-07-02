@@ -3,7 +3,7 @@
 
 /**
  * @file Framegrabber.h
- * @brief Wrapper for one Basler frame grabber board, acquisition channels, and CXP cameras.
+ * @brief Wrapper for one Basler frame grabber board, acquisition channels, and cameras.
  *
  * The module owns every SDK handle and DMA buffer. Consumers receive an owning
  * Image value and never need to include or retain a raw SDK image pointer.
@@ -81,6 +81,21 @@ public:
         Camera
     };
 
+    enum class CameraTransport
+    {
+        None,
+        CoaXPress,
+        CameraLink
+    };
+
+    struct CameraControlCapability
+    {
+        CameraTransport transport = CameraTransport::None;
+        bool canDiscover = false;
+        bool canConnect = false;
+        bool canReadFeatures = false;
+    };
+
     using ParameterValue = std::variant<std::int32_t,
                                         std::uint32_t,
                                         std::int64_t,
@@ -90,6 +105,7 @@ public:
 
     struct CameraInfo
     {
+        CameraTransport transport = CameraTransport::None;
         unsigned int dmaIndex = 0;
         std::string vendor;
         std::string model;
@@ -97,6 +113,40 @@ public:
         bool connected = false;
 
         [[nodiscard]] std::string displayName() const;
+    };
+
+    enum class AppletFeatureKind
+    {
+        Category,
+        Integer,
+        Float,
+        Boolean,
+        String,
+        Enumeration,
+        Command,
+        Unknown
+    };
+
+    struct AppletEnumEntry
+    {
+        std::string name;
+        std::string displayName;
+        std::int64_t value = 0;
+    };
+
+    struct AppletFeatureNode
+    {
+        std::string name;
+        std::string accessName;
+        std::string displayName;
+        std::string toolTip;
+        std::string description;
+        std::int64_t parameterId = -1;
+        AppletFeatureKind kind = AppletFeatureKind::Unknown;
+        bool readable = true;
+        bool writable = false;
+        std::vector<AppletEnumEntry> enumEntries;
+        std::vector<AppletFeatureNode> children;
     };
 
     explicit Framegrabber(FramegrabberSystem* parent, int allottedNumber = 0);
@@ -116,15 +166,19 @@ public:
     void clearGrabCallbacks();
 
     using NodeCallback = std::function<void(FeatureSource source,
+                                            CameraTransport transport,
                                             unsigned int dmaIndex,
                                             const std::string& nodeName)>;
     CallbackId registerNodeUpdatedCallback(NodeCallback callback);
     bool deregisterNodeUpdatedCallback(CallbackId id);
     void clearNodeUpdatedCallbacks();
 
+    void setAppletPath(std::string path);
+    [[nodiscard]] std::string appletPath() const;
     void setConfigurationPath(std::string path);
     [[nodiscard]] std::string configurationPath() const;
 
+    bool loadApplet(const std::string& path, const std::string& boardName = "");
     bool open(const std::string& boardName = "");
     [[nodiscard]] bool isOpened() const;
     void close();
@@ -147,30 +201,47 @@ public:
     [[nodiscard]] std::size_t dmaBufferCount() const;
 
     [[nodiscard]] std::string getAppletFeatureXml(unsigned int dmaIndex) const;
+    [[nodiscard]] std::vector<AppletFeatureNode> getAppletFeatureModel(
+        unsigned int dmaIndex) const;
     bool getAppletParameter(const std::string& name,
                             unsigned int dmaIndex,
                             ParameterValue& value,
                             bool silent = false) const;
+    bool getAppletParameterById(std::int64_t parameterId,
+                                unsigned int dmaIndex,
+                                ParameterValue& value,
+                                bool silent = false) const;
     bool setAppletParameter(const std::string& name,
                             unsigned int dmaIndex,
                             const ParameterValue& value,
-                            bool silent = false);
+                            bool silent = false,
+                            bool verifyReadBack = true);
+    bool setAppletParameterById(std::int64_t parameterId,
+                                unsigned int dmaIndex,
+                                const ParameterValue& value,
+                                bool silent = false,
+                                bool verifyReadBack = true);
     bool executeAppletCommand(unsigned int dmaIndex, const std::string& name);
+    bool executeAppletCommandById(unsigned int dmaIndex, std::int64_t parameterId);
 
-    bool refreshCameras();
-    [[nodiscard]] std::vector<CameraInfo> getCachedCameraList() const;
-    bool connectCamera(unsigned int dmaIndex);
-    void disconnectCamera(unsigned int dmaIndex);
-    [[nodiscard]] std::string getCameraFeatureXml(unsigned int dmaIndex) const;
-    bool getCameraFeature(FeatureSource source,
+    [[nodiscard]] std::vector<CameraControlCapability> cameraControlCapabilities() const;
+    bool refreshCameras(CameraTransport transport);
+    [[nodiscard]] std::vector<CameraInfo> getCachedCameraList(CameraTransport transport) const;
+    bool connectCamera(CameraTransport transport, unsigned int dmaIndex);
+    void disconnectCamera(CameraTransport transport, unsigned int dmaIndex);
+    [[nodiscard]] std::string getCameraFeatureXml(CameraTransport transport,
+                                                  unsigned int dmaIndex) const;
+    bool getCameraFeature(CameraTransport transport,
                           unsigned int dmaIndex,
                           const std::string& name,
                           ParameterValue& value) const;
-    bool setCameraFeature(FeatureSource source,
+    bool setCameraFeature(CameraTransport transport,
                           unsigned int dmaIndex,
                           const std::string& name,
                           const ParameterValue& value);
-    bool executeCameraCommand(unsigned int dmaIndex, const std::string& name);
+    bool executeCameraCommand(CameraTransport transport,
+                              unsigned int dmaIndex,
+                              const std::string& name);
 
 private:
     struct DmaChannel;
@@ -185,12 +256,13 @@ private:
     mutable std::mutex _stateMutex;
     Fg_Struct* _handle = nullptr;
     SgcBoardHandle* _cxpBoard = nullptr;
+    std::string _appletPath;
     std::string _configurationPath;
     std::string _connectedBoardName;
     unsigned int _boardIndex = 0;
     std::size_t _dmaBufferCount = 4;
     std::vector<std::unique_ptr<DmaChannel>> _channels;
-    std::vector<CameraEntry> _cameras;
+    std::vector<CameraEntry> _cxpCameras;
 
     std::atomic<bool> _isRunning{false};
     std::atomic<std::uint64_t> _frameSeq{0};
@@ -208,20 +280,31 @@ private:
     CallbackMap<NodeCallback> _nodeCallbacks;
     std::atomic<CallbackId> _nextNodeCallbackId{1};
 
+    mutable std::mutex _appletFeatureModelMutex;
+    mutable std::unordered_map<unsigned int, std::vector<AppletFeatureNode>>
+        _appletFeatureModels;
+
     static PixelFormat toPixelFormat(int sdkFormat);
     static int bytesPerPixel(int sdkFormat);
 
     bool openResolvedBoard(const std::string& boardName,
                            unsigned int boardIndex,
-                           const std::string& configurationPath);
+                           const std::string& appletPath);
     void releaseHandles();
     void startChannel(unsigned int dmaIndex, std::size_t frames);
     void finishChannel(DmaChannel& channel);
-    CameraEntry* findCamera(unsigned int dmaIndex);
-    const CameraEntry* findCamera(unsigned int dmaIndex) const;
+    void clearAppletFeatureModels();
+    void clearAppletFeatureModel(unsigned int dmaIndex);
+    void refreshAppletFeatureAccess(std::vector<AppletFeatureNode>& model,
+                                    unsigned int dmaIndex) const;
+    CameraEntry* findCamera(CameraTransport transport, unsigned int dmaIndex);
+    const CameraEntry* findCamera(CameraTransport transport, unsigned int dmaIndex) const;
 
     void notifyStatus(Status status, bool on);
-    void notifyNode(FeatureSource source, unsigned int dmaIndex, const std::string& nodeName);
+    void notifyNode(FeatureSource source,
+                    CameraTransport transport,
+                    unsigned int dmaIndex,
+                    const std::string& nodeName);
     void log(const std::string& message, bool warning = false) const;
 };
 

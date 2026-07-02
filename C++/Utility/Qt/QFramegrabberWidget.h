@@ -14,13 +14,16 @@
 #include <QSet>
 #include <QWidget>
 
+#include <memory>
+#include <vector>
+
 class QComboBox;
 class QDomElement;
 class QLabel;
 class QLineEdit;
 class QPushButton;
-class QSpinBox;
 class QStatusBar;
+class QTabWidget;
 class QThread;
 class QToolButton;
 class QTreeWidget;
@@ -47,6 +50,20 @@ private:
     {
         QSet<QString> expandedNodes;
         QString currentNode;
+        QString topVisibleNode;
+        int topVisibleOffset = 0;
+        int verticalScrollValue = 0;
+        int horizontalScrollValue = 0;
+    };
+
+    struct CameraPage
+    {
+        Framegrabber::CameraControlCapability capability;
+        QWidget* widget = nullptr;
+        QComboBox* cameraCombo = nullptr;
+        QTreeWidget* cameraTree = nullptr;
+        QToolButton* refreshButton = nullptr;
+        QToolButton* connectButton = nullptr;
     };
 
     Framegrabber* _framegrabber = nullptr;
@@ -57,7 +74,6 @@ private:
     bool _operationActive = false;
     bool _connectionAttempted = false;
     bool _grabbing = false;
-    bool _configurationDirty = false;
 
     QComboBox* _boardCombo = nullptr;
     QToolButton* _refreshBoardsButton = nullptr;
@@ -67,64 +83,74 @@ private:
 
     QComboBox* _appletDmaCombo = nullptr;
     QTreeWidget* _appletTree = nullptr;
-    QToolButton* _refreshAppletButton = nullptr;
+    QLineEdit* _appletPathEdit = nullptr;
+    QPushButton* _loadAppletButton = nullptr;
 
-    QComboBox* _cameraCombo = nullptr;
-    QTreeWidget* _cameraTree = nullptr;
-    QToolButton* _refreshCamerasButton = nullptr;
-    QToolButton* _connectCameraButton = nullptr;
-
-    QLineEdit* _configurationPathEdit = nullptr;
-    QPushButton* _loadConfigurationButton = nullptr;
-    QPushButton* _reloadConfigurationButton = nullptr;
-    QPushButton* _saveConfigurationButton = nullptr;
-    QPushButton* _saveConfigurationAsButton = nullptr;
-    QLabel* _configurationStateLabel = nullptr;
-    QSpinBox* _bufferCountSpin = nullptr;
+    QTabWidget* _tabs = nullptr;
+    std::vector<std::unique_ptr<CameraPage>> _cameraPages;
 
     QStatusBar* _statusBar = nullptr;
     QLabel* _statusLabel = nullptr;
     QLabel* _messageLabel = nullptr;
 
     void buildUi();
-    QWidget* createAppletTab();
-    QWidget* createCameraTab();
-    QWidget* createConfigurationTab();
+    QWidget* createSetupTab();
+    std::unique_ptr<CameraPage> createCameraPage(
+        const Framegrabber::CameraControlCapability& capability);
     void registerCallbacks();
 
     void startBoardRefresh();
+    void startAppletLoad(const QString& path);
     void startOpenOperation(bool open);
-    void startConfigurationLoad(const QString& path);
-    void startCameraRefresh();
+    void startCameraRefresh(Framegrabber::CameraTransport transport);
     void setOperationActive(bool active);
     void applyConnectionState(bool opened);
     void updateGrabState(bool grabbing);
     void updateStatusBubble();
     void refreshDmaSelectors();
-    void refreshCameraSelector();
+    void rebuildCameraTabs();
+    void clearCameraTabs();
+    CameraPage* cameraPage(Framegrabber::CameraTransport transport) const;
+    void refreshCameraSelector(CameraPage& page);
 
     void rebuildAppletTree();
-    void rebuildCameraTree();
+    void rebuildCameraTree(CameraPage& page);
+    void populateAppletFeatureTree(
+        QTreeWidget* tree,
+        const std::vector<Framegrabber::AppletFeatureNode>& nodes,
+        unsigned int dmaIndex);
+    void addAppletFeatureNode(QTreeWidget* tree,
+                              QTreeWidgetItem* parent,
+                              const Framegrabber::AppletFeatureNode& node,
+                              unsigned int dmaIndex);
+    QWidget* createAppletFeatureEditor(
+        const Framegrabber::AppletFeatureNode& node,
+        unsigned int dmaIndex);
     void populateFeatureTree(QTreeWidget* tree,
                              const QString& xml,
                              TreeSource source,
+                             Framegrabber::CameraTransport transport,
                              unsigned int dmaIndex);
     void addCategory(QTreeWidget* tree,
                      QTreeWidgetItem* parent,
                      const QDomElement& root,
                      const QDomElement& category,
                      TreeSource source,
+                     Framegrabber::CameraTransport transport,
                      unsigned int dmaIndex,
                      QSet<QString>& visiting);
     QWidget* createFeatureEditor(const QDomElement& node,
                                  const QString& featureName,
                                  TreeSource source,
+                                 Framegrabber::CameraTransport transport,
                                  unsigned int dmaIndex);
     bool readFeature(TreeSource source,
+                     Framegrabber::CameraTransport transport,
                      unsigned int dmaIndex,
                      const QString& name,
                      Framegrabber::ParameterValue& value) const;
     bool writeFeature(TreeSource source,
+                      Framegrabber::CameraTransport transport,
                       unsigned int dmaIndex,
                       const QString& name,
                       const Framegrabber::ParameterValue& value);
@@ -132,7 +158,6 @@ private:
     TreeState captureTreeState(QTreeWidget* tree) const;
     void restoreTreeState(QTreeWidget* tree, const TreeState& state);
     void collectExpandedNodes(QTreeWidgetItem* item, QSet<QString>& nodes) const;
-    void markConfigurationDirty(bool dirty);
     void showStatusMessage(const QString& message, bool error = false);
 };
 
