@@ -22,6 +22,7 @@
 #include <QStyle>
 #include <QTabWidget>
 #include <QThread>
+#include <QTimer>
 #include <QToolButton>
 #include <QTreeWidget>
 #include <QVBoxLayout>
@@ -167,6 +168,18 @@ QString cameraTransportName(const Framegrabber::CameraTransport transport)
     }
     return QCoreApplication::translate("QFramegrabberWidget", "Camera");
 }
+
+void setInitialFeatureColumnWidth(QTreeWidget* tree)
+{
+    QTimer::singleShot(0, tree, [tree]
+    {
+        const int availableWidth = tree->viewport()->width();
+        if (availableWidth > 0)
+        {
+            tree->setColumnWidth(0, availableWidth * 52 / 100);
+        }
+    });
+}
 }
 
 QFramegrabberWidget::QFramegrabberWidget(QWidget* parent, Framegrabber* framegrabber)
@@ -185,13 +198,26 @@ QFramegrabberWidget::QFramegrabberWidget(QWidget* parent, Framegrabber* framegra
     }
 
     registerCallbacks();
-    for (const std::string& name : _framegrabber->getCachedFramegrabberList())
     {
-        _boardCombo->addItem(QString::fromStdString(name));
+        QSignalBlocker blocker(_boardCombo);
+        for (const std::string& name : _framegrabber->getCachedFramegrabberList())
+        {
+            _boardCombo->addItem(QString::fromStdString(name));
+        }
     }
     _appletPathEdit->setText(
         QString::fromStdString(_framegrabber->appletPath()));
     applyConnectionState(_framegrabber->isOpened());
+    if (!_framegrabber->isOpened() && _boardCombo->currentIndex() >= 0)
+    {
+        QMetaObject::invokeMethod(
+            this,
+            [this]
+            {
+                startAutomaticAppletLoad();
+            },
+            Qt::QueuedConnection);
+    }
 }
 
 QFramegrabberWidget::~QFramegrabberWidget()
@@ -236,26 +262,6 @@ void QFramegrabberWidget::buildUi()
     _boardCombo = new QComboBox(this);
     _boardCombo->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
 
-    _refreshBoardsButton = new QToolButton(this);
-    _refreshBoardsButton->setIcon(QIcon(QStringLiteral(":/Resources/Icons/icons8-refresh-48.png")));
-    _refreshBoardsButton->setToolTip(tr("Refresh boards"));
-
-    _connectButton = new QToolButton(this);
-    _connectButton->setCheckable(true);
-    _connectButton->setToolTip(tr("Open or close board"));
-    QIcon connectionIcon;
-    connectionIcon.addFile(
-        QStringLiteral(":/Resources/Icons/icons8-connect-48.png"),
-        QSize(),
-        QIcon::Normal,
-        QIcon::Off);
-    connectionIcon.addFile(
-        QStringLiteral(":/Resources/Icons/icons8-disconnected-48.png"),
-        QSize(),
-        QIcon::Normal,
-        QIcon::On);
-    _connectButton->setIcon(connectionIcon);
-
     _grabOneButton = new QToolButton(this);
     _grabOneButton->setIcon(QIcon(QStringLiteral(":/Resources/Icons/icons8-camera-48.png")));
     _grabOneButton->setToolTip(tr("Grab one frame per DMA"));
@@ -279,11 +285,9 @@ void QFramegrabberWidget::buildUi()
     auto* selectorLayout = new QHBoxLayout;
     selectorLayout->setObjectName(QStringLiteral("DeviceSelectorLayout"));
     selectorLayout->addWidget(_boardCombo);
-    selectorLayout->addWidget(_refreshBoardsButton);
 
     auto* toolLayout = new QHBoxLayout;
     toolLayout->setObjectName(QStringLiteral("DeviceToolLayout"));
-    toolLayout->addWidget(_connectButton);
     toolLayout->addWidget(_grabOneButton);
     toolLayout->addWidget(_grabLiveButton);
 
@@ -291,6 +295,16 @@ void QFramegrabberWidget::buildUi()
     topLayout->setObjectName(QStringLiteral("DeviceTopBarLayout"));
     topLayout->addLayout(selectorLayout);
     topLayout->addLayout(toolLayout);
+
+    _appletInfoEdit = new QLineEdit(this);
+    _appletInfoEdit->setObjectName(QStringLiteral("FramegrabberAppletInfoEdit"));
+    _appletInfoEdit->setReadOnly(true);
+    _appletInfoEdit->setPlaceholderText(tr("No applet loaded"));
+    _appletInfoEdit->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+
+    auto* infoLayout = new QHBoxLayout;
+    infoLayout->setObjectName(QStringLiteral("DeviceInfoLayout"));
+    infoLayout->addWidget(_appletInfoEdit);
 
     _tabs = new QTabWidget(this);
     _tabs->setObjectName(QStringLiteral("FramegrabberControlTabs"));
@@ -304,26 +318,21 @@ void QFramegrabberWidget::buildUi()
     _statusLabel->setAlignment(Qt::AlignCenter);
     _messageLabel = new QLabel(this);
     _messageLabel->setObjectName(QStringLiteral("FramegrabberMessageLabel"));
+    _messageLabel->setProperty("statusRole", "message");
     _messageLabel->setProperty("messageState", "normal");
     _messageLabel->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+    _messageLabel->hide();
     _statusBar->addWidget(_statusLabel);
     _statusBar->addWidget(_messageLabel, 1);
 
     auto* rootLayout = new QVBoxLayout;
     rootLayout->setObjectName(QStringLiteral("DeviceRootLayout"));
     rootLayout->addLayout(topLayout);
+    rootLayout->addLayout(infoLayout);
     rootLayout->addWidget(_tabs);
     rootLayout->addWidget(_statusBar);
     setLayout(rootLayout);
 
-    connect(_refreshBoardsButton, &QToolButton::clicked, this, [this]
-    {
-        startBoardRefresh();
-    });
-    connect(_connectButton, &QToolButton::toggled, this, [this](const bool checked)
-    {
-        startOpenOperation(checked);
-    });
     connect(_grabOneButton, &QToolButton::clicked, this, [this]
     {
         if (_framegrabber)
@@ -346,22 +355,34 @@ void QFramegrabberWidget::buildUi()
             _framegrabber->requestStop();
         }
     });
+    connect(
+        _boardCombo,
+        QOverload<int>::of(&QComboBox::currentIndexChanged),
+        this,
+        [this](const int index)
+        {
+            if (index >= 0
+                && _framegrabber
+                && !_framegrabber->isOpened()
+                && !_operationThread
+                && !_shuttingDown)
+            {
+                startAutomaticAppletLoad();
+            }
+        });
 }
 
 QWidget* QFramegrabberWidget::createSetupTab()
 {
     auto* page = new QWidget(this);
-    auto* appletLabel = new QLabel(tr("Applet"), page);
-    appletLabel->setObjectName(QStringLiteral("FramegrabberAppletPathLabel"));
     _appletPathEdit = new QLineEdit(page);
     _appletPathEdit->setReadOnly(true);
     _loadAppletButton = new QPushButton(tr("Load Applet"), page);
 
     auto* pathLayout = new QHBoxLayout;
     pathLayout->setObjectName(QStringLiteral("FramegrabberAppletPathLayout"));
-    pathLayout->addWidget(appletLabel);
-    pathLayout->addWidget(_appletPathEdit);
     pathLayout->addWidget(_loadAppletButton);
+    pathLayout->addWidget(_appletPathEdit);
 
     _appletDmaCombo = new QComboBox(page);
 
@@ -375,6 +396,7 @@ QWidget* QFramegrabberWidget::createSetupTab()
     _appletTree->setHeaderLabels({tr("Feature"), tr("Value")});
     _appletTree->header()->setSectionResizeMode(0, QHeaderView::Interactive);
     _appletTree->header()->setSectionResizeMode(1, QHeaderView::Stretch);
+    setInitialFeatureColumnWidth(_appletTree);
 
     auto* layout = new QVBoxLayout;
     layout->setObjectName(QStringLiteral("FramegrabberAppletLayout"));
@@ -385,6 +407,12 @@ QWidget* QFramegrabberWidget::createSetupTab()
 
     connect(_loadAppletButton, &QPushButton::clicked, this, [this]
     {
+        if (_framegrabber && _framegrabber->isOpened())
+        {
+            startAppletUnload();
+            return;
+        }
+
         const QString path = QFileDialog::getOpenFileName(
             this,
             tr("Load frame grabber applet"),
@@ -435,6 +463,7 @@ QFramegrabberWidget::createCameraPage(
     page->cameraTree->setHeaderLabels({tr("Feature"), tr("Value")});
     page->cameraTree->header()->setSectionResizeMode(0, QHeaderView::Interactive);
     page->cameraTree->header()->setSectionResizeMode(1, QHeaderView::Stretch);
+    setInitialFeatureColumnWidth(page->cameraTree);
 
     auto* layout = new QVBoxLayout;
     layout->setObjectName(QStringLiteral("FramegrabberCameraLayout"));
@@ -547,37 +576,63 @@ void QFramegrabberWidget::registerCallbacks()
         });
 }
 
-void QFramegrabberWidget::startBoardRefresh()
+void QFramegrabberWidget::startAutomaticAppletLoad()
 {
-    if (!_framegrabber || _operationThread || _shuttingDown)
+    if (!_framegrabber
+        || _boardCombo->currentIndex() < 0
+        || _operationThread
+        || _shuttingDown)
     {
         return;
     }
 
-    const auto names = std::make_shared<std::vector<std::string>>();
+    const QString boardName = _boardCombo->currentText();
+    const auto path = std::make_shared<std::string>();
+    const auto success = std::make_shared<bool>(false);
     QPointer<QFramegrabberWidget> guard(this);
-    QThread* worker = QThread::create([framegrabber = _framegrabber, names]
-    {
-        *names = framegrabber->getUpdatedFramegrabberList();
-    });
+    QThread* worker = QThread::create(
+        [framegrabber = _framegrabber, boardName, path, success]
+        {
+            *path = framegrabber->getBoardAppletPath(boardName.toStdString());
+            if (!path->empty())
+            {
+                *success = framegrabber->loadApplet(
+                    *path,
+                    boardName.toStdString());
+            }
+        });
     _operationThread = worker;
     setOperationActive(true);
-    showStatusMessage(tr("Scanning frame grabber boards..."));
-    connect(worker, &QThread::finished, this, [guard, worker, names]
+    showStatusMessage(tr("Checking the board applet..."));
+    connect(worker, &QThread::finished, this, [guard, worker, path, success]
     {
         worker->deleteLater();
         if (!guard)
         {
             return;
         }
+
         guard->_operationThread = nullptr;
-        guard->_boardCombo->clear();
-        for (const std::string& name : *names)
-        {
-            guard->_boardCombo->addItem(QString::fromStdString(name));
-        }
+        guard->_connectionAttempted = !path->empty();
         guard->setOperationActive(false);
-        guard->showStatusMessage(tr("Board scan finished."));
+        guard->_appletPathEdit->setText(
+            QString::fromStdString(guard->_framegrabber->appletPath()));
+        guard->applyConnectionState(*success);
+        if (*success)
+        {
+            guard->showStatusMessage(tr("Board applet loaded."));
+        }
+        else if (path->empty())
+        {
+            guard->showStatusMessage(
+                tr("No active or power-up applet is available."));
+        }
+        else
+        {
+            guard->showStatusMessage(
+                tr("Failed to load the board applet."),
+                true);
+        }
     });
     worker->start();
 }
@@ -627,44 +682,24 @@ void QFramegrabberWidget::startAppletLoad(const QString& path)
     worker->start();
 }
 
-void QFramegrabberWidget::startOpenOperation(const bool open)
+void QFramegrabberWidget::startAppletUnload()
 {
     if (!_framegrabber || _operationThread || _shuttingDown)
     {
-        QSignalBlocker blocker(_connectButton);
-        _connectButton->setChecked(_framegrabber && _framegrabber->isOpened());
         return;
     }
 
-    if (open && _appletPathEdit->text().isEmpty())
-    {
-        QSignalBlocker blocker(_connectButton);
-        _connectButton->setChecked(false);
-        showStatusMessage(tr("Load an applet first."), true);
-        return;
-    }
-
-    const QString boardName = _boardCombo->currentText();
-    const auto success = std::make_shared<bool>(false);
     QPointer<QFramegrabberWidget> guard(this);
-    QThread* worker = QThread::create(
-        [framegrabber = _framegrabber, boardName, open, success]
-        {
-            if (open)
-            {
-                *success = framegrabber->open(boardName.toStdString());
-            }
-            else
-            {
-                framegrabber->close();
-                *success = true;
-            }
-        });
+    QThread* worker = QThread::create([framegrabber = _framegrabber]
+    {
+        framegrabber->requestStop();
+        framegrabber->close();
+    });
     _operationThread = worker;
     _connectionAttempted = true;
     setOperationActive(true);
-    showStatusMessage(open ? tr("Opening frame grabber...") : tr("Closing frame grabber..."));
-    connect(worker, &QThread::finished, this, [guard, worker, open, success]
+    showStatusMessage(tr("Unloading applet..."));
+    connect(worker, &QThread::finished, this, [guard, worker]
     {
         worker->deleteLater();
         if (!guard)
@@ -673,19 +708,8 @@ void QFramegrabberWidget::startOpenOperation(const bool open)
         }
         guard->_operationThread = nullptr;
         guard->setOperationActive(false);
-        guard->applyConnectionState(open && *success);
-        if (open && *success)
-        {
-            guard->showStatusMessage(tr("Frame grabber opened."));
-        }
-        else if (open)
-        {
-            guard->showStatusMessage(tr("Failed to open the frame grabber."), true);
-        }
-        else
-        {
-            guard->showStatusMessage(tr("Frame grabber closed."));
-        }
+        guard->applyConnectionState(false);
+        guard->showStatusMessage(tr("Applet unloaded."));
     });
     worker->start();
 }
@@ -738,8 +762,6 @@ void QFramegrabberWidget::setOperationActive(const bool active)
     _operationActive = active;
     const bool opened = _framegrabber && _framegrabber->isOpened();
     _boardCombo->setEnabled(!active && !opened);
-    _refreshBoardsButton->setEnabled(!active && !opened);
-    _connectButton->setEnabled(!active);
     _loadAppletButton->setEnabled(!active && !_grabbing);
     for (const auto& page : _cameraPages)
     {
@@ -752,23 +774,36 @@ void QFramegrabberWidget::setOperationActive(const bool active)
 
 void QFramegrabberWidget::applyConnectionState(const bool opened)
 {
-    {
-        QSignalBlocker blocker(_connectButton);
-        _connectButton->setChecked(opened);
-    }
     _boardCombo->setEnabled(!opened && !_operationActive);
-    _refreshBoardsButton->setEnabled(!opened && !_operationActive);
+    _loadAppletButton->setText(opened ? tr("Unload Applet") : tr("Load Applet"));
     _grabOneButton->setEnabled(opened && !_grabbing);
     _grabLiveButton->setEnabled(opened);
 
     if (opened)
     {
+        const QString appletName = QString::fromStdString(
+            _framegrabber->getLoadedAppletName());
+        QString appletVersion = QString::fromStdString(
+            _framegrabber->getLoadedAppletVersion());
+        if (!appletVersion.isEmpty()
+            && !appletVersion.startsWith(QLatin1Char('v'), Qt::CaseInsensitive))
+        {
+            appletVersion.prepend(QLatin1Char('v'));
+        }
+        _appletInfoEdit->setText(
+            appletVersion.isEmpty()
+                ? appletName
+                : tr("%1 · %2").arg(appletName, appletVersion));
+        _appletInfoEdit->setToolTip(
+            QString::fromStdString(_framegrabber->appletPath()));
         refreshDmaSelectors();
         rebuildCameraTabs();
         rebuildAppletTree();
     }
     else
     {
+        _appletInfoEdit->clear();
+        _appletInfoEdit->setToolTip({});
         _appletDmaCombo->clear();
         _appletTree->clear();
         clearCameraTabs();
@@ -806,7 +841,7 @@ void QFramegrabberWidget::updateStatusBubble()
     }
     else if (!opened)
     {
-        _statusLabel->setText(tr("Disconnected"));
+        _statusLabel->setText(tr("Unloaded"));
         _statusLabel->setProperty("status", "disconnected");
     }
     else if (_grabbing)
@@ -816,7 +851,7 @@ void QFramegrabberWidget::updateStatusBubble()
     }
     else
     {
-        _statusLabel->setText(tr("Connected"));
+        _statusLabel->setText(tr("Loaded"));
         _statusLabel->setProperty("status", "connected");
     }
     _statusLabel->style()->unpolish(_statusLabel);
@@ -1580,9 +1615,11 @@ void QFramegrabberWidget::collectExpandedNodes(QTreeWidgetItem* item,
 void QFramegrabberWidget::showStatusMessage(const QString& message, const bool error)
 {
     _messageLabel->setText(message);
+    _messageLabel->setToolTip(message);
     _messageLabel->setProperty("messageState", error ? "error" : "normal");
     _messageLabel->style()->unpolish(_messageLabel);
     _messageLabel->style()->polish(_messageLabel);
+    _messageLabel->setVisible(!message.isEmpty());
 }
 
 #endif // QT_GUI_LIB

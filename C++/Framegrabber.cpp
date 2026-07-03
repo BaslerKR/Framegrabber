@@ -435,6 +435,7 @@ struct Framegrabber::DmaChannel
     unsigned int index = 0;
     dma_mem* memory = nullptr;
     std::thread thread;
+    std::mutex resourceMutex;
     std::mutex permitMutex;
     std::condition_variable permitCondition;
     std::atomic<bool> stopRequested{false};
@@ -633,13 +634,22 @@ bool Framegrabber::open(const std::string& boardName)
         return false;
     }
 
+    const FramegrabberSystem::AppletMetadata appletMetadata =
+        _system->getAppletMetadata(board.displayName(), path);
     close();
-    return openResolvedBoard(board.displayName(), board.index, path);
+    return openResolvedBoard(
+        board.displayName(),
+        board.index,
+        path,
+        appletMetadata.version,
+        appletMetadata.supportsCameraControl);
 }
 
 bool Framegrabber::openResolvedBoard(const std::string& boardName,
                                      const unsigned int boardIndex,
-                                     const std::string& appletPath)
+                                     const std::string& appletPath,
+                                     const std::string& discoveredAppletVersion,
+                                     const bool initializeCameraControl)
 {
     Fg_Struct* handle = Fg_Init(appletPath.c_str(), boardIndex);
     if (!handle)
@@ -651,10 +661,31 @@ bool Framegrabber::openResolvedBoard(const std::string& boardName,
     }
 
     SgcBoardHandle* cxpBoard = nullptr;
-    if (Sgc_initBoard(handle, 0, &cxpBoard) != SGC_OK)
+    if (initializeCameraControl
+        && Sgc_initBoard(handle, 0, &cxpBoard) != SGC_OK)
     {
         cxpBoard = nullptr;
         log("CXP control module is unavailable for this configuration.", true);
+    }
+
+    std::string appletFileName;
+    Fg_getStringSystemInformationForFgHandle(
+        handle,
+        INFO_APPLET_FILE_NAME,
+        PROP_ID_VALUE,
+        appletFileName);
+    if (appletFileName.empty())
+    {
+        appletFileName = std::filesystem::path(appletPath).filename().string();
+    }
+    const std::string appletName =
+        std::filesystem::path(appletFileName).stem().string();
+    const int appletId = Fg_getAppletId(handle, nullptr);
+    std::string appletVersion =
+        appletId >= 0 ? safeString(Fg_getAppletVersion(handle, appletId)) : "";
+    if (appletVersion.empty())
+    {
+        appletVersion = discoveredAppletVersion;
     }
 
     {
@@ -664,6 +695,8 @@ bool Framegrabber::openResolvedBoard(const std::string& boardName,
         _boardIndex = boardIndex;
         _connectedBoardName = boardName;
         _appletPath = appletPath;
+        _loadedAppletName = appletName;
+        _loadedAppletVersion = appletVersion;
         _configurationPath.clear();
         _channels.clear();
         _cxpCameras.clear();
@@ -689,7 +722,12 @@ bool Framegrabber::isOpened() const
 
 void Framegrabber::close()
 {
-    stop();
+    std::lock_guard<std::mutex> lifecycleLock(_lifecycleMutex);
+    requestStopChannels();
+    if (!joinStoppedChannels())
+    {
+        return;
+    }
 
     bool wasOpened = false;
     {
@@ -697,6 +735,8 @@ void Framegrabber::close()
         wasOpened = _handle != nullptr;
         releaseHandles();
         _connectedBoardName.clear();
+        _loadedAppletName.clear();
+        _loadedAppletVersion.clear();
         _channels.clear();
         _cxpCameras.clear();
     }
@@ -736,6 +776,18 @@ std::string Framegrabber::getConnectedFramegrabberName() const
 {
     std::lock_guard<std::mutex> lock(_stateMutex);
     return _connectedBoardName;
+}
+
+std::string Framegrabber::getLoadedAppletName() const
+{
+    std::lock_guard<std::mutex> lock(_stateMutex);
+    return _loadedAppletName;
+}
+
+std::string Framegrabber::getLoadedAppletVersion() const
+{
+    std::lock_guard<std::mutex> lock(_stateMutex);
+    return _loadedAppletVersion;
 }
 
 bool Framegrabber::loadConfiguration(const std::string& path)
@@ -782,7 +834,31 @@ bool Framegrabber::saveConfiguration(const std::string& path) const
 
 void Framegrabber::grab(const std::size_t frames)
 {
-    if (!isOpened() || _isRunning.exchange(true, std::memory_order_acq_rel))
+    if (_isRunning.load(std::memory_order_acquire))
+    {
+        return;
+    }
+
+    std::lock_guard<std::mutex> lifecycleLock(_lifecycleMutex);
+    if (_isRunning.load(std::memory_order_acquire))
+    {
+        return;
+    }
+
+    requestStopChannels();
+    if (!joinStoppedChannels())
+    {
+        return;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(_stateMutex);
+        if (!_handle)
+        {
+            return;
+        }
+    }
+    if (_isRunning.exchange(true, std::memory_order_acq_rel))
     {
         return;
     }
@@ -797,6 +873,7 @@ void Framegrabber::grab(const std::size_t frames)
 
     _frameSeq.store(0, std::memory_order_release);
     _activeChannels.store(0, std::memory_order_release);
+    _startingChannels.store(true, std::memory_order_release);
     {
         std::lock_guard<std::mutex> lock(_stateMutex);
         _channels.clear();
@@ -809,6 +886,7 @@ void Framegrabber::grab(const std::size_t frames)
         startChannel(static_cast<unsigned int>(dmaIndex), frames);
     }
 
+    _startingChannels.store(false, std::memory_order_release);
     if (_activeChannels.load(std::memory_order_acquire) == 0)
     {
         _isRunning.store(false, std::memory_order_release);
@@ -951,158 +1029,152 @@ void Framegrabber::startChannel(const unsigned int dmaIndex, const std::size_t f
     channel->memory = memory;
     channel->permits.store(1, std::memory_order_release);
     DmaChannel* channelPtr = channel.get();
-    {
-        std::lock_guard<std::mutex> lock(_stateMutex);
-        _channels[dmaIndex] = std::move(channel);
-    }
-
+    std::unique_lock<std::mutex> registrationLock(_stateMutex);
+    _channels[dmaIndex] = std::move(channel);
     _activeChannels.fetch_add(1, std::memory_order_acq_rel);
-    channelPtr->thread = std::thread(
-        [this,
-         channelPtr,
-         handle,
-         frames,
-         width,
-         height,
-         sdkFormat,
-         pixelBytes,
-         frameBytes,
-         rowBytes]
-        {
-            const unsigned int dmaIndex = channelPtr->index;
-            const int acquireResult = Fg_AcquireEx(
-                handle,
-                static_cast<int>(dmaIndex),
-                GRAB_INFINITE,
-                ACQ_STANDARD,
-                channelPtr->memory);
-            if (acquireResult != FG_OK)
+    try
+    {
+        channelPtr->thread = std::thread(
+            [this, channelPtr, handle, frames, width, height, sdkFormat, pixelBytes, frameBytes,
+             rowBytes]
             {
-                log("DMA(" + std::to_string(dmaIndex) + ") acquisition start failed: "
-                        + safeString(Fg_getErrorDescription(nullptr, acquireResult)),
-                    true);
-                finishChannel(*channelPtr);
-                return;
-            }
-            channelPtr->acquisitionStarted.store(true, std::memory_order_release);
-
-            SgcCameraHandle* cameraHandle = nullptr;
-            if (connectCamera(CameraTransport::CoaXPress, dmaIndex))
-            {
-                std::lock_guard<std::mutex> lock(_stateMutex);
-                if (CameraEntry* camera = findCamera(CameraTransport::CoaXPress, dmaIndex))
+                const unsigned int dmaIndex = channelPtr->index;
+                const int acquireResult =
+                    Fg_AcquireEx(handle, static_cast<int>(dmaIndex), GRAB_INFINITE, ACQ_STANDARD,
+                                 channelPtr->memory);
+                if (acquireResult != FG_OK)
                 {
-                    cameraHandle = camera->handle;
+                    log("DMA(" + std::to_string(dmaIndex) + ") acquisition start failed: " +
+                            safeString(Fg_getErrorDescription(nullptr, acquireResult)),
+                        true);
+                    finishChannel(*channelPtr);
+                    return;
                 }
-            }
-            if (cameraHandle && Sgc_startAcquisition(cameraHandle, 1) == SGC_OK)
-            {
-                channelPtr->cameraStarted.store(true, std::memory_order_release);
-            }
+                channelPtr->acquisitionStarted.store(true, std::memory_order_release);
 
-            frameindex_t lastPicture = 0;
-            std::size_t delivered = 0;
-            while (!channelPtr->stopRequested.load(std::memory_order_acquire))
-            {
+                SgcCameraHandle* cameraHandle = nullptr;
+                if (connectCamera(CameraTransport::CoaXPress, dmaIndex))
                 {
-                    std::unique_lock<std::mutex> lock(channelPtr->permitMutex);
-                    channelPtr->permitCondition.wait(
-                        lock,
-                        [channelPtr]
-                        {
-                            return channelPtr->stopRequested.load(std::memory_order_acquire)
-                                   || channelPtr->permits.load(std::memory_order_acquire) > 0;
-                        });
-                }
-                if (channelPtr->stopRequested.load(std::memory_order_acquire))
-                {
-                    break;
-                }
-                channelPtr->permits.fetch_sub(1, std::memory_order_acq_rel);
-
-                const frameindex_t picture = Fg_getLastPicNumberBlockingEx(
-                    handle,
-                    lastPicture + 1,
-                    static_cast<int>(dmaIndex),
-                    100,
-                    channelPtr->memory);
-                if (picture <= 0)
-                {
-                    if (picture == FG_NO_PICTURE_AVAILABLE)
+                    std::lock_guard<std::mutex> lock(_stateMutex);
+                    if (CameraEntry* camera = findCamera(CameraTransport::CoaXPress, dmaIndex))
                     {
-                        channelPtr->permits.fetch_add(1, std::memory_order_acq_rel);
+                        cameraHandle = camera->handle;
+                    }
+                }
+                if (cameraHandle && Sgc_startAcquisition(cameraHandle, 1) == SGC_OK)
+                {
+                    channelPtr->cameraStarted.store(true, std::memory_order_release);
+                }
+
+                frameindex_t lastPicture = 0;
+                std::size_t delivered = 0;
+                while (!channelPtr->stopRequested.load(std::memory_order_acquire))
+                {
+                    {
+                        std::unique_lock<std::mutex> lock(channelPtr->permitMutex);
+                        channelPtr->permitCondition.wait(
+                            lock,
+                            [channelPtr]
+                            {
+                                return channelPtr->stopRequested.load(std::memory_order_acquire) ||
+                                       channelPtr->permits.load(std::memory_order_acquire) > 0;
+                            });
+                    }
+                    if (channelPtr->stopRequested.load(std::memory_order_acquire))
+                    {
+                        break;
+                    }
+                    channelPtr->permits.fetch_sub(1, std::memory_order_acq_rel);
+
+                    const frameindex_t picture = Fg_getLastPicNumberBlockingEx(
+                        handle, lastPicture + 1, static_cast<int>(dmaIndex), 100,
+                        channelPtr->memory);
+                    if (picture <= 0)
+                    {
+                        if (picture == FG_NO_PICTURE_AVAILABLE)
+                        {
+                            channelPtr->permits.fetch_add(1, std::memory_order_acq_rel);
+                            continue;
+                        }
+                        if (!channelPtr->stopRequested.load(std::memory_order_acquire))
+                        {
+                            log("DMA(" + std::to_string(dmaIndex) + ") frame wait failed.", true);
+                            channelPtr->permits.fetch_add(1, std::memory_order_acq_rel);
+                        }
                         continue;
                     }
-                    if (!channelPtr->stopRequested.load(std::memory_order_acquire))
-                    {
-                        log("DMA(" + std::to_string(dmaIndex) + ") frame wait failed.", true);
-                        channelPtr->permits.fetch_add(1, std::memory_order_acq_rel);
-                    }
-                    continue;
-                }
 
-                lastPicture = picture;
-                const auto* source = static_cast<const std::uint8_t*>(
-                    Fg_getImagePtrEx(
-                        handle,
-                        picture,
-                        static_cast<int>(dmaIndex),
-                        channelPtr->memory));
-                if (!source)
-                {
-                    ready(dmaIndex);
-                    continue;
-                }
-
-                auto ownedBytes = std::make_shared<std::vector<std::uint8_t>>(frameBytes);
-                std::memcpy(ownedBytes->data(), source, frameBytes);
-
-                Image image;
-                image.storage = std::move(ownedBytes);
-                image.size = frameBytes;
-                image.width = width;
-                image.height = height;
-                image.stride = static_cast<int>(rowBytes);
-                image.bytesPerPixel = pixelBytes;
-                image.sdkPixelFormat = sdkFormat;
-                image.pixelFormat = toPixelFormat(sdkFormat);
-                image.dmaIndex = dmaIndex;
-                image.frameSeq = _frameSeq.fetch_add(1, std::memory_order_acq_rel) + 1;
-
-                std::vector<GrabCallback> callbacks;
-                {
-                    std::lock_guard<std::mutex> lock(_grabCallbackMutex);
-                    callbacks.reserve(_grabCallbacks.size());
-                    for (const auto& item : _grabCallbacks)
+                    lastPicture = picture;
+                    const auto* source = static_cast<const std::uint8_t*>(Fg_getImagePtrEx(
+                        handle, picture, static_cast<int>(dmaIndex), channelPtr->memory));
+                    if (!source)
                     {
-                        callbacks.push_back(item.second);
+                        ready(dmaIndex);
+                        continue;
                     }
-                }
-                for (const GrabCallback& callback : callbacks)
-                {
-                    try
+
+                    auto ownedBytes = std::make_shared<std::vector<std::uint8_t>>(frameBytes);
+                    std::memcpy(ownedBytes->data(), source, frameBytes);
+
+                    Image image;
+                    image.storage = std::move(ownedBytes);
+                    image.size = frameBytes;
+                    image.width = width;
+                    image.height = height;
+                    image.stride = static_cast<int>(rowBytes);
+                    image.bytesPerPixel = pixelBytes;
+                    image.sdkPixelFormat = sdkFormat;
+                    image.pixelFormat = toPixelFormat(sdkFormat);
+                    image.dmaIndex = dmaIndex;
+                    image.frameSeq = _frameSeq.fetch_add(1, std::memory_order_acq_rel) + 1;
+
+                    std::vector<GrabCallback> callbacks;
                     {
-                        callback(image, image.frameSeq);
+                        std::lock_guard<std::mutex> lock(_grabCallbackMutex);
+                        callbacks.reserve(_grabCallbacks.size());
+                        for (const auto& item : _grabCallbacks)
+                        {
+                            callbacks.push_back(item.second);
+                        }
                     }
-                    catch (const std::exception& exception)
+                    for (const GrabCallback& callback : callbacks)
                     {
-                        log(std::string("Grab callback failed: ") + exception.what(), true);
+                        try
+                        {
+                            callback(image, image.frameSeq);
+                        }
+                        catch (const std::exception& exception)
+                        {
+                            log(std::string("Grab callback failed: ") + exception.what(), true);
+                        }
+                        catch (...)
+                        {
+                            log("Grab callback failed with an unknown exception.", true);
+                        }
                     }
-                    catch (...)
+
+                    ++delivered;
+                    if (frames != 0 && delivered >= frames)
                     {
-                        log("Grab callback failed with an unknown exception.", true);
+                        break;
                     }
                 }
 
-                ++delivered;
-                if (frames != 0 && delivered >= frames)
-                {
-                    break;
-                }
-            }
-
-            finishChannel(*channelPtr);
-        });
+                finishChannel(*channelPtr);
+            });
+    }
+    catch (const std::exception& exception)
+    {
+        channelPtr->memory = nullptr;
+        _channels[dmaIndex].reset();
+        _activeChannels.fetch_sub(1, std::memory_order_acq_rel);
+        registrationLock.unlock();
+        Fg_FreeMemEx(handle, memory);
+        log("DMA(" + std::to_string(dmaIndex) + ") worker creation failed: " + exception.what(),
+            true);
+        return;
+    }
+    registrationLock.unlock();
 }
 
 void Framegrabber::finishChannel(DmaChannel& channel)
@@ -1122,18 +1194,22 @@ void Framegrabber::finishChannel(DmaChannel& channel)
     {
         Sgc_stopAcquisition(cameraHandle, 1);
     }
-    if (handle && channel.acquisitionStarted.exchange(false, std::memory_order_acq_rel))
     {
-        Fg_stopAcquireEx(handle, static_cast<int>(channel.index), channel.memory, 0);
-    }
-    if (handle && channel.memory)
-    {
-        Fg_FreeMemEx(handle, channel.memory);
-        channel.memory = nullptr;
+        std::lock_guard<std::mutex> resourceLock(channel.resourceMutex);
+        if (handle && channel.acquisitionStarted.exchange(false, std::memory_order_acq_rel))
+        {
+            Fg_stopAcquireEx(handle, static_cast<int>(channel.index), channel.memory, 0);
+        }
+        if (handle && channel.memory)
+        {
+            Fg_FreeMemEx(handle, channel.memory);
+            channel.memory = nullptr;
+        }
     }
 
     const unsigned int previous = _activeChannels.fetch_sub(1, std::memory_order_acq_rel);
-    if (previous == 1)
+    if (previous == 1
+        && !_startingChannels.load(std::memory_order_acquire))
     {
         _isRunning.store(false, std::memory_order_release);
         notifyStatus(GrabbingStatus, false);
@@ -1142,18 +1218,20 @@ void Framegrabber::finishChannel(DmaChannel& channel)
 
 void Framegrabber::requestStop()
 {
+    std::lock_guard<std::mutex> lifecycleLock(_lifecycleMutex);
+    requestStopChannels();
+}
+
+void Framegrabber::requestStopChannels()
+{
     _isRunning.store(false, std::memory_order_release);
 
-    struct StopTarget
-    {
-        unsigned int index = 0;
-        dma_mem* memory = nullptr;
-        bool acquisitionStarted = false;
-    };
-    std::vector<StopTarget> targets;
+    std::vector<DmaChannel*> channels;
+    Fg_Struct* handle = nullptr;
     {
         std::lock_guard<std::mutex> lock(_stateMutex);
-        targets.reserve(_channels.size());
+        handle = _handle;
+        channels.reserve(_channels.size());
         for (const auto& channel : _channels)
         {
             if (!channel)
@@ -1162,30 +1240,24 @@ void Framegrabber::requestStop()
             }
             channel->stopRequested.store(true, std::memory_order_release);
             channel->permitCondition.notify_all();
-            targets.push_back({
-                channel->index,
-                channel->memory,
-                channel->acquisitionStarted.load(std::memory_order_acquire)});
+            channels.push_back(channel.get());
         }
     }
 
-    Fg_Struct* handle = nullptr;
-    {
-        std::lock_guard<std::mutex> lock(_stateMutex);
-        handle = _handle;
-    }
     if (!handle)
     {
         return;
     }
-    for (const StopTarget& target : targets)
+    for (DmaChannel* channel : channels)
     {
-        if (target.memory && target.acquisitionStarted)
+        std::lock_guard<std::mutex> resourceLock(channel->resourceMutex);
+        if (channel->memory
+            && channel->acquisitionStarted.exchange(false, std::memory_order_acq_rel))
         {
             Fg_stopAcquireEx(
                 handle,
-                static_cast<int>(target.index),
-                target.memory,
+                static_cast<int>(channel->index),
+                channel->memory,
                 0);
         }
     }
@@ -1193,8 +1265,13 @@ void Framegrabber::requestStop()
 
 void Framegrabber::stop()
 {
-    requestStop();
+    std::lock_guard<std::mutex> lifecycleLock(_lifecycleMutex);
+    requestStopChannels();
+    joinStoppedChannels();
+}
 
+bool Framegrabber::joinStoppedChannels()
+{
     std::vector<std::thread*> threads;
     {
         std::lock_guard<std::mutex> lock(_stateMutex);
@@ -1207,13 +1284,26 @@ void Framegrabber::stop()
         }
     }
 
+    bool allThreadsJoined = true;
     for (std::thread* thread : threads)
     {
-        if (thread->get_id() != std::this_thread::get_id())
+        if (thread->get_id() == std::this_thread::get_id())
         {
-            thread->join();
+            allThreadsJoined = false;
+            continue;
         }
+        thread->join();
     }
+
+    if (!allThreadsJoined)
+    {
+        return false;
+    }
+    {
+        std::lock_guard<std::mutex> lock(_stateMutex);
+        _channels.clear();
+    }
+    return true;
 }
 
 void Framegrabber::ready(const unsigned int dmaIndex)
@@ -1224,8 +1314,10 @@ void Framegrabber::ready(const unsigned int dmaIndex)
         return;
     }
     DmaChannel& channel = *_channels[dmaIndex];
-    channel.permits.fetch_add(1, std::memory_order_acq_rel);
-    channel.permitCondition.notify_one();
+    if (channel.permits.exchange(1, std::memory_order_acq_rel) == 0)
+    {
+        channel.permitCondition.notify_one();
+    }
 }
 
 bool Framegrabber::isGrabbing() const noexcept
@@ -1256,6 +1348,11 @@ std::vector<std::string> Framegrabber::getUpdatedFramegrabberList() const
 std::vector<std::string> Framegrabber::getCachedFramegrabberList() const
 {
     return _system ? _system->getCachedFramegrabberList() : std::vector<std::string>{};
+}
+
+std::string Framegrabber::getBoardAppletPath(const std::string& boardName) const
+{
+    return _system ? _system->getBoardAppletPath(boardName) : std::string{};
 }
 
 void Framegrabber::setDMABufferCount(const std::size_t count)
@@ -2235,7 +2332,18 @@ void Framegrabber::notifyStatus(const Status status, const bool on)
     }
     for (const StatusCallback& callback : callbacks)
     {
-        callback(status, on);
+        try
+        {
+            callback(status, on);
+        }
+        catch (const std::exception& exception)
+        {
+            log(std::string("Status callback failed: ") + exception.what(), true);
+        }
+        catch (...)
+        {
+            log("Status callback failed with an unknown exception.", true);
+        }
     }
 }
 
@@ -2255,7 +2363,18 @@ void Framegrabber::notifyNode(const FeatureSource source,
     }
     for (const NodeCallback& callback : callbacks)
     {
-        callback(source, transport, dmaIndex, nodeName);
+        try
+        {
+            callback(source, transport, dmaIndex, nodeName);
+        }
+        catch (const std::exception& exception)
+        {
+            log(std::string("Node callback failed: ") + exception.what(), true);
+        }
+        catch (...)
+        {
+            log("Node callback failed with an unknown exception.", true);
+        }
     }
 }
 

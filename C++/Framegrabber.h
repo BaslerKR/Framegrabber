@@ -183,6 +183,8 @@ public:
     [[nodiscard]] bool isOpened() const;
     void close();
     [[nodiscard]] std::string getConnectedFramegrabberName() const;
+    [[nodiscard]] std::string getLoadedAppletName() const;
+    [[nodiscard]] std::string getLoadedAppletVersion() const;
 
     bool loadConfiguration(const std::string& path);
     bool saveConfiguration(const std::string& path) const;
@@ -196,6 +198,8 @@ public:
     [[nodiscard]] int getDMACount() const;
     [[nodiscard]] std::vector<std::string> getUpdatedFramegrabberList() const;
     [[nodiscard]] std::vector<std::string> getCachedFramegrabberList() const;
+    [[nodiscard]] std::string getBoardAppletPath(
+        const std::string& boardName = "") const;
 
     void setDMABufferCount(std::size_t count);
     [[nodiscard]] std::size_t dmaBufferCount() const;
@@ -253,10 +257,13 @@ private:
     FramegrabberSystem* _system = nullptr;
     int _allottedNumber = 0;
 
+    mutable std::mutex _lifecycleMutex;
     mutable std::mutex _stateMutex;
     Fg_Struct* _handle = nullptr;
     SgcBoardHandle* _cxpBoard = nullptr;
     std::string _appletPath;
+    std::string _loadedAppletName;
+    std::string _loadedAppletVersion;
     std::string _configurationPath;
     std::string _connectedBoardName;
     unsigned int _boardIndex = 0;
@@ -265,6 +272,7 @@ private:
     std::vector<CameraEntry> _cxpCameras;
 
     std::atomic<bool> _isRunning{false};
+    std::atomic<bool> _startingChannels{false};
     std::atomic<std::uint64_t> _frameSeq{0};
     std::atomic<unsigned int> _activeChannels{0};
 
@@ -289,7 +297,11 @@ private:
 
     bool openResolvedBoard(const std::string& boardName,
                            unsigned int boardIndex,
-                           const std::string& appletPath);
+                           const std::string& appletPath,
+                           const std::string& discoveredAppletVersion,
+                           bool initializeCameraControl);
+    void requestStopChannels();
+    bool joinStoppedChannels();
     void releaseHandles();
     void startChannel(unsigned int dmaIndex, std::size_t frames);
     void finishChannel(DmaChannel& channel);

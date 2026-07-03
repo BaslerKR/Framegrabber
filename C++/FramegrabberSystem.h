@@ -32,6 +32,12 @@ public:
         [[nodiscard]] std::string displayName() const;
     };
 
+    struct AppletMetadata
+    {
+        std::string version;
+        bool supportsCameraControl = false;
+    };
+
     FramegrabberSystem();
     ~FramegrabberSystem();
 
@@ -43,6 +49,10 @@ public:
     [[nodiscard]] std::vector<std::string> getCachedFramegrabberList() const;
     [[nodiscard]] std::vector<BoardInfo> getCachedBoardInfo() const;
     [[nodiscard]] bool isAccessible(const std::string& boardName) const;
+    [[nodiscard]] std::string getBoardAppletPath(const std::string& boardName) const;
+    [[nodiscard]] AppletMetadata getAppletMetadata(
+        const std::string& boardName,
+        const std::string& appletPath) const;
     [[nodiscard]] bool isInitialized() const noexcept;
 
     Framegrabber* addFramegrabber();
@@ -56,6 +66,7 @@ public:
 private:
     bool _initialized = false;
     mutable std::mutex _mutex;
+    mutable std::mutex _appletDiscoveryMutex;
     std::vector<BoardInfo> _boards;
     std::vector<std::unique_ptr<Framegrabber>> _framegrabbers;
     std::size_t _nextFramegrabberNumber = 0;
