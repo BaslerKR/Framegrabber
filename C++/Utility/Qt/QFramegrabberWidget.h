@@ -24,7 +24,7 @@ class QLineEdit;
 class QPushButton;
 class QStatusBar;
 class QTabWidget;
-class QThread;
+#include <QThread>
 class QToolButton;
 class QTreeWidget;
 class QTreeWidgetItem;
@@ -91,6 +91,7 @@ private:
     QStatusBar* _statusBar = nullptr;
     QLabel* _statusLabel = nullptr;
     QLabel* _messageLabel = nullptr;
+    QLabel* _loadingLabel = nullptr;
 
     void buildUi();
     QWidget* createSetupTab();
@@ -158,6 +159,22 @@ private:
     void restoreTreeState(QTreeWidget* tree, const TreeState& state);
     void collectExpandedNodes(QTreeWidgetItem* item, QSet<QString>& nodes) const;
     void showStatusMessage(const QString& message, bool error = false);
+
+    template <typename Func, typename Cleanup>
+    void runAsyncWrite(Func&& writeFunc, Cleanup&& cleanupFunc) {
+        setOperationActive(true);
+        auto* success = new bool(false);
+        QThread* worker = QThread::create([writeFunc, success]() {
+            *success = writeFunc();
+        });
+        connect(worker, &QThread::finished, this, [this, success, cleanupFunc, worker]() {
+            setOperationActive(false);
+            cleanupFunc(*success);
+            delete success;
+            worker->deleteLater();
+        });
+        worker->start();
+    }
 };
 
 #endif // QT_GUI_LIB

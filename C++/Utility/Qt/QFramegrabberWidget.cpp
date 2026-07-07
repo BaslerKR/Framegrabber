@@ -322,7 +322,12 @@ void QFramegrabberWidget::buildUi()
     _messageLabel->setProperty("messageState", "normal");
     _messageLabel->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
     _messageLabel->hide();
+    _loadingLabel = new QLabel(this);
+    _loadingLabel->setObjectName(QStringLiteral("DeviceLoadingLabel"));
+    _loadingLabel->hide();
+
     _statusBar->addWidget(_statusLabel);
+    _statusBar->addPermanentWidget(_loadingLabel);
     _statusBar->addWidget(_messageLabel, 1);
 
     auto* rootLayout = new QVBoxLayout;
@@ -770,6 +775,7 @@ void QFramegrabberWidget::setOperationActive(const bool active)
         page->connectButton->setEnabled(
             !active && opened && !_grabbing && page->capability.canConnect);
     }
+    updateStatusBubble();
 }
 
 void QFramegrabberWidget::applyConnectionState(const bool opened)
@@ -834,25 +840,38 @@ void QFramegrabberWidget::updateGrabState(const bool grabbing)
 void QFramegrabberWidget::updateStatusBubble()
 {
     const bool opened = _framegrabber && _framegrabber->isOpened();
-    if (!opened && !_connectionAttempted)
-    {
-        _statusLabel->setText(tr("Idle"));
+
+    if (_operationActive) {
+        _statusLabel->setText(tr("Loading"));
         _statusLabel->setProperty("status", "idle");
-    }
-    else if (!opened)
-    {
-        _statusLabel->setText(tr("Unloaded"));
-        _statusLabel->setProperty("status", "disconnected");
-    }
-    else if (_grabbing)
-    {
-        _statusLabel->setText(tr("Live"));
-        _statusLabel->setProperty("status", "grabbing");
-    }
-    else
-    {
-        _statusLabel->setText(tr("Loaded"));
-        _statusLabel->setProperty("status", "connected");
+        if (_loadingLabel) {
+            _loadingLabel->show();
+        }
+    } else {
+        if (_loadingLabel) {
+            _loadingLabel->hide();
+        }
+
+        if (!opened && !_connectionAttempted)
+        {
+            _statusLabel->setText(tr("Idle"));
+            _statusLabel->setProperty("status", "idle");
+        }
+        else if (!opened)
+        {
+            _statusLabel->setText(tr("Disconnected"));
+            _statusLabel->setProperty("status", "disconnected");
+        }
+        else if (_grabbing)
+        {
+            _statusLabel->setText(tr("Live"));
+            _statusLabel->setProperty("status", "grabbing");
+        }
+        else
+        {
+            _statusLabel->setText(tr("Connected"));
+            _statusLabel->setProperty("status", "connected");
+        }
     }
     _statusLabel->style()->unpolish(_statusLabel);
     _statusLabel->style()->polish(_statusLabel);
@@ -1110,6 +1129,7 @@ QWidget* QFramegrabberWidget::createAppletFeatureEditor(
         checkBox->setEnabled(node.writable);
         connect(checkBox, &QCheckBox::toggled, this, [=](const bool value)
         {
+            checkBox->setEnabled(false);
             Framegrabber::ParameterValue updated = current;
             std::visit(
                 [value](auto& typed)
@@ -1121,14 +1141,19 @@ QWidget* QFramegrabberWidget::createAppletFeatureEditor(
                     }
                 },
                 updated);
-            if (!_framegrabber->setAppletParameterById(
-                    node.parameterId,
-                    dmaIndex,
-                    updated))
-            {
-                QSignalBlocker blocker(checkBox);
-                checkBox->setChecked(!value);
-            }
+            runAsyncWrite(
+                [=]() {
+                    return _framegrabber && _framegrabber->setAppletParameterById(node.parameterId, dmaIndex, updated);
+                },
+                [=](bool success) {
+                    checkBox->setEnabled(node.writable);
+                    if (!success) {
+                        QSignalBlocker blocker(checkBox);
+                        checkBox->setChecked(!value);
+                        showStatusMessage(tr("Failed to update parameter."), true);
+                    }
+                }
+            );
         });
         return checkBox;
     }
@@ -1152,13 +1177,23 @@ QWidget* QFramegrabberWidget::createAppletFeatureEditor(
         combo->setEnabled(node.writable);
         connect(combo, &QComboBox::currentTextChanged, this, [=]
         {
+            combo->setEnabled(false);
             Framegrabber::ParameterValue updated = current;
             if (updateValueFromText(updated, combo->currentData().toString()))
             {
-                _framegrabber->setAppletParameterById(
-                    node.parameterId,
-                    dmaIndex,
-                    updated);
+                runAsyncWrite(
+                    [=]() {
+                        return _framegrabber && _framegrabber->setAppletParameterById(node.parameterId, dmaIndex, updated);
+                    },
+                    [=](bool success) {
+                        combo->setEnabled(node.writable);
+                        if (!success) {
+                            showStatusMessage(tr("Failed to update parameter."), true);
+                        }
+                    }
+                );
+            } else {
+                combo->setEnabled(node.writable);
             }
         });
         return combo;
@@ -1170,14 +1205,20 @@ QWidget* QFramegrabberWidget::createAppletFeatureEditor(
         button->setEnabled(node.writable);
         connect(button, &QPushButton::clicked, this, [=]
         {
-            const bool success = _framegrabber
-                && node.parameterId >= 0
-                && _framegrabber->executeAppletCommandById(
-                    dmaIndex,
-                    node.parameterId);
-            showStatusMessage(
-                success ? tr("Command executed.") : tr("Command execution failed."),
-                !success);
+            button->setEnabled(false);
+            runAsyncWrite(
+                [=]() {
+                    return _framegrabber
+                        && node.parameterId >= 0
+                        && _framegrabber->executeAppletCommandById(dmaIndex, node.parameterId);
+                },
+                [=](bool success) {
+                    button->setEnabled(node.writable);
+                    showStatusMessage(
+                        success ? tr("Command executed.") : tr("Command execution failed."),
+                        !success);
+                }
+            );
         });
         return button;
     }
@@ -1186,22 +1227,31 @@ QWidget* QFramegrabberWidget::createAppletFeatureEditor(
     edit->setEnabled(node.writable);
     connect(edit, &QLineEdit::editingFinished, this, [=]() mutable
     {
+        edit->setEnabled(false);
         Framegrabber::ParameterValue updated = current;
-        if (!updateValueFromText(updated, edit->text())
-            || !_framegrabber->setAppletParameterById(
-                node.parameterId,
-                dmaIndex,
-                updated))
+        if (!updateValueFromText(updated, edit->text()))
         {
             QSignalBlocker blocker(edit);
             edit->setText(valueText(current));
-            showStatusMessage(tr("Failed to update '%1'.").arg(featureName), true);
+            edit->setEnabled(node.writable);
+            return;
         }
-        else
-        {
-            current = std::move(updated);
-            showStatusMessage(tr("Updated '%1'.").arg(featureName));
-        }
+
+        runAsyncWrite(
+            [=]() {
+                return _framegrabber && _framegrabber->setAppletParameterById(node.parameterId, dmaIndex, updated);
+            },
+            [=](bool success) mutable {
+                edit->setEnabled(node.writable);
+                if (!success) {
+                    QSignalBlocker blocker(edit);
+                    edit->setText(valueText(current));
+                    showStatusMessage(tr("Failed to update '%1'.").arg(featureName), true);
+                } else {
+                    current = std::move(updated);
+                }
+            }
+        );
     });
     return edit;
 }
@@ -1375,6 +1425,7 @@ QWidget* QFramegrabberWidget::createFeatureEditor(const QDomElement& node,
         checkBox->setChecked(checked);
         connect(checkBox, &QCheckBox::toggled, this, [=](const bool value)
         {
+            checkBox->setEnabled(false);
             Framegrabber::ParameterValue updated = current;
             std::visit(
                 [value](auto& typed)
@@ -1386,11 +1437,19 @@ QWidget* QFramegrabberWidget::createFeatureEditor(const QDomElement& node,
                     }
                 },
                 updated);
-            if (!writeFeature(source, transport, dmaIndex, featureName, updated))
-            {
-                QSignalBlocker blocker(checkBox);
-                checkBox->setChecked(!value);
-            }
+            runAsyncWrite(
+                [=]() {
+                    return writeFeature(source, transport, dmaIndex, featureName, updated);
+                },
+                [=](bool success) {
+                    checkBox->setEnabled(true);
+                    if (!success) {
+                        QSignalBlocker blocker(checkBox);
+                        checkBox->setChecked(!value);
+                        showStatusMessage(tr("Failed to update parameter."), true);
+                    }
+                }
+            );
         });
         return checkBox;
     }
@@ -1421,11 +1480,13 @@ QWidget* QFramegrabberWidget::createFeatureEditor(const QDomElement& node,
         }
         connect(combo, &QComboBox::currentTextChanged, this, [=]
         {
+            combo->setEnabled(false);
             Framegrabber::ParameterValue updated = current;
             if (source == TreeSource::Applet)
             {
                 if (!updateValueFromText(updated, combo->currentData().toString()))
                 {
+                    combo->setEnabled(true);
                     return;
                 }
             }
@@ -1433,7 +1494,17 @@ QWidget* QFramegrabberWidget::createFeatureEditor(const QDomElement& node,
             {
                 updated = combo->currentData().toString().toStdString();
             }
-            writeFeature(source, transport, dmaIndex, featureName, updated);
+            runAsyncWrite(
+                [=]() {
+                    return writeFeature(source, transport, dmaIndex, featureName, updated);
+                },
+                [=](bool success) {
+                    combo->setEnabled(true);
+                    if (!success) {
+                        showStatusMessage(tr("Failed to update parameter."), true);
+                    }
+                }
+            );
         });
         return combo;
     }
@@ -1443,23 +1514,32 @@ QWidget* QFramegrabberWidget::createFeatureEditor(const QDomElement& node,
         auto* button = new QPushButton(tr("Execute"), this);
         connect(button, &QPushButton::clicked, this, [=]
         {
-            bool success = false;
-            if (_framegrabber && source == TreeSource::Camera)
-            {
-                success = _framegrabber->executeCameraCommand(
-                    transport,
-                    dmaIndex,
-                    featureName.toStdString());
-            }
-            else if (_framegrabber)
-            {
-                success = _framegrabber->executeAppletCommand(
-                    dmaIndex,
-                    featureName.toStdString());
-            }
-            showStatusMessage(
-                success ? tr("Command executed.") : tr("Command execution failed."),
-                !success);
+            button->setEnabled(false);
+            runAsyncWrite(
+                [=]() {
+                    bool success = false;
+                    if (_framegrabber && source == TreeSource::Camera)
+                    {
+                        success = _framegrabber->executeCameraCommand(
+                            transport,
+                            dmaIndex,
+                            featureName.toStdString());
+                    }
+                    else if (_framegrabber)
+                    {
+                        success = _framegrabber->executeAppletCommand(
+                            dmaIndex,
+                            featureName.toStdString());
+                    }
+                    return success;
+                },
+                [=](bool success) {
+                    button->setEnabled(true);
+                    showStatusMessage(
+                        success ? tr("Command executed.") : tr("Command execution failed."),
+                        !success);
+                }
+            );
         });
         return button;
     }
@@ -1467,19 +1547,32 @@ QWidget* QFramegrabberWidget::createFeatureEditor(const QDomElement& node,
     auto* edit = new QLineEdit(valueText(current), this);
     connect(edit, &QLineEdit::editingFinished, this, [=]() mutable
     {
+        edit->setEnabled(false);
         Framegrabber::ParameterValue updated = current;
-        if (!updateValueFromText(updated, edit->text())
-            || !writeFeature(source, transport, dmaIndex, featureName, updated))
+        if (!updateValueFromText(updated, edit->text()))
         {
             QSignalBlocker blocker(edit);
             edit->setText(valueText(current));
-            showStatusMessage(tr("Failed to update '%1'.").arg(featureName), true);
+            edit->setEnabled(true);
+            return;
         }
-        else
-        {
-            current = std::move(updated);
-            showStatusMessage(tr("Updated '%1'.").arg(featureName));
-        }
+
+        runAsyncWrite(
+            [=]() {
+                return writeFeature(source, transport, dmaIndex, featureName, updated);
+            },
+            [=](bool success) mutable {
+                edit->setEnabled(true);
+                if (!success) {
+                    QSignalBlocker blocker(edit);
+                    edit->setText(valueText(current));
+                    showStatusMessage(tr("Failed to update '%1'.").arg(featureName), true);
+                } else {
+                    current = std::move(updated);
+                    showStatusMessage(tr("Updated '%1'.").arg(featureName));
+                }
+            }
+        );
     });
     return edit;
 }
