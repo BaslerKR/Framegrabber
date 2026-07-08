@@ -71,6 +71,9 @@ multi-DMA acquisition, transport-aware camera control, and Qt feature editing.
   for an explicit rescan after hardware or link changes.
 - `QFramegrabberWidget` creates transport camera tabs from those capabilities after
   the board opens and removes them when it closes.
+- Camera feature trees are not rebuilt on acquisition start/stop. During acquisition,
+  camera feature editors are disabled and the existing tree remains visible so optional
+  GenICam nodes that are absent on a camera do not produce repeated refresh-time errors.
 - A session-level read-only information field above the tabs shows the loaded applet
   file name and runtime version; its tooltip preserves the full local applet path.
   This identity is not repeated inside the Setup tab because one applet owns the
@@ -88,12 +91,25 @@ multi-DMA acquisition, transport-aware camera control, and Qt feature editing.
   invalidates the selected DMA hierarchy and rebuilds it from current XML because one
   feature may create, remove, move, or change the value/access state of other features;
   tree expansion and selection remain UI state.
+- Camera feature writes are read back immediately after the SDK write and are reported
+  as failed when read-back is unavailable or does not match the requested value. Failed
+  feature writes refresh the current tree instead of locally reverting one editor, because
+  the rejected write can also change dependent access or value state.
 - The Qt widget runs feature writes on a short-lived worker thread and returns cleanup
   to the GUI thread through callable objects with explicit shared lifetime, so stateful
   completion handlers compile consistently across MSVC and other C++17 toolchains.
 - Dynamic access uses the SDK's `PROP_ID_ACCESS_ID` virtual parameter when present and
   falls back to the GenApi register `AccessMode` when the applet reports access ID zero.
   Live write/lock/modify flags are enforced again immediately before an SDK write.
+
+## Follow-up
+
+- Validate Sgc camera event coverage on CXP hardware before replacing explicit camera
+  refresh with camera-side node event updates.
+- Profile the remaining safe DMA-to-owned-buffer copy before considering an SDK-buffer
+  lease or zero-copy frame contract.
+- Define selected-DMA-only acquisition or DMA-specific sessions before presenting
+  simultaneous multi-camera display as supported.
 
 ## Build
 

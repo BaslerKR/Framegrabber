@@ -146,6 +146,7 @@ private:
                                  TreeSource source,
                                  Framegrabber::CameraTransport transport,
                                  unsigned int dmaIndex);
+    bool featureWritable(const QDomElement& node, TreeSource source) const;
     bool readFeature(TreeSource source,
                      Framegrabber::CameraTransport transport,
                      unsigned int dmaIndex,
@@ -156,6 +157,9 @@ private:
                       unsigned int dmaIndex,
                       const QString& name,
                       const Framegrabber::ParameterValue& value);
+    void refreshFeatureTree(TreeSource source,
+                            Framegrabber::CameraTransport transport,
+                            unsigned int dmaIndex);
 
     TreeState captureTreeState(QTreeWidget* tree) const;
     void restoreTreeState(QTreeWidget* tree, const TreeState& state);

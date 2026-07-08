@@ -761,6 +761,7 @@ void QFramegrabberWidget::updateGrabState(const bool grabbing)
     {
         page->refreshButton->setEnabled(
             !grabbing && !_operationActive && page->capability.canDiscover);
+        page->cameraTree->setEnabled(!grabbing);
     }
     updateStatusLabel();
 }
@@ -943,6 +944,7 @@ void QFramegrabberWidget::rebuildCameraTree(CameraPage& page)
         TreeSource::Camera,
         page.capability.transport,
         dmaIndex);
+    page.cameraTree->setEnabled(!_grabbing);
 }
 
 void QFramegrabberWidget::populateAppletFeatureTree(
@@ -1073,9 +1075,8 @@ QWidget* QFramegrabberWidget::createAppletFeatureEditor(
                 [=](bool success) {
                     checkBox->setEnabled(node.writable);
                     if (!success) {
-                        QSignalBlocker blocker(checkBox);
-                        checkBox->setChecked(!value);
                         showStatusMessage(tr("Failed to update parameter."), true);
+                        rebuildAppletTree();
                     }
                 }
             );
@@ -1114,6 +1115,7 @@ QWidget* QFramegrabberWidget::createAppletFeatureEditor(
                         combo->setEnabled(node.writable);
                         if (!success) {
                             showStatusMessage(tr("Failed to update parameter."), true);
+                            rebuildAppletTree();
                         }
                     }
                 );
@@ -1169,9 +1171,8 @@ QWidget* QFramegrabberWidget::createAppletFeatureEditor(
             [=](bool success) mutable {
                 edit->setEnabled(node.writable);
                 if (!success) {
-                    QSignalBlocker blocker(edit);
-                    edit->setText(valueText(current));
                     showStatusMessage(tr("Failed to update '%1'.").arg(featureName), true);
+                    rebuildAppletTree();
                 } else {
                     current = std::move(updated);
                 }
@@ -1332,6 +1333,7 @@ QWidget* QFramegrabberWidget::createFeatureEditor(const QDomElement& node,
     {
         return new QLabel(tr("Unavailable"), this);
     }
+    const bool writable = featureWritable(node, source);
 
     if (tag == QStringLiteral("Boolean"))
     {
@@ -1348,6 +1350,7 @@ QWidget* QFramegrabberWidget::createFeatureEditor(const QDomElement& node,
             },
             current);
         checkBox->setChecked(checked);
+        checkBox->setEnabled(writable);
         connect(checkBox, &QCheckBox::toggled, this, [=](const bool value)
         {
             checkBox->setEnabled(false);
@@ -1367,11 +1370,10 @@ QWidget* QFramegrabberWidget::createFeatureEditor(const QDomElement& node,
                     return writeFeature(source, transport, dmaIndex, featureName, updated);
                 },
                 [=](bool success) {
-                    checkBox->setEnabled(true);
+                    checkBox->setEnabled(writable);
                     if (!success) {
-                        QSignalBlocker blocker(checkBox);
-                        checkBox->setChecked(!value);
                         showStatusMessage(tr("Failed to update parameter."), true);
+                        refreshFeatureTree(source, transport, dmaIndex);
                     }
                 }
             );
@@ -1403,6 +1405,7 @@ QWidget* QFramegrabberWidget::createFeatureEditor(const QDomElement& node,
         {
             combo->setCurrentIndex(currentIndex);
         }
+        combo->setEnabled(writable);
         connect(combo, &QComboBox::currentTextChanged, this, [=]
         {
             combo->setEnabled(false);
@@ -1411,7 +1414,7 @@ QWidget* QFramegrabberWidget::createFeatureEditor(const QDomElement& node,
             {
                 if (!updateValueFromText(updated, combo->currentData().toString()))
                 {
-                    combo->setEnabled(true);
+                    combo->setEnabled(writable);
                     return;
                 }
             }
@@ -1424,9 +1427,10 @@ QWidget* QFramegrabberWidget::createFeatureEditor(const QDomElement& node,
                     return writeFeature(source, transport, dmaIndex, featureName, updated);
                 },
                 [=](bool success) {
-                    combo->setEnabled(true);
+                    combo->setEnabled(writable);
                     if (!success) {
                         showStatusMessage(tr("Failed to update parameter."), true);
+                        refreshFeatureTree(source, transport, dmaIndex);
                     }
                 }
             );
@@ -1437,6 +1441,7 @@ QWidget* QFramegrabberWidget::createFeatureEditor(const QDomElement& node,
     if (tag == QStringLiteral("Command"))
     {
         auto* button = new QPushButton(tr("Execute"), this);
+        button->setEnabled(writable);
         connect(button, &QPushButton::clicked, this, [=]
         {
             button->setEnabled(false);
@@ -1459,7 +1464,7 @@ QWidget* QFramegrabberWidget::createFeatureEditor(const QDomElement& node,
                     return success;
                 },
                 [=](bool success) {
-                    button->setEnabled(true);
+                    button->setEnabled(writable);
                     showStatusMessage(
                         success ? tr("Command executed.") : tr("Command execution failed."),
                         !success);
@@ -1470,6 +1475,7 @@ QWidget* QFramegrabberWidget::createFeatureEditor(const QDomElement& node,
     }
 
     auto* edit = new QLineEdit(valueText(current), this);
+    edit->setEnabled(writable);
     connect(edit, &QLineEdit::editingFinished, this, [=]() mutable
     {
         edit->setEnabled(false);
@@ -1478,7 +1484,7 @@ QWidget* QFramegrabberWidget::createFeatureEditor(const QDomElement& node,
         {
             QSignalBlocker blocker(edit);
             edit->setText(valueText(current));
-            edit->setEnabled(true);
+            edit->setEnabled(writable);
             return;
         }
 
@@ -1487,11 +1493,10 @@ QWidget* QFramegrabberWidget::createFeatureEditor(const QDomElement& node,
                 return writeFeature(source, transport, dmaIndex, featureName, updated);
             },
             [=](bool success) mutable {
-                edit->setEnabled(true);
+                edit->setEnabled(writable);
                 if (!success) {
-                    QSignalBlocker blocker(edit);
-                    edit->setText(valueText(current));
                     showStatusMessage(tr("Failed to update '%1'.").arg(featureName), true);
+                    refreshFeatureTree(source, transport, dmaIndex);
                 } else {
                     current = std::move(updated);
                     showStatusMessage(tr("Updated '%1'.").arg(featureName));
@@ -1500,6 +1505,21 @@ QWidget* QFramegrabberWidget::createFeatureEditor(const QDomElement& node,
         );
     });
     return edit;
+}
+
+bool QFramegrabberWidget::featureWritable(const QDomElement& node, const TreeSource source) const
+{
+    if (source == TreeSource::Camera && _grabbing)
+    {
+        return false;
+    }
+
+    const QString accessMode = elementText(node, QStringLiteral("AccessMode")).trimmed();
+    if (!accessMode.isEmpty())
+    {
+        return accessMode == QStringLiteral("RW") || accessMode == QStringLiteral("WO");
+    }
+    return true;
 }
 
 bool QFramegrabberWidget::readFeature(const TreeSource source,
@@ -1549,6 +1569,26 @@ bool QFramegrabberWidget::writeFeature(const TreeSource source,
         dmaIndex,
         name.toStdString(),
         value);
+}
+
+void QFramegrabberWidget::refreshFeatureTree(const TreeSource source,
+                                             const Framegrabber::CameraTransport transport,
+                                             const unsigned int dmaIndex)
+{
+    if (source == TreeSource::Applet)
+    {
+        if (_appletDmaCombo && _appletDmaCombo->currentData().toUInt() == dmaIndex)
+        {
+            rebuildAppletTree();
+        }
+        return;
+    }
+
+    CameraPage* page = cameraPage(transport);
+    if (page && page->cameraCombo && page->cameraCombo->currentData().toUInt() == dmaIndex)
+    {
+        rebuildCameraTree(*page);
+    }
 }
 
 QFramegrabberWidget::TreeState QFramegrabberWidget::captureTreeState(QTreeWidget* tree) const

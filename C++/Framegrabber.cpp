@@ -1964,12 +1964,6 @@ bool Framegrabber::setAppletParameterById(const std::int64_t parameterId,
 
     if (result == FG_OK)
     {
-        clearAppletFeatureModel(dmaIndex);
-        notifyNode(
-            FeatureSource::Applet,
-            CameraTransport::None,
-            dmaIndex,
-            std::to_string(parameterId));
         if (verifyReadBack)
         {
             ParameterValue actual = value;
@@ -1979,6 +1973,7 @@ bool Framegrabber::setAppletParameterById(const std::int64_t parameterId,
                     actual,
                     true))
             {
+                clearAppletFeatureModel(dmaIndex);
                 if (!silent)
                 {
                     log(
@@ -1990,6 +1985,7 @@ bool Framegrabber::setAppletParameterById(const std::int64_t parameterId,
             }
             if (!parameterValuesMatch(value, actual))
             {
+                clearAppletFeatureModel(dmaIndex);
                 if (!silent)
                 {
                     log(
@@ -2000,6 +1996,12 @@ bool Framegrabber::setAppletParameterById(const std::int64_t parameterId,
                 return false;
             }
         }
+        clearAppletFeatureModel(dmaIndex);
+        notifyNode(
+            FeatureSource::Applet,
+            CameraTransport::None,
+            dmaIndex,
+            std::to_string(parameterId));
         return true;
     }
     if (!silent)
@@ -2355,6 +2357,23 @@ bool Framegrabber::setCameraFeature(const CameraTransport transport,
 
     if (success)
     {
+        ParameterValue actual = value;
+        if (!getCameraFeature(transport, dmaIndex, name, actual))
+        {
+            log(
+                "Camera feature " + name
+                    + " was written but read-back verification failed.",
+                true);
+            return false;
+        }
+        if (!parameterValuesMatch(value, actual))
+        {
+            log(
+                "Camera feature " + name
+                    + " read-back value does not match the requested value.",
+                true);
+            return false;
+        }
         notifyNode(FeatureSource::Camera, transport, dmaIndex, name);
     }
     return success;
