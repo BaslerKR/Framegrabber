@@ -15,6 +15,8 @@
 #include <QWidget>
 
 #include <memory>
+#include <type_traits>
+#include <utility>
 #include <vector>
 
 class QComboBox;
@@ -164,12 +166,14 @@ private:
     void runAsyncWrite(Func&& writeFunc, Cleanup&& cleanupFunc) {
         setOperationActive(true);
         auto* success = new bool(false);
-        QThread* worker = QThread::create([writeFunc, success]() {
-            *success = writeFunc();
+        auto write = std::make_shared<std::decay_t<Func>>(std::forward<Func>(writeFunc));
+        auto cleanup = std::make_shared<std::decay_t<Cleanup>>(std::forward<Cleanup>(cleanupFunc));
+        QThread* worker = QThread::create([write, success]() {
+            *success = (*write)();
         });
-        connect(worker, &QThread::finished, this, [this, success, cleanupFunc, worker]() {
+        connect(worker, &QThread::finished, this, [this, success, cleanup, worker]() {
             setOperationActive(false);
-            cleanupFunc(*success);
+            (*cleanup)(*success);
             delete success;
             worker->deleteLater();
         });

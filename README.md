@@ -88,6 +88,9 @@ multi-DMA acquisition, transport-aware camera control, and Qt feature editing.
   invalidates the selected DMA hierarchy and rebuilds it from current XML because one
   feature may create, remove, move, or change the value/access state of other features;
   tree expansion and selection remain UI state.
+- The Qt widget runs feature writes on a short-lived worker thread and returns cleanup
+  to the GUI thread through callable objects with explicit shared lifetime, so stateful
+  completion handlers compile consistently across MSVC and other C++17 toolchains.
 - Dynamic access uses the SDK's `PROP_ID_ACCESS_ID` virtual parameter when present and
   falls back to the GenApi register `AccessMode` when the applet reports access ID zero.
   Live write/lock/modify flags are enforced again immediately before an SDK write.
