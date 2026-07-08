@@ -10,7 +10,6 @@
 #include <QDomDocument>
 #include <QDoubleSpinBox>
 #include <QFileDialog>
-#include <QHeaderView>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
@@ -22,7 +21,6 @@
 #include <QStyle>
 #include <QTabWidget>
 #include <QThread>
-#include <QTimer>
 #include <QToolButton>
 #include <QTreeWidget>
 #include <QVBoxLayout>
@@ -169,17 +167,6 @@ QString cameraTransportName(const Framegrabber::CameraTransport transport)
     return QCoreApplication::translate("QFramegrabberWidget", "Camera");
 }
 
-void setInitialFeatureColumnWidth(QTreeWidget* tree)
-{
-    QTimer::singleShot(0, tree, [tree]
-    {
-        const int availableWidth = tree->viewport()->width();
-        if (availableWidth > 0)
-        {
-            tree->setColumnWidth(0, availableWidth * 52 / 100);
-        }
-    });
-}
 }
 
 QFramegrabberWidget::QFramegrabberWidget(QWidget* parent, Framegrabber* framegrabber)
@@ -296,16 +283,6 @@ void QFramegrabberWidget::buildUi()
     topLayout->addLayout(selectorLayout);
     topLayout->addLayout(toolLayout);
 
-    _appletInfoEdit = new QLineEdit(this);
-    _appletInfoEdit->setObjectName(QStringLiteral("FramegrabberAppletInfoEdit"));
-    _appletInfoEdit->setReadOnly(true);
-    _appletInfoEdit->setPlaceholderText(tr("No applet loaded"));
-    _appletInfoEdit->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
-
-    auto* infoLayout = new QHBoxLayout;
-    infoLayout->setObjectName(QStringLiteral("DeviceInfoLayout"));
-    infoLayout->addWidget(_appletInfoEdit);
-
     _tabs = new QTabWidget(this);
     _tabs->setObjectName(QStringLiteral("FramegrabberControlTabs"));
     _tabs->addTab(createSetupTab(), tr("Setup"));
@@ -333,7 +310,6 @@ void QFramegrabberWidget::buildUi()
     auto* rootLayout = new QVBoxLayout;
     rootLayout->setObjectName(QStringLiteral("DeviceRootLayout"));
     rootLayout->addLayout(topLayout);
-    rootLayout->addLayout(infoLayout);
     rootLayout->addWidget(_tabs);
     rootLayout->addWidget(_statusBar);
     setLayout(rootLayout);
@@ -399,9 +375,6 @@ QWidget* QFramegrabberWidget::createSetupTab()
     _appletTree->setObjectName(QStringLiteral("FramegrabberAppletFeaturesTree"));
     _appletTree->setProperty("treeRole", QStringLiteral("DeviceFeatureTree"));
     _appletTree->setHeaderLabels({tr("Feature"), tr("Value")});
-    _appletTree->header()->setSectionResizeMode(0, QHeaderView::Interactive);
-    _appletTree->header()->setSectionResizeMode(1, QHeaderView::Stretch);
-    setInitialFeatureColumnWidth(_appletTree);
 
     auto* layout = new QVBoxLayout;
     layout->setObjectName(QStringLiteral("FramegrabberAppletLayout"));
@@ -448,27 +421,18 @@ QFramegrabberWidget::createCameraPage(
     page->refreshButton->setIcon(
         QIcon(QStringLiteral(":/Resources/Icons/icons8-refresh-48.png")));
     page->refreshButton->setToolTip(
-        tr("Discover %1 cameras").arg(cameraTransportName(capability.transport)));
-
-    page->connectButton = new QToolButton(page->widget);
-    page->connectButton->setIcon(
-        QIcon(QStringLiteral(":/Resources/Icons/icons8-connect-48.png")));
-    page->connectButton->setToolTip(
-        tr("Connect selected %1 camera").arg(cameraTransportName(capability.transport)));
+        tr("Rescan and reconnect %1 cameras")
+            .arg(cameraTransportName(capability.transport)));
 
     auto* selectorLayout = new QHBoxLayout;
     selectorLayout->setObjectName(QStringLiteral("FramegrabberCameraSelectorLayout"));
     selectorLayout->addWidget(page->cameraCombo);
     selectorLayout->addWidget(page->refreshButton);
-    selectorLayout->addWidget(page->connectButton);
 
     page->cameraTree = new QTreeWidget(page->widget);
     page->cameraTree->setObjectName(QStringLiteral("FramegrabberCameraFeaturesTree"));
     page->cameraTree->setProperty("treeRole", QStringLiteral("DeviceFeatureTree"));
     page->cameraTree->setHeaderLabels({tr("Feature"), tr("Value")});
-    page->cameraTree->header()->setSectionResizeMode(0, QHeaderView::Interactive);
-    page->cameraTree->header()->setSectionResizeMode(1, QHeaderView::Stretch);
-    setInitialFeatureColumnWidth(page->cameraTree);
 
     auto* layout = new QVBoxLayout;
     layout->setObjectName(QStringLiteral("FramegrabberCameraLayout"));
@@ -481,34 +445,16 @@ QFramegrabberWidget::createCameraPage(
     {
         startCameraRefresh(pageState->capability.transport);
     });
-    connect(page->connectButton, &QToolButton::clicked, this, [this, pageState]
-    {
-        if (!_framegrabber || pageState->cameraCombo->currentIndex() < 0)
-        {
-            return;
-        }
-        const unsigned int dmaIndex = pageState->cameraCombo->currentData().toUInt();
-        if (_framegrabber->connectCamera(pageState->capability.transport, dmaIndex))
-        {
-            rebuildCameraTree(*pageState);
-            showStatusMessage(
-                tr("%1 camera connected.")
-                    .arg(cameraTransportName(pageState->capability.transport)));
-        }
-        else
-        {
-            showStatusMessage(
-                tr("Failed to connect the %1 camera.")
-                    .arg(cameraTransportName(pageState->capability.transport)),
-                true);
-        }
-    });
     connect(
         page->cameraCombo,
         QOverload<int>::of(&QComboBox::currentIndexChanged),
         this,
         [this, pageState]
     {
+        if (_updatingDeviceUi)
+        {
+            return;
+        }
         rebuildCameraTree(*pageState);
     });
     return page;
@@ -560,6 +506,10 @@ void QFramegrabberWidget::registerCallbacks()
                 [guard, source, transport, dmaIndex]
                 {
                     if (!guard)
+                    {
+                        return;
+                    }
+                    if (guard->_updatingDeviceUi)
                     {
                         return;
                     }
@@ -737,7 +687,8 @@ void QFramegrabberWidget::startCameraRefresh(
     _operationThread = worker;
     setOperationActive(true);
     showStatusMessage(
-        tr("Scanning %1 cameras...").arg(cameraTransportName(transport)));
+        tr("Scanning and connecting %1 cameras...")
+            .arg(cameraTransportName(transport)));
     connect(worker, &QThread::finished, this, [guard, worker, transport, success]
     {
         worker->deleteLater();
@@ -755,8 +706,8 @@ void QFramegrabberWidget::startCameraRefresh(
         guard->refreshCameraSelector(*currentPage);
         guard->showStatusMessage(
             *success
-                ? tr("%1 camera scan finished.").arg(cameraTransportName(transport))
-                : tr("%1 camera scan failed.").arg(cameraTransportName(transport)),
+                ? tr("%1 camera setup finished.").arg(cameraTransportName(transport))
+                : tr("%1 camera setup failed.").arg(cameraTransportName(transport)),
             !*success);
     });
     worker->start();
@@ -772,14 +723,14 @@ void QFramegrabberWidget::setOperationActive(const bool active)
     {
         page->refreshButton->setEnabled(
             !active && opened && !_grabbing && page->capability.canDiscover);
-        page->connectButton->setEnabled(
-            !active && opened && !_grabbing && page->capability.canConnect);
     }
     updateStatusBubble();
 }
 
 void QFramegrabberWidget::applyConnectionState(const bool opened)
 {
+    const bool wasUpdatingDeviceUi = _updatingDeviceUi;
+    _updatingDeviceUi = true;
     _boardCombo->setEnabled(!opened && !_operationActive);
     _loadAppletButton->setText(opened ? tr("Unload Applet") : tr("Load Applet"));
     _grabOneButton->setEnabled(opened && !_grabbing);
@@ -787,33 +738,17 @@ void QFramegrabberWidget::applyConnectionState(const bool opened)
 
     if (opened)
     {
-        const QString appletName = QString::fromStdString(
-            _framegrabber->getLoadedAppletName());
-        QString appletVersion = QString::fromStdString(
-            _framegrabber->getLoadedAppletVersion());
-        if (!appletVersion.isEmpty()
-            && !appletVersion.startsWith(QLatin1Char('v'), Qt::CaseInsensitive))
-        {
-            appletVersion.prepend(QLatin1Char('v'));
-        }
-        _appletInfoEdit->setText(
-            appletVersion.isEmpty()
-                ? appletName
-                : tr("%1 · %2").arg(appletName, appletVersion));
-        _appletInfoEdit->setToolTip(
-            QString::fromStdString(_framegrabber->appletPath()));
         refreshDmaSelectors();
         rebuildCameraTabs();
         rebuildAppletTree();
     }
     else
     {
-        _appletInfoEdit->clear();
-        _appletInfoEdit->setToolTip({});
         _appletDmaCombo->clear();
         _appletTree->clear();
         clearCameraTabs();
     }
+    _updatingDeviceUi = wasUpdatingDeviceUi;
     setOperationActive(_operationActive);
     updateStatusBubble();
 }
@@ -831,8 +766,6 @@ void QFramegrabberWidget::updateGrabState(const bool grabbing)
     {
         page->refreshButton->setEnabled(
             !grabbing && !_operationActive && page->capability.canDiscover);
-        page->connectButton->setEnabled(
-            !grabbing && !_operationActive && page->capability.canConnect);
     }
     updateStatusBubble();
 }
@@ -922,6 +855,7 @@ void QFramegrabberWidget::clearCameraTabs()
 {
     for (const auto& page : _cameraPages)
     {
+        QSignalBlocker comboBlocker(page->cameraCombo);
         const int index = _tabs->indexOf(page->widget);
         if (index >= 0)
         {
@@ -948,9 +882,11 @@ QFramegrabberWidget::cameraPage(const Framegrabber::CameraTransport transport) c
 void QFramegrabberWidget::refreshCameraSelector(CameraPage& page)
 {
     const QVariant previous = page.cameraCombo->currentData();
+    QSignalBlocker comboBlocker(page.cameraCombo);
     page.cameraCombo->clear();
     if (!_framegrabber)
     {
+        page.cameraTree->clear();
         return;
     }
     for (const Framegrabber::CameraInfo& camera :
@@ -967,6 +903,7 @@ void QFramegrabberWidget::refreshCameraSelector(CameraPage& page)
     {
         page.cameraCombo->setCurrentIndex(previousIndex);
     }
+    rebuildCameraTree(page);
 }
 
 void QFramegrabberWidget::rebuildAppletTree()

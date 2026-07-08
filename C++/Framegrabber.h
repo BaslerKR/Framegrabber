@@ -44,20 +44,84 @@ public:
     {
         Unknown,
         Mono8,
+        Mono10Packed,
+        Mono12Packed,
+        Mono14Packed,
         Mono16,
+        Mono32,
+        Binary,
         RGB24,
+        BGR24,
+        YCbCr422_8,
+        YCbCr422_8_CbYCrY,
         RGBA32,
         RGB30,
-        RGB48
+        RGB48,
+        BGR48,
+        RGB10Packed,
+        RGB12Packed,
+        RGB14Packed,
+        BGR10Packed,
+        BGR12Packed,
+        BGR14Packed,
+        RGBA10Packed,
+        RGBA12Packed,
+        RGBA14Packed,
+        RGBA64,
+        BGRA32,
+        BGRA10Packed,
+        BGRA12Packed,
+        BGRA14Packed,
+        BGRA64,
+        RGBX32,
+        RGBX10Packed,
+        RGBX12Packed,
+        RGBX14Packed,
+        RGBX64,
+        BayerGR8,
+        BayerGR10,
+        BayerGR12,
+        BayerGR14,
+        BayerGR16,
+        BayerRG8,
+        BayerRG10,
+        BayerRG12,
+        BayerRG14,
+        BayerRG16,
+        BayerGB8,
+        BayerGB10,
+        BayerGB12,
+        BayerGB14,
+        BayerGB16,
+        BayerBG8,
+        BayerBG10,
+        BayerBG12,
+        BayerBG14,
+        BayerBG16,
+        BiColorRGBG8,
+        BiColorRGBG10,
+        BiColorRGBG12,
+        BiColorGRGB8,
+        BiColorGRGB10,
+        BiColorGRGB12,
+        BiColorBGRG8,
+        BiColorBGRG10,
+        BiColorBGRG12,
+        BiColorGBGR8,
+        BiColorGBGR10,
+        BiColorGBGR12,
+        Raw,
+        Jpeg
     };
 
     struct Image
     {
-        std::shared_ptr<const std::vector<std::uint8_t>> storage;
+        std::shared_ptr<const std::uint8_t> storage;
         std::size_t size = 0;
         int width = 0;
         int height = 0;
         int stride = 0;
+        int bitsPerPixel = 0;
         int bytesPerPixel = 0;
         int sdkPixelFormat = 0;
         PixelFormat pixelFormat = PixelFormat::Unknown;
@@ -66,7 +130,7 @@ public:
 
         [[nodiscard]] const std::uint8_t* data() const noexcept
         {
-            return storage && !storage->empty() ? storage->data() : nullptr;
+            return storage.get();
         }
 
         [[nodiscard]] bool isValid() const noexcept
@@ -293,6 +357,7 @@ private:
         _appletFeatureModels;
 
     static PixelFormat toPixelFormat(int sdkFormat);
+    static int bitsPerPixel(int sdkFormat);
     static int bytesPerPixel(int sdkFormat);
 
     bool openResolvedBoard(const std::string& boardName,
@@ -300,6 +365,7 @@ private:
                            const std::string& appletPath,
                            const std::string& discoveredAppletVersion,
                            bool initializeCameraControl);
+    bool closeUnlocked(bool notifyConnectionStatus);
     void requestStopChannels();
     bool joinStoppedChannels();
     void releaseHandles();

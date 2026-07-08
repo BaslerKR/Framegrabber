@@ -63,7 +63,6 @@ private:
         QComboBox* cameraCombo = nullptr;
         QTreeWidget* cameraTree = nullptr;
         QToolButton* refreshButton = nullptr;
-        QToolButton* connectButton = nullptr;
     };
 
     Framegrabber* _framegrabber = nullptr;
@@ -74,6 +73,7 @@ private:
     bool _operationActive = false;
     bool _connectionAttempted = false;
     bool _grabbing = false;
+    bool _updatingDeviceUi = false;
 
     QComboBox* _boardCombo = nullptr;
     QToolButton* _grabOneButton = nullptr;
@@ -83,7 +83,7 @@ private:
     QTreeWidget* _appletTree = nullptr;
     QLineEdit* _appletPathEdit = nullptr;
     QPushButton* _loadAppletButton = nullptr;
-    QLineEdit* _appletInfoEdit = nullptr;
+
 
     QTabWidget* _tabs = nullptr;
     std::vector<std::unique_ptr<CameraPage>> _cameraPages;

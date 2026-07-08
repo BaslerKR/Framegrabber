@@ -7,6 +7,31 @@ multi-DMA acquisition, transport-aware camera control, and Qt feature editing.
 
 - The module owns all Basler Frame Grabber SDK handles and DMA memory.
 - `Framegrabber::Image` owns copied frame bytes; consumers never retain an SDK buffer.
+- Each DMA channel preallocates an owned byte-buffer pool with the configured DMA
+  buffer count. Frames copy once from the SDK ring into a leased pool slot, and the
+  last consumer reference returns that slot for reuse. Pool exhaustion waits rather
+  than overwriting bytes still visible to a consumer.
+- Legacy SDK `FG_COL24` and `FG_COL48` output is BGR-ordered. The public pixel
+  format preserves that identity so Qt uses `Format_BGR888` for 8-bit data and
+  swaps the 16-bit BGR channels only while reducing them for 8-bit display.
+- DMA output `FG_FORMAT` constants are mapped explicitly. Supported display paths
+  include Mono 8/10/12/14/16/32-bit output, 1-bit binary output, BGR/RGB/RGBA/BGRA
+  8/10/12/14/16-bit output, RGBX 8/10/12/14/16-bit output, YUV422/YCbCr422 8-bit
+  output, Bayer GR/RG/GB/BG 8/10/12/14/16-bit output, and BiColor RGBG/GRGB/BGRG/GBGR
+  8/10/12-bit output. Packed formats are sized from bits per pixel, not guessed from
+  `FG_PIXELFORMAT`. `FG_RAW` and `FG_JPEG` are recognized as source/encoded identities
+  but are rejected for generic image display because they do not define a displayable
+  pixel layout.
+- Bayer DMA output is displayed through a lightweight 2x2 Bayer-cell RGB
+  reconstruction. The host does not expose raw Bayer samples as artificial
+  per-pixel RGB checker data in the live viewer.
+- `FG_YUV422_8` and `FG_YCBCR422_8` DMA output both use two bytes per pixel.
+  `YUV422_8`, `FG_YUV422_8`, and `FG_YCBCR422_8` are exposed as Y0-Cb-Y1-Cr
+  for host RGB888 display conversion; camera input `FG_PIXELFORMAT` and DMA
+  output `FG_FORMAT` remain separate applet settings.
+- Acquisition sizes and displays frames from DMA output `FG_FORMAT` only. If
+  `FG_PIXELFORMAT` is YUV422 but `FG_FORMAT` is `FG_GRAY`, the host receives and
+  displays Mono8 output.
 - The module does not depend on Camera, GraphicsEngine, Gocator, Resources, or Playground.
 - `QFramegrabberWidget` remains usable with plain Qt when the host does not install Resources.
 
@@ -16,9 +41,13 @@ multi-DMA acquisition, transport-aware camera control, and Qt feature editing.
 - `Framegrabber` follows the Camera lifecycle shape: callback registration, `open`, `close`,
   `grab`, `requestStop`, `stop`, and status notifications.
 - Continuous acquisition uses DMA-specific `ready(dmaIndex)` admission.
-- Grab, stop, and close operations are serialized. A new grab joins and clears every
-  stopped DMA worker before allocating replacement channels, and channel registration
-  publishes its worker atomically so concurrent lifecycle calls cannot miss a thread.
+- Open, grab, stop, and close operations are serialized. Loading a replacement applet
+  closes the current SDK handle under the same lifecycle lock before initializing the
+  new handle, so UI refresh, camera discovery, and acquisition cannot observe a
+  half-released board.
+- A new grab joins and clears every stopped DMA worker before allocating replacement
+  channels, and channel registration publishes its worker atomically so concurrent
+  lifecycle calls cannot miss a thread.
 - DMA stop/free operations are synchronized per channel, `ready(dmaIndex)` is a binary
   admission signal, and exceptions from consumer callbacks do not escape into SDK workers.
 - Applets are initialized first through `loadApplet()`/`Fg_Init()`. VisualApplets HAP
@@ -37,6 +66,9 @@ multi-DMA acquisition, transport-aware camera control, and Qt feature editing.
   a CoaXPress interface and excludes the `family=test` diagnostic family.
   `FrameGrabberTest` therefore keeps its Fg/DMA controls without entering the SDK camera
   control path, which is not valid for that applet.
+- CXP discovery immediately connects every discovered camera so GenICam features are
+  available without a separate user action. The camera-page refresh action remains only
+  for an explicit rescan after hardware or link changes.
 - `QFramegrabberWidget` creates transport camera tabs from those capabilities after
   the board opens and removes them when it closes.
 - A session-level read-only information field above the tabs shows the loaded applet

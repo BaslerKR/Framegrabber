@@ -428,6 +428,92 @@ bool buildAppletFeatureNode(
     visiting.erase(output.name);
     return true;
 }
+
+class OwnedBufferPool final
+    : public std::enable_shared_from_this<OwnedBufferPool>
+{
+public:
+    using Lease = std::shared_ptr<std::uint8_t>;
+
+    static std::shared_ptr<OwnedBufferPool> create(
+        const std::size_t bufferSize,
+        const std::size_t bufferCount)
+    {
+        auto pool = std::shared_ptr<OwnedBufferPool>(
+            new OwnedBufferPool);
+        pool->_available.reserve(bufferCount);
+        for (std::size_t index = 0; index < bufferCount; ++index)
+        {
+            pool->_available.push_back(
+                std::unique_ptr<std::uint8_t[]>(
+                    new std::uint8_t[bufferSize]));
+        }
+        return pool;
+    }
+
+    Lease acquire(const std::atomic<bool>& stopRequested)
+    {
+        std::unique_lock<std::mutex> lock(_mutex);
+        _condition.wait(lock, [this, &stopRequested]
+        {
+            return !_available.empty()
+                || _stopped
+                || stopRequested.load(std::memory_order_acquire);
+        });
+        if (_stopped
+            || stopRequested.load(std::memory_order_acquire)
+            || _available.empty())
+        {
+            return {};
+        }
+
+        std::uint8_t* data = _available.back().release();
+        _available.pop_back();
+        const std::weak_ptr<OwnedBufferPool> weakPool = shared_from_this();
+        return Lease(data, [weakPool](std::uint8_t* released)
+        {
+            if (const std::shared_ptr<OwnedBufferPool> pool = weakPool.lock())
+            {
+                pool->release(released);
+            }
+            else
+            {
+                delete[] released;
+            }
+        });
+    }
+
+    void stop()
+    {
+        {
+            std::lock_guard<std::mutex> lock(_mutex);
+            _stopped = true;
+        }
+        _condition.notify_all();
+    }
+
+private:
+    OwnedBufferPool() = default;
+
+    void release(std::uint8_t* data)
+    {
+        if (!data)
+        {
+            return;
+        }
+        {
+            std::lock_guard<std::mutex> lock(_mutex);
+            _available.push_back(
+                std::unique_ptr<std::uint8_t[]>(data));
+        }
+        _condition.notify_one();
+    }
+
+    std::mutex _mutex;
+    std::condition_variable _condition;
+    std::vector<std::unique_ptr<std::uint8_t[]>> _available;
+    bool _stopped = false;
+};
 }
 
 struct Framegrabber::DmaChannel
@@ -438,6 +524,7 @@ struct Framegrabber::DmaChannel
     std::mutex resourceMutex;
     std::mutex permitMutex;
     std::condition_variable permitCondition;
+    std::shared_ptr<OwnedBufferPool> ownedBufferPool;
     std::atomic<bool> stopRequested{false};
     std::atomic<bool> acquisitionStarted{false};
     std::atomic<bool> cameraStarted{false};
@@ -614,6 +701,7 @@ bool Framegrabber::loadApplet(const std::string& path, const std::string& boardN
 
 bool Framegrabber::open(const std::string& boardName)
 {
+    std::lock_guard<std::mutex> lifecycleLock(_lifecycleMutex);
     if (!_system || !_system->isInitialized())
     {
         log("Frame grabber system is not initialized.", true);
@@ -636,7 +724,10 @@ bool Framegrabber::open(const std::string& boardName)
 
     const FramegrabberSystem::AppletMetadata appletMetadata =
         _system->getAppletMetadata(board.displayName(), path);
-    close();
+    if (!closeUnlocked(true))
+    {
+        return false;
+    }
     return openResolvedBoard(
         board.displayName(),
         board.index,
@@ -723,10 +814,15 @@ bool Framegrabber::isOpened() const
 void Framegrabber::close()
 {
     std::lock_guard<std::mutex> lifecycleLock(_lifecycleMutex);
+    closeUnlocked(true);
+}
+
+bool Framegrabber::closeUnlocked(const bool notifyConnectionStatus)
+{
     requestStopChannels();
     if (!joinStoppedChannels())
     {
-        return;
+        return false;
     }
 
     bool wasOpened = false;
@@ -742,10 +838,11 @@ void Framegrabber::close()
     }
     clearAppletFeatureModels();
 
-    if (wasOpened)
+    if (wasOpened && notifyConnectionStatus)
     {
         notifyStatus(ConnectionStatus, false);
     }
+    return true;
 }
 
 void Framegrabber::releaseHandles()
@@ -992,15 +1089,17 @@ void Framegrabber::startChannel(const unsigned int dmaIndex, const std::size_t f
     const int height = static_cast<int>(heightValue);
     const int sdkFormat = static_cast<int>(formatValue);
 
+    const int pixelBits = bitsPerPixel(sdkFormat);
     const int pixelBytes = bytesPerPixel(sdkFormat);
-    if (width <= 0 || height <= 0 || pixelBytes <= 0)
+    if (width <= 0 || height <= 0 || pixelBits <= 0 || pixelBytes <= 0)
     {
         log("DMA(" + std::to_string(dmaIndex) + ") has an unsupported image format.", true);
         return;
     }
 
-    const std::size_t rowBytes = static_cast<std::size_t>(width)
-                                 * static_cast<std::size_t>(pixelBytes);
+    const std::size_t rowBits = static_cast<std::size_t>(width)
+                                * static_cast<std::size_t>(pixelBits);
+    const std::size_t rowBytes = (rowBits + 7U) / 8U;
     if (static_cast<std::size_t>(height)
         > (std::numeric_limits<std::size_t>::max)() / rowBytes)
     {
@@ -1011,6 +1110,23 @@ void Framegrabber::startChannel(const unsigned int dmaIndex, const std::size_t f
     if (bufferCount > (std::numeric_limits<std::size_t>::max)() / frameBytes)
     {
         log("DMA(" + std::to_string(dmaIndex) + ") buffer allocation is too large.", true);
+        return;
+    }
+
+    std::shared_ptr<OwnedBufferPool> ownedBufferPool;
+    try
+    {
+        ownedBufferPool = OwnedBufferPool::create(
+            frameBytes,
+            bufferCount);
+    }
+    catch (const std::exception& exception)
+    {
+        log(
+            "DMA(" + std::to_string(dmaIndex)
+                + ") owned buffer pool allocation failed: "
+                + exception.what(),
+            true);
         return;
     }
 
@@ -1027,6 +1143,7 @@ void Framegrabber::startChannel(const unsigned int dmaIndex, const std::size_t f
     auto channel = std::make_unique<DmaChannel>();
     channel->index = dmaIndex;
     channel->memory = memory;
+    channel->ownedBufferPool = std::move(ownedBufferPool);
     channel->permits.store(1, std::memory_order_release);
     DmaChannel* channelPtr = channel.get();
     std::unique_lock<std::mutex> registrationLock(_stateMutex);
@@ -1035,7 +1152,7 @@ void Framegrabber::startChannel(const unsigned int dmaIndex, const std::size_t f
     try
     {
         channelPtr->thread = std::thread(
-            [this, channelPtr, handle, frames, width, height, sdkFormat, pixelBytes, frameBytes,
+            [this, channelPtr, handle, frames, width, height, sdkFormat, pixelBits, pixelBytes, frameBytes,
              rowBytes]
             {
                 const unsigned int dmaIndex = channelPtr->index;
@@ -1113,8 +1230,14 @@ void Framegrabber::startChannel(const unsigned int dmaIndex, const std::size_t f
                         continue;
                     }
 
-                    auto ownedBytes = std::make_shared<std::vector<std::uint8_t>>(frameBytes);
-                    std::memcpy(ownedBytes->data(), source, frameBytes);
+                    OwnedBufferPool::Lease ownedBytes =
+                        channelPtr->ownedBufferPool->acquire(
+                            channelPtr->stopRequested);
+                    if (!ownedBytes)
+                    {
+                        break;
+                    }
+                    std::memcpy(ownedBytes.get(), source, frameBytes);
 
                     Image image;
                     image.storage = std::move(ownedBytes);
@@ -1122,6 +1245,7 @@ void Framegrabber::startChannel(const unsigned int dmaIndex, const std::size_t f
                     image.width = width;
                     image.height = height;
                     image.stride = static_cast<int>(rowBytes);
+                    image.bitsPerPixel = pixelBits;
                     image.bytesPerPixel = pixelBytes;
                     image.sdkPixelFormat = sdkFormat;
                     image.pixelFormat = toPixelFormat(sdkFormat);
@@ -1240,6 +1364,10 @@ void Framegrabber::requestStopChannels()
             }
             channel->stopRequested.store(true, std::memory_order_release);
             channel->permitCondition.notify_all();
+            if (channel->ownedBufferPool)
+            {
+                channel->ownedBufferPool->stop();
+            }
             channels.push_back(channel.get());
         }
     }
@@ -1998,8 +2126,23 @@ bool Framegrabber::refreshCameras(const CameraTransport transport)
         discovered.push_back(std::move(entry));
     }
 
+    bool allConnected = true;
+    for (CameraEntry& camera : discovered)
+    {
+        if (!camera.handle || Sgc_connectCamera(camera.handle) != SGC_OK)
+        {
+            allConnected = false;
+            log(
+                "Failed to connect the discovered CXP camera on DMA "
+                    + std::to_string(camera.info.dmaIndex) + ".",
+                true);
+            continue;
+        }
+        camera.info.connected = true;
+    }
+
     _cxpCameras = std::move(discovered);
-    return true;
+    return allConnected;
 }
 
 std::vector<Framegrabber::CameraInfo>
@@ -2277,41 +2420,262 @@ Framegrabber::PixelFormat Framegrabber::toPixelFormat(const int sdkFormat)
     switch (sdkFormat)
     {
     case FG_GRAY:
+    case FG_GRAY_PLUS_PICNR:
         return PixelFormat::Mono8;
+    case FG_GRAY10:
+        return PixelFormat::Mono10Packed;
+    case FG_GRAY12:
+        return PixelFormat::Mono12Packed;
+    case FG_GRAY14:
+        return PixelFormat::Mono14Packed;
     case FG_GRAY16:
+    case FG_GRAY16_PLUS_PICNR:
         return PixelFormat::Mono16;
+    case FG_GRAY32:
+        return PixelFormat::Mono32;
+    case FG_BINARY:
+        return PixelFormat::Binary;
     case FG_COL24:
-        return PixelFormat::RGB24;
+        return PixelFormat::BGR24;
     case FG_COL32:
         return PixelFormat::RGBA32;
-    case FG_COL30:
-        return PixelFormat::RGB30;
     case FG_COL48:
+        return PixelFormat::BGR48;
+    case FG_RGB8:
+        return PixelFormat::RGB24;
+    case FG_RGB10:
+        return PixelFormat::RGB10Packed;
+    case FG_RGB12:
+        return PixelFormat::RGB12Packed;
+    case FG_RGB14:
+        return PixelFormat::RGB14Packed;
+    case FG_RGB16:
         return PixelFormat::RGB48;
+    case FG_RGBA8:
+        return PixelFormat::RGBA32;
+    case FG_RGBA10:
+        return PixelFormat::RGBA10Packed;
+    case FG_RGBA12:
+        return PixelFormat::RGBA12Packed;
+    case FG_RGBA14:
+        return PixelFormat::RGBA14Packed;
+    case FG_RGBA16:
+        return PixelFormat::RGBA64;
+    case FG_BGRA8:
+        return PixelFormat::BGRA32;
+    case FG_BGRA10:
+        return PixelFormat::BGRA10Packed;
+    case FG_BGRA12:
+        return PixelFormat::BGRA12Packed;
+    case FG_BGRA14:
+        return PixelFormat::BGRA14Packed;
+    case FG_BGRA16:
+        return PixelFormat::BGRA64;
+    case FG_COL30:
+        return PixelFormat::BGR10Packed;
+    case FG_COL36:
+        return PixelFormat::BGR12Packed;
+    case FG_COL42:
+        return PixelFormat::BGR14Packed;
+    case FG_RGBX32:
+        return PixelFormat::RGBX32;
+    case FG_RGBX40:
+        return PixelFormat::RGBX10Packed;
+    case FG_RGBX48:
+        return PixelFormat::RGBX12Packed;
+    case FG_RGBX56:
+        return PixelFormat::RGBX14Packed;
+    case FG_RGBX64:
+        return PixelFormat::RGBX64;
+    case YUV422_8:
+    case FG_YUV422_8:
+    case FG_YCBCR422_8:
+        return PixelFormat::YCbCr422_8;
+    case FG_BAYERGR8:
+        return PixelFormat::BayerGR8;
+    case FG_BAYERGR10:
+        return PixelFormat::BayerGR10;
+    case FG_BAYERGR12:
+        return PixelFormat::BayerGR12;
+    case FG_BAYERGR14:
+        return PixelFormat::BayerGR14;
+    case FG_BAYERGR16:
+        return PixelFormat::BayerGR16;
+    case FG_BAYERRG8:
+        return PixelFormat::BayerRG8;
+    case FG_BAYERRG10:
+        return PixelFormat::BayerRG10;
+    case FG_BAYERRG12:
+        return PixelFormat::BayerRG12;
+    case FG_BAYERRG14:
+        return PixelFormat::BayerRG14;
+    case FG_BAYERRG16:
+        return PixelFormat::BayerRG16;
+    case FG_BAYERGB8:
+        return PixelFormat::BayerGB8;
+    case FG_BAYERGB10:
+        return PixelFormat::BayerGB10;
+    case FG_BAYERGB12:
+        return PixelFormat::BayerGB12;
+    case FG_BAYERGB14:
+        return PixelFormat::BayerGB14;
+    case FG_BAYERGB16:
+        return PixelFormat::BayerGB16;
+    case FG_BAYERBG8:
+        return PixelFormat::BayerBG8;
+    case FG_BAYERBG10:
+        return PixelFormat::BayerBG10;
+    case FG_BAYERBG12:
+        return PixelFormat::BayerBG12;
+    case FG_BAYERBG14:
+        return PixelFormat::BayerBG14;
+    case FG_BAYERBG16:
+        return PixelFormat::BayerBG16;
+    case FG_BICOLOR_RGBG8:
+        return PixelFormat::BiColorRGBG8;
+    case FG_BICOLOR_RGBG10:
+        return PixelFormat::BiColorRGBG10;
+    case FG_BICOLOR_RGBG12:
+        return PixelFormat::BiColorRGBG12;
+    case FG_BICOLOR_GRGB8:
+        return PixelFormat::BiColorGRGB8;
+    case FG_BICOLOR_GRGB10:
+        return PixelFormat::BiColorGRGB10;
+    case FG_BICOLOR_GRGB12:
+        return PixelFormat::BiColorGRGB12;
+    case FG_BICOLOR_BGRG8:
+        return PixelFormat::BiColorBGRG8;
+    case FG_BICOLOR_BGRG10:
+        return PixelFormat::BiColorBGRG10;
+    case FG_BICOLOR_BGRG12:
+        return PixelFormat::BiColorBGRG12;
+    case FG_BICOLOR_GBGR8:
+        return PixelFormat::BiColorGBGR8;
+    case FG_BICOLOR_GBGR10:
+        return PixelFormat::BiColorGBGR10;
+    case FG_BICOLOR_GBGR12:
+        return PixelFormat::BiColorGBGR12;
+    case FG_RAW:
+        return PixelFormat::Raw;
+    case FG_JPEG:
+        return PixelFormat::Jpeg;
     default:
         return PixelFormat::Unknown;
     }
 }
 
-int Framegrabber::bytesPerPixel(const int sdkFormat)
+int Framegrabber::bitsPerPixel(const int sdkFormat)
 {
     switch (sdkFormat)
     {
     case FG_GRAY:
-        return 1;
+    case FG_GRAY_PLUS_PICNR:
+    case FG_BAYERGR8:
+    case FG_BAYERRG8:
+    case FG_BAYERGB8:
+    case FG_BAYERBG8:
+    case FG_BICOLOR_RGBG8:
+    case FG_BICOLOR_GRGB8:
+    case FG_BICOLOR_BGRG8:
+    case FG_BICOLOR_GBGR8:
+        return 8;
     case FG_GRAY16:
-        return 2;
+    case FG_GRAY16_PLUS_PICNR:
+    case FG_BAYERGR16:
+    case FG_BAYERRG16:
+    case FG_BAYERGB16:
+    case FG_BAYERBG16:
+        return 16;
+    case FG_GRAY10:
+    case FG_BAYERGR10:
+    case FG_BAYERRG10:
+    case FG_BAYERGB10:
+    case FG_BAYERBG10:
+    case FG_BICOLOR_RGBG10:
+    case FG_BICOLOR_GRGB10:
+    case FG_BICOLOR_BGRG10:
+    case FG_BICOLOR_GBGR10:
+        return 10;
+    case FG_GRAY12:
+    case FG_BAYERGR12:
+    case FG_BAYERRG12:
+    case FG_BAYERGB12:
+    case FG_BAYERBG12:
+    case FG_BICOLOR_RGBG12:
+    case FG_BICOLOR_GRGB12:
+    case FG_BICOLOR_BGRG12:
+    case FG_BICOLOR_GBGR12:
+        return 12;
+    case FG_GRAY14:
+    case FG_BAYERGR14:
+    case FG_BAYERRG14:
+    case FG_BAYERGB14:
+    case FG_BAYERBG14:
+        return 14;
+    case FG_BINARY:
+        return 1;
+    case FG_GRAY32:
+        return 32;
     case FG_COL24:
-        return 3;
+    case FG_RGB8:
+        return 24;
+    case FG_RGB10:
+        return 30;
+    case FG_RGB12:
+        return 36;
+    case FG_RGB14:
+        return 42;
     case FG_COL32:
-        return 4;
+    case FG_RGBX32:
+    case FG_RGBA8:
+    case FG_BGRA8:
+        return 32;
     case FG_COL30:
-        return 5;
+        return 30;
+    case FG_COL36:
+        return 36;
+    case FG_COL42:
+        return 42;
     case FG_COL48:
-        return 6;
+    case FG_RGB16:
+        return 48;
+    case FG_RGBA10:
+    case FG_BGRA10:
+        return 40;
+    case FG_RGBA12:
+    case FG_BGRA12:
+        return 48;
+    case FG_RGBA14:
+    case FG_BGRA14:
+        return 56;
+    case FG_RGBA16:
+    case FG_BGRA16:
+        return 64;
+    case FG_RGBX40:
+        return 40;
+    case FG_RGBX48:
+        return 48;
+    case FG_RGBX56:
+        return 56;
+    case FG_RGBX64:
+        return 64;
+    case YUV422_8:
+    case FG_YUV422_8:
+    case FG_YCBCR422_8:
+        return 16;
     default:
         return 0;
     }
+}
+
+int Framegrabber::bytesPerPixel(const int sdkFormat)
+{
+    const int bits = bitsPerPixel(sdkFormat);
+    if (bits <= 0)
+    {
+        return 0;
+    }
+    return (bits + 7) / 8;
 }
 
 void Framegrabber::notifyStatus(const Status status, const bool on)
