@@ -74,6 +74,10 @@ multi-DMA acquisition, transport-aware camera control, and Qt feature editing.
 - Camera feature trees are not rebuilt on acquisition start/stop. During acquisition,
   camera feature editors are disabled and the existing tree remains visible so optional
   GenICam nodes that are absent on a camera do not produce repeated refresh-time errors.
+- Camera feature trees hide non-readable leaf nodes before asking the SDK for a live
+  value. Write-only commands remain visible as executable buttons; other write-only or
+  unavailable nodes stay out of the value tree because reading them can make Siso
+  GenICam log access exceptions.
 - A session-level read-only information field above the tabs shows the loaded applet
   file name and runtime version; its tooltip preserves the full local applet path.
   This identity is not repeated inside the Setup tab because one applet owns the

@@ -1292,6 +1292,10 @@ void QFramegrabberWidget::addCategory(QTreeWidget* tree,
         {
             continue;
         }
+        if (!featureVisible(feature, source))
+        {
+            continue;
+        }
         QTreeWidgetItem* item = categoryItem
                                     ? new QTreeWidgetItem(categoryItem)
                                     : new QTreeWidgetItem(tree);
@@ -1302,6 +1306,10 @@ void QFramegrabberWidget::addCategory(QTreeWidget* tree,
         {
             tree->setItemWidget(item, 1, editor);
         }
+    }
+    if (categoryItem != parent && categoryItem && categoryItem->childCount() == 0)
+    {
+        delete categoryItem;
     }
     visiting.remove(categoryName);
 }
@@ -1328,12 +1336,18 @@ QWidget* QFramegrabberWidget::createFeatureEditor(const QDomElement& node,
     {
         current = std::string{};
     }
-    if (!readFeature(source, transport, dmaIndex, featureName, current)
+    const bool readable = featureReadable(node, source);
+    const bool writable = featureWritable(node, source);
+    if (!readable && tag != QStringLiteral("Command"))
+    {
+        return new QLabel(tr("Unavailable"), this);
+    }
+    if (readable
+        && !readFeature(source, transport, dmaIndex, featureName, current)
         && tag != QStringLiteral("Command"))
     {
         return new QLabel(tr("Unavailable"), this);
     }
-    const bool writable = featureWritable(node, source);
 
     if (tag == QStringLiteral("Boolean"))
     {
@@ -1505,6 +1519,35 @@ QWidget* QFramegrabberWidget::createFeatureEditor(const QDomElement& node,
         );
     });
     return edit;
+}
+
+bool QFramegrabberWidget::featureVisible(const QDomElement& node, const TreeSource source) const
+{
+    if (source != TreeSource::Camera)
+    {
+        return true;
+    }
+    const QString tag = node.tagName();
+    if (tag == QStringLiteral("Command"))
+    {
+        return featureWritable(node, source);
+    }
+    return featureReadable(node, source);
+}
+
+bool QFramegrabberWidget::featureReadable(const QDomElement& node, const TreeSource source) const
+{
+    if (source == TreeSource::Applet)
+    {
+        return true;
+    }
+
+    const QString accessMode = elementText(node, QStringLiteral("AccessMode")).trimmed();
+    if (!accessMode.isEmpty())
+    {
+        return accessMode == QStringLiteral("RW") || accessMode == QStringLiteral("RO");
+    }
+    return true;
 }
 
 bool QFramegrabberWidget::featureWritable(const QDomElement& node, const TreeSource source) const

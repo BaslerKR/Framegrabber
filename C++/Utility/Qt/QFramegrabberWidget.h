@@ -146,6 +146,8 @@ private:
                                  TreeSource source,
                                  Framegrabber::CameraTransport transport,
                                  unsigned int dmaIndex);
+    bool featureVisible(const QDomElement& node, TreeSource source) const;
+    bool featureReadable(const QDomElement& node, TreeSource source) const;
     bool featureWritable(const QDomElement& node, TreeSource source) const;
     bool readFeature(TreeSource source,
                      Framegrabber::CameraTransport transport,
