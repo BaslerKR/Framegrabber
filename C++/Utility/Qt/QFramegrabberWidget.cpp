@@ -299,12 +299,7 @@ void QFramegrabberWidget::buildUi()
     _messageLabel->setProperty("messageState", "normal");
     _messageLabel->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
     _messageLabel->hide();
-    _loadingLabel = new QLabel(this);
-    _loadingLabel->setObjectName(QStringLiteral("DeviceLoadingLabel"));
-    _loadingLabel->hide();
-
     _statusBar->addWidget(_statusLabel);
-    _statusBar->addPermanentWidget(_loadingLabel);
     _statusBar->addWidget(_messageLabel, 1);
 
     auto* rootLayout = new QVBoxLayout;
@@ -724,7 +719,7 @@ void QFramegrabberWidget::setOperationActive(const bool active)
         page->refreshButton->setEnabled(
             !active && opened && !_grabbing && page->capability.canDiscover);
     }
-    updateStatusBubble();
+    updateStatusLabel();
 }
 
 void QFramegrabberWidget::applyConnectionState(const bool opened)
@@ -750,7 +745,7 @@ void QFramegrabberWidget::applyConnectionState(const bool opened)
     }
     _updatingDeviceUi = wasUpdatingDeviceUi;
     setOperationActive(_operationActive);
-    updateStatusBubble();
+    updateStatusLabel();
 }
 
 void QFramegrabberWidget::updateGrabState(const bool grabbing)
@@ -767,24 +762,17 @@ void QFramegrabberWidget::updateGrabState(const bool grabbing)
         page->refreshButton->setEnabled(
             !grabbing && !_operationActive && page->capability.canDiscover);
     }
-    updateStatusBubble();
+    updateStatusLabel();
 }
 
-void QFramegrabberWidget::updateStatusBubble()
+void QFramegrabberWidget::updateStatusLabel()
 {
     const bool opened = _framegrabber && _framegrabber->isOpened();
 
     if (_operationActive) {
         _statusLabel->setText(tr("Loading"));
         _statusLabel->setProperty("status", "idle");
-        if (_loadingLabel) {
-            _loadingLabel->show();
-        }
     } else {
-        if (_loadingLabel) {
-            _loadingLabel->hide();
-        }
-
         if (!opened && !_connectionAttempted)
         {
             _statusLabel->setText(tr("Idle"));

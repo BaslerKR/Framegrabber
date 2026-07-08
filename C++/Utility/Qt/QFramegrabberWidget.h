@@ -73,6 +73,7 @@ private:
     QThread* _operationThread = nullptr;
     bool _shuttingDown = false;
     bool _operationActive = false;
+    int _pendingParameterWrites = 0;
     bool _connectionAttempted = false;
     bool _grabbing = false;
     bool _updatingDeviceUi = false;
@@ -93,7 +94,6 @@ private:
     QStatusBar* _statusBar = nullptr;
     QLabel* _statusLabel = nullptr;
     QLabel* _messageLabel = nullptr;
-    QLabel* _loadingLabel = nullptr;
 
     void buildUi();
     QWidget* createSetupTab();
@@ -108,7 +108,7 @@ private:
     void setOperationActive(bool active);
     void applyConnectionState(bool opened);
     void updateGrabState(bool grabbing);
-    void updateStatusBubble();
+    void updateStatusLabel();
     void refreshDmaSelectors();
     void rebuildCameraTabs();
     void clearCameraTabs();
@@ -164,6 +164,7 @@ private:
 
     template <typename Func, typename Cleanup>
     void runAsyncWrite(Func&& writeFunc, Cleanup&& cleanupFunc) {
+        ++_pendingParameterWrites;
         setOperationActive(true);
         auto* success = new bool(false);
         auto write = std::make_shared<std::decay_t<Func>>(std::forward<Func>(writeFunc));
@@ -172,7 +173,10 @@ private:
             *success = (*write)();
         });
         connect(worker, &QThread::finished, this, [this, success, cleanup, worker]() {
-            setOperationActive(false);
+            if (_pendingParameterWrites > 0) {
+                --_pendingParameterWrites;
+            }
+            setOperationActive(_operationThread != nullptr || _pendingParameterWrites > 0);
             (*cleanup)(*success);
             delete success;
             worker->deleteLater();
