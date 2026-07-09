@@ -71,6 +71,42 @@ std::string safeString(const char* value)
     return value ? value : "";
 }
 
+std::string readCameraXmlProperty(SgcCameraHandle* handle)
+{
+    if (!handle)
+    {
+        return {};
+    }
+
+    size_t xmlSize = 0;
+    unsigned int propertyType = SGC_PROPERTY_TYPE_STRING;
+    int result = Sgc_getCameraPropertyWithType(
+        handle,
+        CAM_PROP_XML_DATA,
+        nullptr,
+        &propertyType,
+        &xmlSize);
+    if (result != SGC_OK || xmlSize == 0)
+    {
+        return {};
+    }
+
+    std::vector<char> buffer(xmlSize + 1, '\0');
+    propertyType = SGC_PROPERTY_TYPE_STRING;
+    result = Sgc_getCameraPropertyWithType(
+        handle,
+        CAM_PROP_XML_DATA,
+        buffer.data(),
+        &propertyType,
+        &xmlSize);
+    if (result != SGC_OK || xmlSize == 0)
+    {
+        return {};
+    }
+
+    return std::string(buffer.data());
+}
+
 Framegrabber::AppletFeatureKind appletFeatureKind(
     const GenApi::EInterfaceType interfaceType)
 {
@@ -535,6 +571,7 @@ struct Framegrabber::CameraEntry
 {
     CameraInfo info;
     SgcCameraHandle* handle = nullptr;
+    std::string featureXml;
 };
 
 std::string Framegrabber::CameraInfo::displayName() const
@@ -1169,16 +1206,7 @@ void Framegrabber::startChannel(const unsigned int dmaIndex, const std::size_t f
                 }
                 channelPtr->acquisitionStarted.store(true, std::memory_order_release);
 
-                SgcCameraHandle* cameraHandle = nullptr;
-                if (connectCamera(CameraTransport::CoaXPress, dmaIndex))
-                {
-                    std::lock_guard<std::mutex> lock(_stateMutex);
-                    if (CameraEntry* camera = findCamera(CameraTransport::CoaXPress, dmaIndex))
-                    {
-                        cameraHandle = camera->handle;
-                    }
-                }
-                if (cameraHandle && Sgc_startAcquisition(cameraHandle, 1) == SGC_OK)
+                if (startCameraAcquisitionForChannel(dmaIndex))
                 {
                     channelPtr->cameraStarted.store(true, std::memory_order_release);
                 }
@@ -1247,7 +1275,7 @@ void Framegrabber::startChannel(const unsigned int dmaIndex, const std::size_t f
                     image.stride = static_cast<int>(rowBytes);
                     image.bitsPerPixel = pixelBits;
                     image.bytesPerPixel = pixelBytes;
-                    image.sdkPixelFormat = sdkFormat;
+                    image.fgFormat = sdkFormat;
                     image.pixelFormat = toPixelFormat(sdkFormat);
                     image.dmaIndex = dmaIndex;
                     image.frameSeq = _frameSeq.fetch_add(1, std::memory_order_acq_rel) + 1;
@@ -1304,19 +1332,14 @@ void Framegrabber::startChannel(const unsigned int dmaIndex, const std::size_t f
 void Framegrabber::finishChannel(DmaChannel& channel)
 {
     Fg_Struct* handle = nullptr;
-    SgcCameraHandle* cameraHandle = nullptr;
     {
         std::lock_guard<std::mutex> lock(_stateMutex);
         handle = _handle;
-        if (CameraEntry* camera = findCamera(CameraTransport::CoaXPress, channel.index))
-        {
-            cameraHandle = camera->handle;
-        }
     }
 
-    if (cameraHandle && channel.cameraStarted.exchange(false, std::memory_order_acq_rel))
+    if (channel.cameraStarted.exchange(false, std::memory_order_acq_rel))
     {
-        Sgc_stopAcquisition(cameraHandle, 1);
+        stopCameraAcquisitionForChannel(channel.index);
     }
     {
         std::lock_guard<std::mutex> resourceLock(channel.resourceMutex);
@@ -1337,6 +1360,36 @@ void Framegrabber::finishChannel(DmaChannel& channel)
     {
         _isRunning.store(false, std::memory_order_release);
         notifyStatus(GrabbingStatus, false);
+    }
+}
+
+bool Framegrabber::startCameraAcquisitionForChannel(const unsigned int dmaIndex)
+{
+    SgcCameraHandle* cameraHandle = nullptr;
+    if (connectCamera(CameraTransport::CoaXPress, dmaIndex))
+    {
+        std::lock_guard<std::mutex> lock(_stateMutex);
+        if (CameraEntry* camera = findCamera(CameraTransport::CoaXPress, dmaIndex))
+        {
+            cameraHandle = camera->handle;
+        }
+    }
+    return cameraHandle && Sgc_startAcquisition(cameraHandle, 1) == SGC_OK;
+}
+
+void Framegrabber::stopCameraAcquisitionForChannel(const unsigned int dmaIndex)
+{
+    SgcCameraHandle* cameraHandle = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(_stateMutex);
+        if (CameraEntry* camera = findCamera(CameraTransport::CoaXPress, dmaIndex))
+        {
+            cameraHandle = camera->handle;
+        }
+    }
+    if (cameraHandle)
+    {
+        Sgc_stopAcquisition(cameraHandle, 1);
     }
 }
 
@@ -2141,6 +2194,11 @@ bool Framegrabber::refreshCameras(const CameraTransport transport)
             continue;
         }
         camera.info.connected = true;
+        camera.featureXml = readCameraXmlProperty(camera.handle);
+        if (camera.featureXml.empty() && Sgc_loadCameraXml(camera.handle) == SGC_OK)
+        {
+            camera.featureXml = readCameraXmlProperty(camera.handle);
+        }
     }
 
     _cxpCameras = std::move(discovered);
@@ -2182,6 +2240,11 @@ bool Framegrabber::connectCamera(const CameraTransport transport,
         return false;
     }
     camera->info.connected = true;
+    camera->featureXml = readCameraXmlProperty(camera->handle);
+    if (camera->featureXml.empty() && Sgc_loadCameraXml(camera->handle) == SGC_OK)
+    {
+        camera->featureXml = readCameraXmlProperty(camera->handle);
+    }
     return true;
 }
 
@@ -2194,6 +2257,7 @@ void Framegrabber::disconnectCamera(const CameraTransport transport,
     {
         Sgc_disconnectCamera(camera->handle);
         camera->info.connected = false;
+        camera->featureXml.clear();
     }
 }
 
@@ -2207,18 +2271,7 @@ std::string Framegrabber::getCameraFeatureXml(const CameraTransport transport,
         return {};
     }
 
-    std::size_t size = 0;
-    Sgc_getGenICamXML(camera->handle, nullptr, &size);
-    if (size == 0)
-    {
-        return {};
-    }
-    std::vector<char> buffer(size + 1, '\0');
-    if (Sgc_getGenICamXML(camera->handle, buffer.data(), &size) != SGC_OK)
-    {
-        return {};
-    }
-    return std::string(buffer.data());
+    return camera->featureXml;
 }
 
 bool Framegrabber::getCameraFeature(const CameraTransport transport,
@@ -2302,7 +2355,8 @@ bool Framegrabber::getCameraFeature(const CameraTransport transport,
 bool Framegrabber::setCameraFeature(const CameraTransport transport,
                                     const unsigned int dmaIndex,
                                     const std::string& name,
-                                    const ParameterValue& value)
+                                    const ParameterValue& value,
+                                    const bool verifyReadBack)
 {
     bool success = false;
     {
@@ -2355,7 +2409,7 @@ bool Framegrabber::setCameraFeature(const CameraTransport transport,
             value);
     }
 
-    if (success)
+    if (success && verifyReadBack)
     {
         ParameterValue actual = value;
         if (!getCameraFeature(transport, dmaIndex, name, actual))
@@ -2374,6 +2428,9 @@ bool Framegrabber::setCameraFeature(const CameraTransport transport,
                 true);
             return false;
         }
+    }
+    if (success)
+    {
         notifyNode(FeatureSource::Camera, transport, dmaIndex, name);
     }
     return success;

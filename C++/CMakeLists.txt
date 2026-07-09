@@ -99,4 +99,16 @@ if(FRAMEGRABBER_BUILD_QT_WIDGET)
     )
 endif()
 
+if(TARGET GraphicsEngine)
+    message(STATUS "[Framegrabber] GraphicsEngine target detected. Enabling framegrabber image adapter.")
+    target_sources(Framegrabber PRIVATE
+        Utility/GraphicsEngine/FramegrabberGraphicsImageAdapter.h
+        Utility/GraphicsEngine/FramegrabberGraphicsImageAdapter.cpp
+    )
+    target_link_libraries(Framegrabber PUBLIC GraphicsEngine::GraphicsEngine)
+    target_include_directories(Framegrabber PUBLIC
+        "${CMAKE_CURRENT_SOURCE_DIR}/Utility/GraphicsEngine"
+    )
+endif()
+
 message(STATUS "[Framegrabber] Basler Frame Grabber SDK root: ${BASLER_FG_SDK_DIR}")

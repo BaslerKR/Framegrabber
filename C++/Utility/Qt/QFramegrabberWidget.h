@@ -158,7 +158,8 @@ private:
                       Framegrabber::CameraTransport transport,
                       unsigned int dmaIndex,
                       const QString& name,
-                      const Framegrabber::ParameterValue& value);
+                      const Framegrabber::ParameterValue& value,
+                      bool verifyReadBack = true);
     void refreshFeatureTree(TreeSource source,
                             Framegrabber::CameraTransport transport,
                             unsigned int dmaIndex);

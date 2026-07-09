@@ -123,7 +123,7 @@ public:
         int stride = 0;
         int bitsPerPixel = 0;
         int bytesPerPixel = 0;
-        int sdkPixelFormat = 0;
+        int fgFormat = 0;
         PixelFormat pixelFormat = PixelFormat::Unknown;
         unsigned int dmaIndex = 0;
         std::uint64_t frameSeq = 0;
@@ -306,7 +306,8 @@ public:
     bool setCameraFeature(CameraTransport transport,
                           unsigned int dmaIndex,
                           const std::string& name,
-                          const ParameterValue& value);
+                          const ParameterValue& value,
+                          bool verifyReadBack = true);
     bool executeCameraCommand(CameraTransport transport,
                               unsigned int dmaIndex,
                               const std::string& name);
@@ -371,6 +372,8 @@ private:
     void releaseHandles();
     void startChannel(unsigned int dmaIndex, std::size_t frames);
     void finishChannel(DmaChannel& channel);
+    bool startCameraAcquisitionForChannel(unsigned int dmaIndex);
+    void stopCameraAcquisitionForChannel(unsigned int dmaIndex);
     void clearAppletFeatureModels();
     void clearAppletFeatureModel(unsigned int dmaIndex);
     void refreshAppletFeatureAccess(std::vector<AppletFeatureNode>& model,

@@ -19,9 +19,9 @@ multi-DMA acquisition, transport-aware camera control, and Qt feature editing.
   8/10/12/14/16-bit output, RGBX 8/10/12/14/16-bit output, YUV422/YCbCr422 8-bit
   output, Bayer GR/RG/GB/BG 8/10/12/14/16-bit output, and BiColor RGBG/GRGB/BGRG/GBGR
   8/10/12-bit output. Packed formats are sized from bits per pixel, not guessed from
-  `FG_PIXELFORMAT`. `FG_RAW` and `FG_JPEG` are recognized as source/encoded identities
-  but are rejected for generic image display because they do not define a displayable
-  pixel layout.
+  `FG_PIXELFORMAT`. The GraphicsEngine adapter maps the source `FG_FORMAT` to
+  `GraphicsImagePixelFormat`; the core acquisition path keeps `FG_FORMAT` as the
+  authoritative source identity.
 - Bayer DMA output is displayed through a lightweight 2x2 Bayer-cell RGB
   reconstruction. The host does not expose raw Bayer samples as artificial
   per-pixel RGB checker data in the live viewer.
@@ -32,7 +32,10 @@ multi-DMA acquisition, transport-aware camera control, and Qt feature editing.
 - Acquisition sizes and displays frames from DMA output `FG_FORMAT` only. If
   `FG_PIXELFORMAT` is YUV422 but `FG_FORMAT` is `FG_GRAY`, the host receives and
   displays Mono8 output.
-- The module does not depend on Camera, GraphicsEngine, Gocator, Resources, or Playground.
+- The core module does not depend on Camera, Gocator, Resources, or Playground.
+  When a `GraphicsEngine` CMake target is present, the optional
+  `Utility/GraphicsEngine` adapter is compiled so hosts can pass frame grabber
+  images to the shared 2D image contract without duplicating `FG_FORMAT` mappings.
 - `QFramegrabberWidget` remains usable with plain Qt when the host does not install Resources.
 
 ## Runtime Contract
@@ -71,9 +74,13 @@ multi-DMA acquisition, transport-aware camera control, and Qt feature editing.
   for an explicit rescan after hardware or link changes.
 - `QFramegrabberWidget` creates transport camera tabs from those capabilities after
   the board opens and removes them when it closes.
-- Camera feature trees are not rebuilt on acquisition start/stop. During acquisition,
-  camera feature editors are disabled and the existing tree remains visible so optional
-  GenICam nodes that are absent on a camera do not produce repeated refresh-time errors.
+- Camera feature trees are rebuilt automatically after board connection, camera combo
+  changes, and explicit rescans. During acquisition, camera feature editors are disabled
+  and the existing tree remains visible.
+- Camera feature XML is cached during camera connect/rescan from `CAM_PROP_XML_DATA`
+  and the widget reparses that cache for tree refreshes. The UI refresh path does not
+  call `Sgc_getGenICamXML()`, because that SDK path can log access errors for optional
+  or dynamically unreadable camera nodes before the widget asks for live values.
 - Camera feature trees hide non-readable leaf nodes before asking the SDK for a live
   value. Write-only commands remain visible as executable buttons; other write-only or
   unavailable nodes stay out of the value tree because reading them can make Siso
@@ -95,10 +102,10 @@ multi-DMA acquisition, transport-aware camera control, and Qt feature editing.
   invalidates the selected DMA hierarchy and rebuilds it from current XML because one
   feature may create, remove, move, or change the value/access state of other features;
   tree expansion and selection remain UI state.
-- Camera feature writes are read back immediately after the SDK write and are reported
-  as failed when read-back is unavailable or does not match the requested value. Failed
-  feature writes refresh the current tree instead of locally reverting one editor, because
-  the rejected write can also change dependent access or value state.
+- Camera feature writes are read back only when the UI path has a readable current
+  value. Write-only or dynamically unreadable camera writes rely on the SDK write
+  result. Failed feature writes refresh the current tree instead of locally reverting
+  one editor, because the rejected write can also change dependent access or value state.
 - The Qt widget runs feature writes on a short-lived worker thread and returns cleanup
   to the GUI thread through callable objects with explicit shared lifetime, so stateful
   completion handlers compile consistently across MSVC and other C++17 toolchains.
@@ -112,8 +119,10 @@ multi-DMA acquisition, transport-aware camera control, and Qt feature editing.
   refresh with camera-side node event updates.
 - Profile the remaining safe DMA-to-owned-buffer copy before considering an SDK-buffer
   lease or zero-copy frame contract.
-- Define selected-DMA-only acquisition or DMA-specific sessions before presenting
-  simultaneous multi-camera display as supported.
+- Validate host `DeviceSession` DMA-specific display routing on multi-DMA hardware
+  before presenting simultaneous multi-camera display as supported.
+- Split DMA acquisition channel ownership from CXP camera lifecycle ownership into
+  dedicated classes only when further hot-path optimization requires the extra structure.
 
 ## Build
 

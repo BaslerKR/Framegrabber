@@ -516,7 +516,8 @@ void QFramegrabberWidget::registerCallbacks()
                     else if (source == Framegrabber::FeatureSource::Camera)
                     {
                         CameraPage* page = guard->cameraPage(transport);
-                        if (page && page->cameraCombo->currentData().toUInt() == dmaIndex)
+                        if (page
+                            && page->cameraCombo->currentData().toUInt() == dmaIndex)
                         {
                             guard->rebuildCameraTree(*page);
                         }
@@ -1381,7 +1382,13 @@ QWidget* QFramegrabberWidget::createFeatureEditor(const QDomElement& node,
                 updated);
             runAsyncWrite(
                 [=]() {
-                    return writeFeature(source, transport, dmaIndex, featureName, updated);
+                    return writeFeature(
+                        source,
+                        transport,
+                        dmaIndex,
+                        featureName,
+                        updated,
+                        readable);
                 },
                 [=](bool success) {
                     checkBox->setEnabled(writable);
@@ -1438,7 +1445,13 @@ QWidget* QFramegrabberWidget::createFeatureEditor(const QDomElement& node,
             }
             runAsyncWrite(
                 [=]() {
-                    return writeFeature(source, transport, dmaIndex, featureName, updated);
+                    return writeFeature(
+                        source,
+                        transport,
+                        dmaIndex,
+                        featureName,
+                        updated,
+                        readable);
                 },
                 [=](bool success) {
                     combo->setEnabled(writable);
@@ -1504,7 +1517,13 @@ QWidget* QFramegrabberWidget::createFeatureEditor(const QDomElement& node,
 
         runAsyncWrite(
             [=]() {
-                return writeFeature(source, transport, dmaIndex, featureName, updated);
+                return writeFeature(
+                    source,
+                    transport,
+                    dmaIndex,
+                    featureName,
+                    updated,
+                    readable);
             },
             [=](bool success) mutable {
                 edit->setEnabled(writable);
@@ -1594,7 +1613,8 @@ bool QFramegrabberWidget::writeFeature(const TreeSource source,
                                        const Framegrabber::CameraTransport transport,
                                        const unsigned int dmaIndex,
                                        const QString& name,
-                                       const Framegrabber::ParameterValue& value)
+                                       const Framegrabber::ParameterValue& value,
+                                       const bool verifyReadBack)
 {
     if (!_framegrabber)
     {
@@ -1611,7 +1631,8 @@ bool QFramegrabberWidget::writeFeature(const TreeSource source,
         transport,
         dmaIndex,
         name.toStdString(),
-        value);
+        value,
+        verifyReadBack);
 }
 
 void QFramegrabberWidget::refreshFeatureTree(const TreeSource source,
