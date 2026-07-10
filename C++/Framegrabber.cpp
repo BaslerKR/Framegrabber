@@ -1126,17 +1126,28 @@ void Framegrabber::startChannel(const unsigned int dmaIndex, const std::size_t f
     const int height = static_cast<int>(heightValue);
     const int sdkFormat = static_cast<int>(formatValue);
 
-    const int pixelBits = bitsPerPixel(sdkFormat);
-    const int pixelBytes = bytesPerPixel(sdkFormat);
+    std::int64_t bitAlignmentValue = FG_RIGHT_ALIGNED;
+    const bool hasBitAlignment = readIntegerParameter(FG_BITALIGNMENT, bitAlignmentValue);
+    const BitAlignment bitAlignment = !hasBitAlignment
+        ? BitAlignment::Packed
+        : bitAlignmentValue == FG_LEFT_ALIGNED
+            ? BitAlignment::MostSignificant
+            : BitAlignment::LeastSignificant;
+
+    const PixelFormat pixelFormat = toPixelFormat(sdkFormat);
+    const int sdkPixelBits = Fg_getBitsPerPixel(sdkFormat);
+    const int pixelBits = sdkPixelBits > 0
+        ? sdkPixelBits
+        : bitsPerPixel(pixelFormat);
+    const int pixelBytes = pixelBits > 0 ? (pixelBits + 7) / 8 : 0;
     if (width <= 0 || height <= 0 || pixelBits <= 0 || pixelBytes <= 0)
     {
         log("DMA(" + std::to_string(dmaIndex) + ") has an unsupported image format.", true);
         return;
     }
 
-    const std::size_t rowBits = static_cast<std::size_t>(width)
-                                * static_cast<std::size_t>(pixelBits);
-    const std::size_t rowBytes = (rowBits + 7U) / 8U;
+    const std::size_t rowBytes = static_cast<std::size_t>(width)
+                                 * static_cast<std::size_t>(pixelBytes);
     if (static_cast<std::size_t>(height)
         > (std::numeric_limits<std::size_t>::max)() / rowBytes)
     {
@@ -1189,8 +1200,8 @@ void Framegrabber::startChannel(const unsigned int dmaIndex, const std::size_t f
     try
     {
         channelPtr->thread = std::thread(
-            [this, channelPtr, handle, frames, width, height, sdkFormat, pixelBits, pixelBytes, frameBytes,
-             rowBytes]
+            [this, channelPtr, handle, frames, width, height, sdkFormat, pixelFormat, pixelBits,
+             pixelBytes, bitAlignment, frameBytes]
             {
                 const unsigned int dmaIndex = channelPtr->index;
                 const int acquireResult =
@@ -1258,6 +1269,36 @@ void Framegrabber::startChannel(const unsigned int dmaIndex, const std::size_t f
                         continue;
                     }
 
+                    std::size_t transferLength = 0;
+                    const int transferResult = Fg_getParameterEx(
+                        handle,
+                        FG_TRANSFER_LEN,
+                        &transferLength,
+                        static_cast<int>(dmaIndex),
+                        channelPtr->memory,
+                        picture);
+                    if (transferResult != FG_OK
+                        || transferLength == 0U
+                        || transferLength > frameBytes
+                        || transferLength % static_cast<std::size_t>(height) != 0U)
+                    {
+                        log("DMA(" + std::to_string(dmaIndex)
+                                + ") reported an invalid transfer length.",
+                            true);
+                        ready(dmaIndex);
+                        continue;
+                    }
+                    const std::size_t payloadBytes = transferLength;
+                    const std::size_t payloadStride = payloadBytes / static_cast<std::size_t>(height);
+                    if (payloadStride > static_cast<std::size_t>((std::numeric_limits<int>::max)()))
+                    {
+                        log("DMA(" + std::to_string(dmaIndex)
+                                + ") image stride exceeds the supported range.",
+                            true);
+                        ready(dmaIndex);
+                        continue;
+                    }
+
                     OwnedBufferPool::Lease ownedBytes =
                         channelPtr->ownedBufferPool->acquire(
                             channelPtr->stopRequested);
@@ -1265,18 +1306,19 @@ void Framegrabber::startChannel(const unsigned int dmaIndex, const std::size_t f
                     {
                         break;
                     }
-                    std::memcpy(ownedBytes.get(), source, frameBytes);
+                    std::memcpy(ownedBytes.get(), source, payloadBytes);
 
                     Image image;
                     image.storage = std::move(ownedBytes);
-                    image.size = frameBytes;
+                    image.size = payloadBytes;
                     image.width = width;
                     image.height = height;
-                    image.stride = static_cast<int>(rowBytes);
+                    image.stride = static_cast<int>(payloadStride);
                     image.bitsPerPixel = pixelBits;
                     image.bytesPerPixel = pixelBytes;
                     image.fgFormat = sdkFormat;
-                    image.pixelFormat = toPixelFormat(sdkFormat);
+                    image.pixelFormat = pixelFormat;
+                    image.bitAlignment = bitAlignment;
                     image.dmaIndex = dmaIndex;
                     image.frameSeq = _frameSeq.fetch_add(1, std::memory_order_acq_rel) + 1;
 
@@ -2565,8 +2607,9 @@ Framegrabber::PixelFormat Framegrabber::toPixelFormat(const int sdkFormat)
         return PixelFormat::RGBX64;
     case YUV422_8:
     case FG_YUV422_8:
-    case FG_YCBCR422_8:
         return PixelFormat::YCbCr422_8;
+    case FG_YCBCR422_8:
+        return PixelFormat::YCbCr422_8_CbYCrY;
     case FG_BAYERGR8:
         return PixelFormat::BayerGR8;
     case FG_BAYERGR10:
@@ -2640,118 +2683,98 @@ Framegrabber::PixelFormat Framegrabber::toPixelFormat(const int sdkFormat)
     }
 }
 
-int Framegrabber::bitsPerPixel(const int sdkFormat)
+int Framegrabber::bitsPerPixel(const PixelFormat pixelFormat)
 {
-    switch (sdkFormat)
+    switch (pixelFormat)
     {
-    case FG_GRAY:
-    case FG_GRAY_PLUS_PICNR:
-    case FG_BAYERGR8:
-    case FG_BAYERRG8:
-    case FG_BAYERGB8:
-    case FG_BAYERBG8:
-    case FG_BICOLOR_RGBG8:
-    case FG_BICOLOR_GRGB8:
-    case FG_BICOLOR_BGRG8:
-    case FG_BICOLOR_GBGR8:
-        return 8;
-    case FG_GRAY16:
-    case FG_GRAY16_PLUS_PICNR:
-    case FG_BAYERGR16:
-    case FG_BAYERRG16:
-    case FG_BAYERGB16:
-    case FG_BAYERBG16:
-        return 16;
-    case FG_GRAY10:
-    case FG_BAYERGR10:
-    case FG_BAYERRG10:
-    case FG_BAYERGB10:
-    case FG_BAYERBG10:
-    case FG_BICOLOR_RGBG10:
-    case FG_BICOLOR_GRGB10:
-    case FG_BICOLOR_BGRG10:
-    case FG_BICOLOR_GBGR10:
-        return 10;
-    case FG_GRAY12:
-    case FG_BAYERGR12:
-    case FG_BAYERRG12:
-    case FG_BAYERGB12:
-    case FG_BAYERBG12:
-    case FG_BICOLOR_RGBG12:
-    case FG_BICOLOR_GRGB12:
-    case FG_BICOLOR_BGRG12:
-    case FG_BICOLOR_GBGR12:
-        return 12;
-    case FG_GRAY14:
-    case FG_BAYERGR14:
-    case FG_BAYERRG14:
-    case FG_BAYERGB14:
-    case FG_BAYERBG14:
-        return 14;
-    case FG_BINARY:
+    case PixelFormat::Binary:
         return 1;
-    case FG_GRAY32:
-        return 32;
-    case FG_COL24:
-    case FG_RGB8:
-        return 24;
-    case FG_RGB10:
-        return 30;
-    case FG_RGB12:
-        return 36;
-    case FG_RGB14:
-        return 42;
-    case FG_COL32:
-    case FG_RGBX32:
-    case FG_RGBA8:
-    case FG_BGRA8:
-        return 32;
-    case FG_COL30:
-        return 30;
-    case FG_COL36:
-        return 36;
-    case FG_COL42:
-        return 42;
-    case FG_COL48:
-    case FG_RGB16:
-        return 48;
-    case FG_RGBA10:
-    case FG_BGRA10:
-        return 40;
-    case FG_RGBA12:
-    case FG_BGRA12:
-        return 48;
-    case FG_RGBA14:
-    case FG_BGRA14:
-        return 56;
-    case FG_RGBA16:
-    case FG_BGRA16:
-        return 64;
-    case FG_RGBX40:
-        return 40;
-    case FG_RGBX48:
-        return 48;
-    case FG_RGBX56:
-        return 56;
-    case FG_RGBX64:
-        return 64;
-    case YUV422_8:
-    case FG_YUV422_8:
-    case FG_YCBCR422_8:
+    case PixelFormat::Mono8:
+    case PixelFormat::BayerGR8:
+    case PixelFormat::BayerRG8:
+    case PixelFormat::BayerGB8:
+    case PixelFormat::BayerBG8:
+    case PixelFormat::BiColorRGBG8:
+    case PixelFormat::BiColorGRGB8:
+    case PixelFormat::BiColorBGRG8:
+    case PixelFormat::BiColorGBGR8:
+        return 8;
+    case PixelFormat::Mono10Packed:
+    case PixelFormat::BayerGR10:
+    case PixelFormat::BayerRG10:
+    case PixelFormat::BayerGB10:
+    case PixelFormat::BayerBG10:
+    case PixelFormat::BiColorRGBG10:
+    case PixelFormat::BiColorGRGB10:
+    case PixelFormat::BiColorBGRG10:
+    case PixelFormat::BiColorGBGR10:
+        return 10;
+    case PixelFormat::Mono12Packed:
+    case PixelFormat::BayerGR12:
+    case PixelFormat::BayerRG12:
+    case PixelFormat::BayerGB12:
+    case PixelFormat::BayerBG12:
+    case PixelFormat::BiColorRGBG12:
+    case PixelFormat::BiColorGRGB12:
+    case PixelFormat::BiColorBGRG12:
+    case PixelFormat::BiColorGBGR12:
+        return 12;
+    case PixelFormat::Mono14Packed:
+    case PixelFormat::BayerGR14:
+    case PixelFormat::BayerRG14:
+    case PixelFormat::BayerGB14:
+    case PixelFormat::BayerBG14:
+        return 14;
+    case PixelFormat::Mono16:
+    case PixelFormat::BayerGR16:
+    case PixelFormat::BayerRG16:
+    case PixelFormat::BayerGB16:
+    case PixelFormat::BayerBG16:
+    case PixelFormat::YCbCr422_8:
+    case PixelFormat::YCbCr422_8_CbYCrY:
         return 16;
-    default:
+    case PixelFormat::RGB24:
+    case PixelFormat::BGR24:
+        return 24;
+    case PixelFormat::RGB30:
+    case PixelFormat::RGB10Packed:
+    case PixelFormat::BGR10Packed:
+        return 30;
+    case PixelFormat::Mono32:
+    case PixelFormat::RGBA32:
+    case PixelFormat::BGRA32:
+    case PixelFormat::RGBX32:
+        return 32;
+    case PixelFormat::RGB12Packed:
+    case PixelFormat::BGR12Packed:
+        return 36;
+    case PixelFormat::RGBA10Packed:
+    case PixelFormat::BGRA10Packed:
+    case PixelFormat::RGBX10Packed:
+        return 40;
+    case PixelFormat::RGB14Packed:
+    case PixelFormat::BGR14Packed:
+        return 42;
+    case PixelFormat::RGB48:
+    case PixelFormat::BGR48:
+    case PixelFormat::RGBA12Packed:
+    case PixelFormat::BGRA12Packed:
+    case PixelFormat::RGBX12Packed:
+        return 48;
+    case PixelFormat::RGBA14Packed:
+    case PixelFormat::BGRA14Packed:
+    case PixelFormat::RGBX14Packed:
+        return 56;
+    case PixelFormat::RGBA64:
+    case PixelFormat::BGRA64:
+    case PixelFormat::RGBX64:
+        return 64;
+    case PixelFormat::Unknown:
+    case PixelFormat::Raw:
+    case PixelFormat::Jpeg:
         return 0;
     }
-}
-
-int Framegrabber::bytesPerPixel(const int sdkFormat)
-{
-    const int bits = bitsPerPixel(sdkFormat);
-    if (bits <= 0)
-    {
-        return 0;
-    }
-    return (bits + 7) / 8;
+    return 0;
 }
 
 void Framegrabber::notifyStatus(const Status status, const bool on)

@@ -18,24 +18,27 @@ multi-DMA acquisition, transport-aware camera control, and Qt feature editing.
   include Mono 8/10/12/14/16/32-bit output, 1-bit binary output, BGR/RGB/RGBA/BGRA
   8/10/12/14/16-bit output, RGBX 8/10/12/14/16-bit output, YUV422/YCbCr422 8-bit
   output, Bayer GR/RG/GB/BG 8/10/12/14/16-bit output, and BiColor RGBG/GRGB/BGRG/GBGR
-  8/10/12-bit output. Packed formats are sized from bits per pixel, not guessed from
-  `FG_PIXELFORMAT`. The GraphicsEngine adapter maps the source `FG_FORMAT` to
-  `GraphicsImagePixelFormat`; the core acquisition path keeps `FG_FORMAT` as the
-  authoritative source identity.
+  8/10/12-bit output. DMA buffers use the SDK bit depth for conservative allocation,
+  while each delivered image uses `FG_TRANSFER_LEN` for its actual payload size and
+  stride. The GraphicsEngine adapter maps the core `Framegrabber::PixelFormat` and
+  bit-alignment metadata without interpreting SDK constants a second time.
+- `FG_RAW` and `FG_JPEG` are recognized identities but are not accepted by generic
+  acquisition because they do not provide the fixed pixel layout and SDK bit depth
+  needed to derive a safe DMA allocation size.
 - Bayer DMA output is displayed through a lightweight 2x2 Bayer-cell RGB
   reconstruction. The host does not expose raw Bayer samples as artificial
   per-pixel RGB checker data in the live viewer.
 - `FG_YUV422_8` and `FG_YCBCR422_8` DMA output both use two bytes per pixel.
-  `YUV422_8`, `FG_YUV422_8`, and `FG_YCBCR422_8` are exposed as Y0-Cb-Y1-Cr
-  for host RGB888 display conversion; camera input `FG_PIXELFORMAT` and DMA
-  output `FG_FORMAT` remain separate applet settings.
+  `YUV422_8` and `FG_YUV422_8` use Y0-Cb-Y1-Cr; `FG_YCBCR422_8` uses
+  Cb-Y0-Cr-Y1. Camera input `FG_PIXELFORMAT` and DMA output `FG_FORMAT` remain
+  separate applet settings.
 - Acquisition sizes and displays frames from DMA output `FG_FORMAT` only. If
   `FG_PIXELFORMAT` is YUV422 but `FG_FORMAT` is `FG_GRAY`, the host receives and
   displays Mono8 output.
-- The core module does not depend on Camera, Gocator, Resources, or Playground.
-  When a `GraphicsEngine` CMake target is present, the optional
-  `Utility/GraphicsEngine` adapter is compiled so hosts can pass frame grabber
-  images to the shared 2D image contract without duplicating `FG_FORMAT` mappings.
+- The core module does not depend on Camera, Gocator, Resources, Playground, or
+  GraphicsEngine. Set `FRAMEGRABBER_BUILD_GRAPHICSENGINE_ADAPTER=ON` after adding
+  GraphicsEngine to create `Framegrabber::GraphicsEngineAdapter`; hosts link that
+  target explicitly without adding GraphicsEngine/VTK to `Framegrabber::Framegrabber`.
 - `QFramegrabberWidget` remains usable with plain Qt when the host does not install Resources.
 
 ## Runtime Contract

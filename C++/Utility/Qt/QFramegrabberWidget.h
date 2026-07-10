@@ -71,6 +71,7 @@ private:
     Framegrabber::CallbackId _statusCallbackId = 0;
     Framegrabber::CallbackId _nodeCallbackId = 0;
     QThread* _operationThread = nullptr;
+    QSet<QThread*> _parameterThreads;
     bool _shuttingDown = false;
     bool _operationActive = false;
     int _pendingParameterWrites = 0;
@@ -173,19 +174,23 @@ private:
     void runAsyncWrite(Func&& writeFunc, Cleanup&& cleanupFunc) {
         ++_pendingParameterWrites;
         setOperationActive(true);
-        auto* success = new bool(false);
+        const auto success = std::make_shared<bool>(false);
         auto write = std::make_shared<std::decay_t<Func>>(std::forward<Func>(writeFunc));
         auto cleanup = std::make_shared<std::decay_t<Cleanup>>(std::forward<Cleanup>(cleanupFunc));
         QThread* worker = QThread::create([write, success]() {
             *success = (*write)();
         });
+        worker->setParent(this);
+        _parameterThreads.insert(worker);
         connect(worker, &QThread::finished, this, [this, success, cleanup, worker]() {
+            _parameterThreads.remove(worker);
             if (_pendingParameterWrites > 0) {
                 --_pendingParameterWrites;
             }
-            setOperationActive(_operationThread != nullptr || _pendingParameterWrites > 0);
-            (*cleanup)(*success);
-            delete success;
+            if (!_shuttingDown) {
+                setOperationActive(_operationThread != nullptr || _pendingParameterWrites > 0);
+                (*cleanup)(*success);
+            }
             worker->deleteLater();
         });
         worker->start();

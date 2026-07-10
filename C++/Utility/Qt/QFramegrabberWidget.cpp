@@ -229,6 +229,15 @@ void QFramegrabberWidget::prepareForShutdown()
         _operationThread->wait();
         _operationThread = nullptr;
     }
+    const auto parameterThreads = _parameterThreads;
+    for (QThread* worker : parameterThreads)
+    {
+        if (worker)
+        {
+            worker->wait();
+        }
+    }
+    _parameterThreads.clear();
     if (_framegrabber)
     {
         if (_statusCallbackId != 0)
@@ -242,6 +251,7 @@ void QFramegrabberWidget::prepareForShutdown()
             _nodeCallbackId = 0;
         }
     }
+    _framegrabber = nullptr;
 }
 
 void QFramegrabberWidget::buildUi()
@@ -552,6 +562,7 @@ void QFramegrabberWidget::startAutomaticAppletLoad()
                     boardName.toStdString());
             }
         });
+    worker->setParent(this);
     _operationThread = worker;
     setOperationActive(true);
     showStatusMessage(tr("Checking the board applet..."));
@@ -564,6 +575,10 @@ void QFramegrabberWidget::startAutomaticAppletLoad()
         }
 
         guard->_operationThread = nullptr;
+        if (guard->_shuttingDown || !guard->_framegrabber)
+        {
+            return;
+        }
         guard->_connectionAttempted = !path->empty();
         guard->setOperationActive(false);
         guard->_appletPathEdit->setText(
@@ -610,6 +625,7 @@ void QFramegrabberWidget::startAppletLoad(const QString& path)
                 path.toStdString(),
                 boardName.toStdString());
         });
+    worker->setParent(this);
     _operationThread = worker;
     _connectionAttempted = true;
     setOperationActive(true);
@@ -622,6 +638,10 @@ void QFramegrabberWidget::startAppletLoad(const QString& path)
             return;
         }
         guard->_operationThread = nullptr;
+        if (guard->_shuttingDown || !guard->_framegrabber)
+        {
+            return;
+        }
         guard->setOperationActive(false);
         guard->_appletPathEdit->setText(
             QString::fromStdString(guard->_framegrabber->appletPath()));
@@ -646,6 +666,7 @@ void QFramegrabberWidget::startAppletUnload()
         framegrabber->requestStop();
         framegrabber->close();
     });
+    worker->setParent(this);
     _operationThread = worker;
     _connectionAttempted = true;
     setOperationActive(true);
@@ -658,6 +679,10 @@ void QFramegrabberWidget::startAppletUnload()
             return;
         }
         guard->_operationThread = nullptr;
+        if (guard->_shuttingDown)
+        {
+            return;
+        }
         guard->setOperationActive(false);
         guard->applyConnectionState(false);
         guard->showStatusMessage(tr("Applet unloaded."));
@@ -680,6 +705,7 @@ void QFramegrabberWidget::startCameraRefresh(
     {
         *success = framegrabber->refreshCameras(transport);
     });
+    worker->setParent(this);
     _operationThread = worker;
     setOperationActive(true);
     showStatusMessage(
@@ -693,6 +719,10 @@ void QFramegrabberWidget::startCameraRefresh(
             return;
         }
         guard->_operationThread = nullptr;
+        if (guard->_shuttingDown || !guard->_framegrabber)
+        {
+            return;
+        }
         guard->setOperationActive(false);
         CameraPage* currentPage = guard->cameraPage(transport);
         if (!currentPage)

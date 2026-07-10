@@ -114,6 +114,13 @@ public:
         Jpeg
     };
 
+    enum class BitAlignment
+    {
+        Packed,
+        LeastSignificant,
+        MostSignificant
+    };
+
     struct Image
     {
         std::shared_ptr<const std::uint8_t> storage;
@@ -125,6 +132,7 @@ public:
         int bytesPerPixel = 0;
         int fgFormat = 0;
         PixelFormat pixelFormat = PixelFormat::Unknown;
+        BitAlignment bitAlignment = BitAlignment::Packed;
         unsigned int dmaIndex = 0;
         std::uint64_t frameSeq = 0;
 
@@ -358,8 +366,7 @@ private:
         _appletFeatureModels;
 
     static PixelFormat toPixelFormat(int sdkFormat);
-    static int bitsPerPixel(int sdkFormat);
-    static int bytesPerPixel(int sdkFormat);
+    static int bitsPerPixel(PixelFormat pixelFormat);
 
     bool openResolvedBoard(const std::string& boardName,
                            unsigned int boardIndex,

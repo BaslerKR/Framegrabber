@@ -2,6 +2,10 @@ cmake_minimum_required(VERSION 3.16)
 project(Framegrabber LANGUAGES C CXX)
 
 option(FRAMEGRABBER_BUILD_QT_WIDGET "Build the optional Qt control widget." ON)
+option(FRAMEGRABBER_BUILD_GRAPHICSENGINE_ADAPTER
+    "Build the optional Framegrabber-to-GraphicsEngine adapter target."
+    OFF
+)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -99,16 +103,33 @@ if(FRAMEGRABBER_BUILD_QT_WIDGET)
     )
 endif()
 
-if(TARGET GraphicsEngine)
-    message(STATUS "[Framegrabber] GraphicsEngine target detected. Enabling framegrabber image adapter.")
-    target_sources(Framegrabber PRIVATE
+if(FRAMEGRABBER_BUILD_GRAPHICSENGINE_ADAPTER)
+    if(NOT TARGET GraphicsEngine::GraphicsEngine)
+        message(FATAL_ERROR
+            "[Framegrabber] FRAMEGRABBER_BUILD_GRAPHICSENGINE_ADAPTER=ON requires "
+            "GraphicsEngine::GraphicsEngine. Add GraphicsEngine first or disable the adapter."
+        )
+    endif()
+
+    add_library(FramegrabberGraphicsEngineAdapter STATIC
         Utility/GraphicsEngine/FramegrabberGraphicsImageAdapter.h
         Utility/GraphicsEngine/FramegrabberGraphicsImageAdapter.cpp
     )
-    target_link_libraries(Framegrabber PUBLIC GraphicsEngine::GraphicsEngine)
-    target_include_directories(Framegrabber PUBLIC
-        "${CMAKE_CURRENT_SOURCE_DIR}/Utility/GraphicsEngine"
+    add_library(
+        Framegrabber::GraphicsEngineAdapter
+        ALIAS FramegrabberGraphicsEngineAdapter
     )
+    target_compile_features(FramegrabberGraphicsEngineAdapter PUBLIC cxx_std_17)
+    target_include_directories(FramegrabberGraphicsEngineAdapter
+        PUBLIC
+            "${CMAKE_CURRENT_SOURCE_DIR}/Utility/GraphicsEngine"
+    )
+    target_link_libraries(FramegrabberGraphicsEngineAdapter
+        PUBLIC
+            Framegrabber::Framegrabber
+            GraphicsEngine::GraphicsEngine
+    )
+    message(STATUS "[Framegrabber] Framegrabber::GraphicsEngineAdapter enabled.")
 endif()
 
 message(STATUS "[Framegrabber] Basler Frame Grabber SDK root: ${BASLER_FG_SDK_DIR}")
