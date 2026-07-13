@@ -15,6 +15,10 @@
 
 namespace
 {
+// The SDK interprets this timeout in seconds. Keep it short so a disconnected
+// camera or an idle trigger source cannot delay stop()/close() for a long time.
+constexpr int kFrameWaitTimeoutSeconds = 1;
+
 template<typename Callback>
 Framegrabber::CallbackId registerCallback(
     std::mutex& mutex,
@@ -1243,11 +1247,14 @@ void Framegrabber::startChannel(const unsigned int dmaIndex, const std::size_t f
                     channelPtr->permits.fetch_sub(1, std::memory_order_acq_rel);
 
                     const frameindex_t picture = Fg_getLastPicNumberBlockingEx(
-                        handle, lastPicture + 1, static_cast<int>(dmaIndex), 100,
+                        handle,
+                        lastPicture + 1,
+                        static_cast<int>(dmaIndex),
+                        kFrameWaitTimeoutSeconds,
                         channelPtr->memory);
                     if (picture <= 0)
                     {
-                        if (picture == FG_NO_PICTURE_AVAILABLE)
+                        if (picture == FG_NO_PICTURE_AVAILABLE || picture == FG_TIMEOUT_ERR)
                         {
                             channelPtr->permits.fetch_add(1, std::memory_order_acq_rel);
                             continue;

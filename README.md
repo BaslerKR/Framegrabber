@@ -56,6 +56,12 @@ multi-DMA acquisition, transport-aware camera control, and Qt feature editing.
   lifecycle calls cannot miss a thread.
 - DMA stop/free operations are synchronized per channel, `ready(dmaIndex)` is a binary
   admission signal, and exceptions from consumer callbacks do not escape into SDK workers.
+- Worker frame waits time out after one second. A stop request also wakes the local
+  admission and buffer-pool waits before issuing the SDK stop, bounding no-frame
+  shutdown latency without treating an idle trigger source as an acquisition error.
+- Consumer callbacks run on the DMA worker and must return; `stop()` joins that worker
+  before releasing DMA memory and SDK handles, so a blocking consumer intentionally
+  keeps shutdown pending rather than risking use-after-free of a live DMA buffer.
 - Applets are initialized first through `loadApplet()`/`Fg_Init()`. VisualApplets HAP
   files and wrapped DLL/SO applets must be deployed independently of MCF snapshots.
 - Before manual selection, the Qt widget queries the selected board's active applet and
