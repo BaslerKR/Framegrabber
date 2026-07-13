@@ -35,6 +35,10 @@ multi-DMA acquisition, transport-aware camera control, and Qt feature editing.
 - Acquisition sizes and displays frames from DMA output `FG_FORMAT` only. If
   `FG_PIXELFORMAT` is YUV422 but `FG_FORMAT` is `FG_GRAY`, the host receives and
   displays Mono8 output.
+- When a camera's active geometry and the applet ROI differ, the module keeps the
+  delivered DMA payload and derives a displayable width from `FG_TRANSFER_LEN` and
+  the output bit depth. It logs the configured and delivered geometries once per
+  acquisition instead of dropping the frame.
 - The core module does not depend on Camera, Gocator, Resources, Playground, or
   GraphicsEngine. Set `FRAMEGRABBER_BUILD_GRAPHICSENGINE_ADAPTER=ON` after adding
   GraphicsEngine to create `Framegrabber::GraphicsEngineAdapter`; hosts link that

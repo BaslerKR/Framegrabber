@@ -1228,6 +1228,7 @@ void Framegrabber::startChannel(const unsigned int dmaIndex, const std::size_t f
 
                 frameindex_t lastPicture = 0;
                 std::size_t delivered = 0;
+                bool payloadGeometryWarningLogged = false;
                 while (!channelPtr->stopRequested.load(std::memory_order_acquire))
                 {
                     {
@@ -1306,6 +1307,38 @@ void Framegrabber::startChannel(const unsigned int dmaIndex, const std::size_t f
                         continue;
                     }
 
+                    // The applet may keep an ROI that is narrower than the camera's
+                    // current output. In that case FG_WIDTH still describes the camera
+                    // geometry while FG_TRANSFER_LEN describes the delivered DMA rows.
+                    // Preserve the image by publishing the width the DMA payload can
+                    // actually represent instead of forwarding an invalid stride to the
+                    // display backend.
+                    const std::size_t payloadBits = payloadStride * 8U;
+                    const std::size_t effectiveWidth = payloadBits
+                        / static_cast<std::size_t>(pixelBits);
+                    if (effectiveWidth == 0U)
+                    {
+                        log("DMA(" + std::to_string(dmaIndex)
+                                + ") transfer row is smaller than one pixel.",
+                            true);
+                        ready(dmaIndex);
+                        continue;
+                    }
+                    const int imageWidth = static_cast<int>(std::min<std::size_t>(
+                        static_cast<std::size_t>(width), effectiveWidth));
+                    if (imageWidth < width && !payloadGeometryWarningLogged)
+                    {
+                        log("DMA(" + std::to_string(dmaIndex)
+                                + ") payload geometry differs from the configured geometry: "
+                                + std::to_string(width) + "x" + std::to_string(height)
+                                + " configured, " + std::to_string(imageWidth) + "x"
+                                + std::to_string(height) + " delivered (transfer="
+                                + std::to_string(payloadBytes) + " bytes, stride="
+                                + std::to_string(payloadStride) + "). Displaying the delivered ROI.",
+                            true);
+                        payloadGeometryWarningLogged = true;
+                    }
+
                     OwnedBufferPool::Lease ownedBytes =
                         channelPtr->ownedBufferPool->acquire(
                             channelPtr->stopRequested);
@@ -1318,7 +1351,7 @@ void Framegrabber::startChannel(const unsigned int dmaIndex, const std::size_t f
                     Image image;
                     image.storage = std::move(ownedBytes);
                     image.size = payloadBytes;
-                    image.width = width;
+                    image.width = imageWidth;
                     image.height = height;
                     image.stride = static_cast<int>(payloadStride);
                     image.bitsPerPixel = pixelBits;
