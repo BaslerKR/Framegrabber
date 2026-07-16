@@ -209,6 +209,12 @@ bool hasAppletTag(const std::string& tags, const std::string& expected)
     }
     return false;
 }
+
+const char* configuredFramegrabberSdkRoot()
+{
+    const char* sdkRoot = std::getenv("BASLER_FG_SDK_DIR");
+    return sdkRoot != nullptr && *sdkRoot != '\0' ? sdkRoot : nullptr;
+}
 }
 
 std::string FramegrabberSystem::BoardInfo::displayName() const
@@ -222,7 +228,7 @@ std::string FramegrabberSystem::BoardInfo::displayName() const
 
 FramegrabberSystem::FramegrabberSystem()
 {
-    _initialized = Fg_InitLibraries(nullptr) == FG_OK;
+    _initialized = Fg_InitLibraries(configuredFramegrabberSdkRoot()) == FG_OK;
     if (!_initialized)
     {
         syslog("Library initialization failed.", true);
