@@ -9,6 +9,7 @@
 #include <cmath>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <limits>
 #include <unordered_set>
 #include <utility>
@@ -68,6 +69,46 @@ std::string lowerExtension(const std::string& path)
             return static_cast<char>(std::tolower(value));
         });
     return extension;
+}
+
+std::string trimCopy(std::string value)
+{
+    const auto first = std::find_if_not(value.begin(), value.end(), [](const unsigned char character)
+    {
+        return std::isspace(character) != 0;
+    });
+    const auto last = std::find_if_not(value.rbegin(), value.rend(), [](const unsigned char character)
+    {
+        return std::isspace(character) != 0;
+    }).base();
+    return first < last ? std::string(first, last) : std::string{};
+}
+
+std::string lowercase(std::string value)
+{
+    std::transform(value.begin(), value.end(), value.begin(), [](const unsigned char character)
+    {
+        return static_cast<char>(std::tolower(character));
+    });
+    return value;
+}
+
+bool appletReferenceMatchesPath(const std::string& appletReference,
+                                const std::string& appletPath)
+{
+    const std::filesystem::path referencePath(appletReference);
+    const std::filesystem::path candidatePath(appletPath);
+    const std::string referenceFileName = lowercase(referencePath.filename().string());
+    if (referenceFileName.empty())
+    {
+        return false;
+    }
+    if (lowercase(candidatePath.filename().string()) == referenceFileName)
+    {
+        return true;
+    }
+    return referencePath.extension().empty()
+        && lowercase(candidatePath.stem().string()) == referenceFileName;
 }
 
 std::string safeString(const char* value)
@@ -701,6 +742,170 @@ std::string Framegrabber::configurationPath() const
 
 bool Framegrabber::loadApplet(const std::string& path, const std::string& boardName)
 {
+    std::lock_guard<std::mutex> lifecycleLock(_lifecycleMutex);
+    return loadAppletUnlocked(path, boardName);
+}
+
+std::string Framegrabber::appletPathFromConfiguration(
+    const std::string& configurationPath,
+    const std::string& boardName) const
+{
+    if (configurationPath.empty()
+        || lowerExtension(configurationPath) != ".mcf"
+        || !std::filesystem::is_regular_file(configurationPath))
+    {
+        return {};
+    }
+
+    const auto resolveReference = [this, &configurationPath, &boardName](
+                                      const std::string& appletReference)
+    {
+        std::filesystem::path resolvedPath(appletReference);
+        if (resolvedPath.is_relative())
+        {
+            resolvedPath = std::filesystem::path(configurationPath).parent_path() / resolvedPath;
+        }
+        resolvedPath = resolvedPath.lexically_normal();
+        if (std::filesystem::is_regular_file(resolvedPath))
+        {
+            return resolvedPath.string();
+        }
+
+        std::string loadedAppletPath;
+        bool isOpened = false;
+        {
+            std::lock_guard<std::mutex> lock(_stateMutex);
+            loadedAppletPath = _appletPath;
+            isOpened = _handle != nullptr;
+        }
+        if (std::filesystem::is_regular_file(loadedAppletPath)
+            && appletReferenceMatchesPath(appletReference, loadedAppletPath))
+        {
+            return loadedAppletPath;
+        }
+
+        // Siso GenICam keeps state associated with an initialized applet. Avoid a
+        // filesystem iterator query while that applet is live; the user can select
+        // a replacement when the current applet does not identify the MCF target.
+        if (_system && !isOpened)
+        {
+            const std::string sdkPath = _system->resolveLoadableAppletPath(
+                boardName,
+                appletReference);
+            if (!sdkPath.empty())
+            {
+                return sdkPath;
+            }
+        }
+        return resolvedPath.string();
+    };
+
+    std::ifstream configuration(configurationPath);
+    std::string line;
+    std::string section;
+    std::string fileNameReference;
+    while (std::getline(configuration, line))
+    {
+        if (line.size() >= 3
+            && static_cast<unsigned char>(line[0]) == 0xEF
+            && static_cast<unsigned char>(line[1]) == 0xBB
+            && static_cast<unsigned char>(line[2]) == 0xBF)
+        {
+            line.erase(0, 3);
+        }
+        const std::string trimmedLine = trimCopy(line);
+        if (trimmedLine.size() >= 2
+            && trimmedLine.front() == '['
+            && trimmedLine.back() == ']')
+        {
+            section = lowercase(trimCopy(
+                trimmedLine.substr(1, trimmedLine.size() - 2)));
+            continue;
+        }
+
+        const std::size_t separator = line.find('=');
+        if (separator == std::string::npos)
+        {
+            continue;
+        }
+
+        const std::string key = lowercase(trimCopy(line.substr(0, separator)));
+        std::string appletReference = trimCopy(line.substr(separator + 1));
+        if (!appletReference.empty() && appletReference.back() == ';')
+        {
+            appletReference.pop_back();
+            appletReference = trimCopy(std::move(appletReference));
+        }
+        if (appletReference.size() >= 2
+            && ((appletReference.front() == '\'' && appletReference.back() == '\'')
+                || (appletReference.front() == '"' && appletReference.back() == '"')))
+        {
+            appletReference = appletReference.substr(1, appletReference.size() - 2);
+        }
+        if (appletReference.empty())
+        {
+            continue;
+        }
+        if (key == "hapname")
+        {
+            return resolveReference(appletReference);
+        }
+        if (section == "fglib5" && key == "filename")
+        {
+            fileNameReference = std::move(appletReference);
+        }
+    }
+    return fileNameReference.empty() ? std::string{} : resolveReference(fileNameReference);
+}
+
+bool Framegrabber::loadAppletConfiguration(const std::string& appletPath,
+                                            const std::string& configurationPath,
+                                            const std::string& boardName)
+{
+    if (configurationPath.empty()
+        || lowerExtension(configurationPath) != ".mcf"
+        || !std::filesystem::is_regular_file(configurationPath))
+    {
+        return false;
+    }
+
+    std::lock_guard<std::mutex> lifecycleLock(_lifecycleMutex);
+    std::string currentAppletPath;
+    bool isOpened = false;
+    {
+        std::lock_guard<std::mutex> lock(_stateMutex);
+        currentAppletPath = _appletPath;
+        isOpened = _handle != nullptr;
+    }
+    std::error_code error;
+    const bool isCurrentApplet = isOpened
+        && std::filesystem::equivalent(
+            std::filesystem::path(currentAppletPath),
+            std::filesystem::path(appletPath),
+            error)
+        && !error;
+
+    if (!isCurrentApplet && !loadAppletUnlocked(appletPath, boardName))
+    {
+        return false;
+    }
+    if (!loadConfigurationUnlocked(configurationPath))
+    {
+        return false;
+    }
+
+    bool hasCameraControl = false;
+    {
+        std::lock_guard<std::mutex> lock(_stateMutex);
+        hasCameraControl = _cxpBoard != nullptr;
+    }
+    // Siso GenICam is not safe to destroy and create again for the same applet
+    // during one process lifetime. Keep the existing board and only reconnect cameras.
+    return !hasCameraControl || refreshCameras(CameraTransport::CoaXPress);
+}
+
+bool Framegrabber::loadAppletUnlocked(const std::string& path, const std::string& boardName)
+{
     if (path.empty() || !std::filesystem::is_regular_file(path))
     {
         return false;
@@ -719,7 +924,7 @@ bool Framegrabber::loadApplet(const std::string& path, const std::string& boardN
         _appletPath = path;
     }
 
-    if (open(boardName))
+    if (openUnlocked(boardName))
     {
         return true;
     }
@@ -728,9 +933,9 @@ bool Framegrabber::loadApplet(const std::string& path, const std::string& boardN
     setAppletPath(previousPath);
     if (wasOpened && !previousPath.empty())
     {
-        if (open(previousBoardName) && !previousConfigurationPath.empty())
+        if (openUnlocked(previousBoardName) && !previousConfigurationPath.empty())
         {
-            loadConfiguration(previousConfigurationPath);
+            loadConfigurationUnlocked(previousConfigurationPath);
         }
     }
     else
@@ -743,6 +948,11 @@ bool Framegrabber::loadApplet(const std::string& path, const std::string& boardN
 bool Framegrabber::open(const std::string& boardName)
 {
     std::lock_guard<std::mutex> lifecycleLock(_lifecycleMutex);
+    return openUnlocked(boardName);
+}
+
+bool Framegrabber::openUnlocked(const std::string& boardName)
+{
     if (!_system || !_system->isInitialized())
     {
         log("Frame grabber system is not initialized.", true);
@@ -930,6 +1140,12 @@ std::string Framegrabber::getLoadedAppletVersion() const
 
 bool Framegrabber::loadConfiguration(const std::string& path)
 {
+    std::lock_guard<std::mutex> lifecycleLock(_lifecycleMutex);
+    return loadConfigurationUnlocked(path);
+}
+
+bool Framegrabber::loadConfigurationUnlocked(const std::string& path)
+{
     if (path.empty()
         || lowerExtension(path) != ".mcf"
         || !std::filesystem::is_regular_file(path))
@@ -960,14 +1176,35 @@ bool Framegrabber::loadConfiguration(const std::string& path)
     return true;
 }
 
-bool Framegrabber::saveConfiguration(const std::string& path) const
+bool Framegrabber::saveConfiguration(const std::string& path)
 {
-    std::lock_guard<std::mutex> lock(_stateMutex);
-    if (!_handle || path.empty())
+    if (path.empty() || lowerExtension(path) != ".mcf")
     {
         return false;
     }
-    return Fg_saveConfig(_handle, path.c_str()) == FG_OK;
+
+    std::lock_guard<std::mutex> lifecycleLock(_lifecycleMutex);
+    int result = FG_NOT_INIT;
+    {
+        std::lock_guard<std::mutex> lock(_stateMutex);
+        if (!_handle || _isRunning.load(std::memory_order_acquire))
+        {
+            return false;
+        }
+        result = Fg_saveConfig(_handle, path.c_str());
+        if (result == FG_OK)
+        {
+            _configurationPath = path;
+        }
+    }
+    if (result != FG_OK)
+    {
+        log("Failed to save configuration '" + path + "': "
+                + safeString(Fg_getErrorDescription(nullptr, result)),
+            true);
+        return false;
+    }
+    return true;
 }
 
 void Framegrabber::grab(const std::size_t frames)
@@ -1129,6 +1366,22 @@ void Framegrabber::startChannel(const unsigned int dmaIndex, const std::size_t f
     const int width = static_cast<int>(widthValue);
     const int height = static_cast<int>(heightValue);
     const int sdkFormat = static_cast<int>(formatValue);
+
+    std::int64_t areaTriggerMode = -1;
+    std::int64_t triggerState = -1;
+    const bool hasAreaTriggerMode =
+        readIntegerParameter(FG_AREATRIGGERMODE, areaTriggerMode);
+    const bool hasTriggerState = readIntegerParameter(FG_TRIGGERSTATE, triggerState);
+    if (hasAreaTriggerMode || hasTriggerState)
+    {
+        log(
+            "DMA(" + std::to_string(dmaIndex) + ") starting with "
+                + "FG_AREATRIGGERMODE="
+                + (hasAreaTriggerMode ? std::to_string(areaTriggerMode) : "unavailable")
+                + ", FG_TRIGGERSTATE="
+                + (hasTriggerState ? std::to_string(triggerState) : "unavailable")
+                + ".");
+    }
 
     std::int64_t bitAlignmentValue = FG_RIGHT_ALIGNED;
     const bool hasBitAlignment = readIntegerParameter(FG_BITALIGNMENT, bitAlignmentValue);
@@ -1456,7 +1709,24 @@ bool Framegrabber::startCameraAcquisitionForChannel(const unsigned int dmaIndex)
             cameraHandle = camera->handle;
         }
     }
-    return cameraHandle && Sgc_startAcquisition(cameraHandle, 1) == SGC_OK;
+    if (!cameraHandle)
+    {
+        log("DMA(" + std::to_string(dmaIndex)
+                + ") camera acquisition cannot start because no connected CXP camera is mapped.",
+            true);
+        return false;
+    }
+
+    const int result = Sgc_startAcquisition(cameraHandle, 1);
+    if (result != SGC_OK)
+    {
+        log("DMA(" + std::to_string(dmaIndex) + ") camera acquisition start failed: "
+                + safeString(Sgc_getErrorDescription(result)),
+            true);
+        return false;
+    }
+    log("DMA(" + std::to_string(dmaIndex) + ") camera acquisition started.");
+    return true;
 }
 
 void Framegrabber::stopCameraAcquisitionForChannel(const unsigned int dmaIndex)

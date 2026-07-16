@@ -251,6 +251,12 @@ public:
     [[nodiscard]] std::string configurationPath() const;
 
     bool loadApplet(const std::string& path, const std::string& boardName = "");
+    [[nodiscard]] std::string appletPathFromConfiguration(
+        const std::string& configurationPath,
+        const std::string& boardName = "") const;
+    bool loadAppletConfiguration(const std::string& appletPath,
+                                 const std::string& configurationPath,
+                                 const std::string& boardName = "");
     bool open(const std::string& boardName = "");
     [[nodiscard]] bool isOpened() const;
     void close();
@@ -259,7 +265,7 @@ public:
     [[nodiscard]] std::string getLoadedAppletVersion() const;
 
     bool loadConfiguration(const std::string& path);
-    bool saveConfiguration(const std::string& path) const;
+    bool saveConfiguration(const std::string& path);
 
     void grab(std::size_t frames = 0);
     void stop();
@@ -368,6 +374,9 @@ private:
     static PixelFormat toPixelFormat(int sdkFormat);
     static int bitsPerPixel(PixelFormat pixelFormat);
 
+    bool loadAppletUnlocked(const std::string& path, const std::string& boardName);
+    bool openUnlocked(const std::string& boardName);
+    bool loadConfigurationUnlocked(const std::string& path);
     bool openResolvedBoard(const std::string& boardName,
                            unsigned int boardIndex,
                            const std::string& appletPath,

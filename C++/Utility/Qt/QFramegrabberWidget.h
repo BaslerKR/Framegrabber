@@ -14,6 +14,7 @@
 #include <QSet>
 #include <QWidget>
 
+#include <functional>
 #include <memory>
 #include <type_traits>
 #include <utility>
@@ -36,10 +37,14 @@ class QFramegrabberWidget final : public QWidget
     Q_OBJECT
 
 public:
+    using MissingAppletResolver = std::function<QString(const QString& configurationPath,
+                                                        const QString& configuredAppletPath)>;
+
     explicit QFramegrabberWidget(QWidget* parent = nullptr, Framegrabber* framegrabber = nullptr);
     ~QFramegrabberWidget() override;
 
     void prepareForShutdown();
+    void setMissingAppletResolver(MissingAppletResolver resolver);
 
 private:
     enum class TreeSource
@@ -78,6 +83,7 @@ private:
     bool _connectionAttempted = false;
     bool _grabbing = false;
     bool _updatingDeviceUi = false;
+    MissingAppletResolver _missingAppletResolver;
 
     QComboBox* _boardCombo = nullptr;
     QToolButton* _grabOneButton = nullptr;
@@ -86,7 +92,8 @@ private:
     QComboBox* _appletDmaCombo = nullptr;
     QTreeWidget* _appletTree = nullptr;
     QLineEdit* _appletPathEdit = nullptr;
-    QPushButton* _loadAppletButton = nullptr;
+    QToolButton* _loadButton = nullptr;
+    QToolButton* _saveConfigurationButton = nullptr;
 
 
     QTabWidget* _tabs = nullptr;
@@ -104,7 +111,10 @@ private:
 
     void startAutomaticAppletLoad();
     void startAppletLoad(const QString& path);
-    void startAppletUnload();
+    void startConfigurationLoad(const QString& configurationPath);
+    void startConfigurationLoadWithApplet(const QString& configurationPath,
+                                          const QString& appletPath);
+    void startConfigurationSave(const QString& configurationPath);
     void startCameraRefresh(Framegrabber::CameraTransport transport);
     void setOperationActive(bool active);
     void applyConnectionState(bool opened);

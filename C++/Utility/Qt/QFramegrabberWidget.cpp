@@ -7,6 +7,7 @@
 #include <QComboBox>
 #include <QCoreApplication>
 #include <QDialog>
+#include <QDir>
 #include <QDomDocument>
 #include <QDoubleSpinBox>
 #include <QFileDialog>
@@ -254,6 +255,11 @@ void QFramegrabberWidget::prepareForShutdown()
     _framegrabber = nullptr;
 }
 
+void QFramegrabberWidget::setMissingAppletResolver(MissingAppletResolver resolver)
+{
+    _missingAppletResolver = std::move(resolver);
+}
+
 void QFramegrabberWidget::buildUi()
 {
     _boardCombo = new QComboBox(this);
@@ -363,11 +369,22 @@ QWidget* QFramegrabberWidget::createSetupTab()
     auto* page = new QWidget(this);
     _appletPathEdit = new QLineEdit(page);
     _appletPathEdit->setReadOnly(true);
-    _loadAppletButton = new QPushButton(tr("Load Applet"), page);
+    _loadButton = new QToolButton(page);
+    _loadButton->setIcon(QIcon(QStringLiteral(":/Resources/Icons/icons8-opened-folder-48.png")));
+    _loadButton->setToolButtonStyle(Qt::ToolButtonIconOnly);
+    _loadButton->setIconSize(QSize(16, 16));
+    _loadButton->setToolTip(tr("Load applet or configuration"));
+
+    _saveConfigurationButton = new QToolButton(page);
+    _saveConfigurationButton->setIcon(QIcon(QStringLiteral(":/Resources/Icons/icons8-save-as-48.png")));
+    _saveConfigurationButton->setToolButtonStyle(Qt::ToolButtonIconOnly);
+    _saveConfigurationButton->setIconSize(QSize(16, 16));
+    _saveConfigurationButton->setToolTip(tr("Save current applet configuration"));
 
     auto* pathLayout = new QHBoxLayout;
     pathLayout->setObjectName(QStringLiteral("FramegrabberAppletPathLayout"));
-    pathLayout->addWidget(_loadAppletButton);
+    pathLayout->addWidget(_loadButton);
+    pathLayout->addWidget(_saveConfigurationButton);
     pathLayout->addWidget(_appletPathEdit);
 
     _appletDmaCombo = new QComboBox(page);
@@ -388,23 +405,55 @@ QWidget* QFramegrabberWidget::createSetupTab()
     layout->addWidget(_appletTree);
     page->setLayout(layout);
 
-    connect(_loadAppletButton, &QPushButton::clicked, this, [this]
+    connect(_loadButton, &QToolButton::clicked, this, [this]
     {
-        if (_framegrabber && _framegrabber->isOpened())
+        const QString path = QFileDialog::getOpenFileName(
+            this,
+            tr("Load frame grabber applet or configuration"),
+            _appletPathEdit->text(),
+            tr("Frame Grabber Configuration (*.mcf);;Frame Grabber Applet (*.hap *.dll *.so);;All Files (*)"));
+        if (!path.isEmpty())
         {
-            startAppletUnload();
+            if (path.endsWith(QStringLiteral(".mcf"), Qt::CaseInsensitive))
+            {
+                startConfigurationLoad(path);
+            }
+            else
+            {
+                startAppletLoad(path);
+            }
+        }
+    });
+    connect(_saveConfigurationButton, &QToolButton::clicked, this, [this]
+    {
+        if (!_framegrabber || !_framegrabber->isOpened() || _grabbing)
+        {
             return;
         }
 
-        const QString path = QFileDialog::getOpenFileName(
-            this,
-            tr("Load frame grabber applet"),
-            _appletPathEdit->text(),
-            tr("Frame Grabber Applet (*.hap *.dll *.so);;All Files (*)"));
-        if (!path.isEmpty())
+        QString suggestedPath = QString::fromStdString(_framegrabber->configurationPath());
+        if (suggestedPath.isEmpty())
         {
-            startAppletLoad(path);
+            const QFileInfo appletInfo(_appletPathEdit->text());
+            const QString directory = appletInfo.dir().exists()
+                ? appletInfo.absolutePath()
+                : QDir::homePath();
+            suggestedPath = QDir(directory).filePath(QStringLiteral("configuration.mcf"));
         }
+        QString path = QFileDialog::getSaveFileName(
+            this,
+            tr("Save frame grabber configuration"),
+            suggestedPath,
+            tr("Frame Grabber Configuration (*.mcf)"));
+        if (path.isEmpty())
+        {
+            return;
+        }
+        if (!path.endsWith(QStringLiteral(".mcf"), Qt::CaseInsensitive))
+        {
+            path += QStringLiteral(".mcf");
+        }
+        startConfigurationSave(path);
     });
     connect(_appletDmaCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this]
     {
@@ -653,25 +702,154 @@ void QFramegrabberWidget::startAppletLoad(const QString& path)
     worker->start();
 }
 
-void QFramegrabberWidget::startAppletUnload()
+void QFramegrabberWidget::startConfigurationLoad(const QString& configurationPath)
+{
+    if (!_framegrabber || _operationThread || _shuttingDown)
+    {
+        return;
+    }
+    if (_boardCombo->currentIndex() < 0)
+    {
+        showStatusMessage(tr("Select a frame grabber board first."), true);
+        return;
+    }
+
+    const auto configuredAppletPath = std::make_shared<std::string>();
+    QPointer<QFramegrabberWidget> guard(this);
+    const QString boardName = _boardCombo->currentText();
+    QThread* worker = QThread::create([framegrabber = _framegrabber,
+                                       boardName,
+                                       configurationPath,
+                                       configuredAppletPath]
+    {
+        *configuredAppletPath = framegrabber->appletPathFromConfiguration(
+            configurationPath.toStdString(),
+            boardName.toStdString());
+    });
+    worker->setParent(this);
+    _operationThread = worker;
+    setOperationActive(true);
+    showStatusMessage(tr("Reading frame grabber configuration..."));
+    connect(worker, &QThread::finished, this, [guard, worker, configurationPath, configuredAppletPath]
+    {
+        worker->deleteLater();
+        if (!guard)
+        {
+            return;
+        }
+        guard->_operationThread = nullptr;
+        if (guard->_shuttingDown || !guard->_framegrabber)
+        {
+            return;
+        }
+        guard->setOperationActive(false);
+
+        const QString appletPath = QString::fromStdString(*configuredAppletPath);
+        if (!appletPath.isEmpty() && QFileInfo(appletPath).isFile())
+        {
+            guard->startConfigurationLoadWithApplet(configurationPath, appletPath);
+            return;
+        }
+
+        guard->showStatusMessage(tr("The configured applet is unavailable."), true);
+        QString selectedAppletPath;
+        if (guard->_missingAppletResolver)
+        {
+            selectedAppletPath = guard->_missingAppletResolver(configurationPath, appletPath);
+        }
+        else
+        {
+            selectedAppletPath = QFileDialog::getOpenFileName(
+                guard,
+                guard->tr("Locate frame grabber applet"),
+                QFileInfo(configurationPath).absolutePath(),
+                guard->tr("Frame Grabber Applet (*.hap *.dll *.so);;All Files (*)"));
+        }
+        if (selectedAppletPath.isEmpty())
+        {
+            guard->showStatusMessage(tr("Configuration loading cancelled."));
+            return;
+        }
+        guard->startConfigurationLoadWithApplet(configurationPath, selectedAppletPath);
+    });
+    worker->start();
+}
+
+void QFramegrabberWidget::startConfigurationLoadWithApplet(
+    const QString& configurationPath,
+    const QString& appletPath)
 {
     if (!_framegrabber || _operationThread || _shuttingDown)
     {
         return;
     }
 
+    const QString boardName = _boardCombo->currentText();
+    const auto success = std::make_shared<bool>(false);
     QPointer<QFramegrabberWidget> guard(this);
-    QThread* worker = QThread::create([framegrabber = _framegrabber]
+    QThread* worker = QThread::create([framegrabber = _framegrabber,
+                                       boardName,
+                                       configurationPath,
+                                       appletPath,
+                                       success]
     {
-        framegrabber->requestStop();
-        framegrabber->close();
+        *success = framegrabber->loadAppletConfiguration(
+            appletPath.toStdString(),
+            configurationPath.toStdString(),
+            boardName.toStdString());
     });
     worker->setParent(this);
     _operationThread = worker;
     _connectionAttempted = true;
     setOperationActive(true);
-    showStatusMessage(tr("Unloading applet..."));
-    connect(worker, &QThread::finished, this, [guard, worker]
+    showStatusMessage(tr("Loading applet configuration..."));
+    connect(worker, &QThread::finished, this, [guard, worker, success]
+    {
+        worker->deleteLater();
+        if (!guard)
+        {
+            return;
+        }
+        guard->_operationThread = nullptr;
+        if (guard->_shuttingDown || !guard->_framegrabber)
+        {
+            return;
+        }
+        guard->setOperationActive(false);
+        guard->_appletPathEdit->setText(
+            QString::fromStdString(guard->_framegrabber->appletPath()));
+        guard->applyConnectionState(guard->_framegrabber->isOpened());
+        guard->showStatusMessage(
+            *success
+                ? guard->tr("Applet and configuration loaded.")
+                : guard->tr("Failed to initialize the applet or apply the configuration."),
+            !*success);
+    });
+    worker->start();
+}
+
+void QFramegrabberWidget::startConfigurationSave(const QString& configurationPath)
+{
+    if (!_framegrabber
+        || !_framegrabber->isOpened()
+        || _grabbing
+        || _operationThread
+        || _shuttingDown)
+    {
+        return;
+    }
+
+    const auto success = std::make_shared<bool>(false);
+    QPointer<QFramegrabberWidget> guard(this);
+    QThread* worker = QThread::create([framegrabber = _framegrabber, configurationPath, success]
+    {
+        *success = framegrabber->saveConfiguration(configurationPath.toStdString());
+    });
+    worker->setParent(this);
+    _operationThread = worker;
+    setOperationActive(true);
+    showStatusMessage(tr("Saving applet configuration..."));
+    connect(worker, &QThread::finished, this, [guard, worker, success]
     {
         worker->deleteLater();
         if (!guard)
@@ -684,8 +862,11 @@ void QFramegrabberWidget::startAppletUnload()
             return;
         }
         guard->setOperationActive(false);
-        guard->applyConnectionState(false);
-        guard->showStatusMessage(tr("Applet unloaded."));
+        guard->showStatusMessage(
+            *success
+                ? guard->tr("Applet configuration saved.")
+                : guard->tr("Failed to save the applet configuration."),
+            !*success);
     });
     worker->start();
 }
@@ -744,7 +925,8 @@ void QFramegrabberWidget::setOperationActive(const bool active)
     _operationActive = active;
     const bool opened = _framegrabber && _framegrabber->isOpened();
     _boardCombo->setEnabled(!active && !opened);
-    _loadAppletButton->setEnabled(!active && !_grabbing);
+    _loadButton->setEnabled(!active && !_grabbing);
+    _saveConfigurationButton->setEnabled(!active && opened && !_grabbing);
     for (const auto& page : _cameraPages)
     {
         page->refreshButton->setEnabled(
@@ -758,7 +940,6 @@ void QFramegrabberWidget::applyConnectionState(const bool opened)
     const bool wasUpdatingDeviceUi = _updatingDeviceUi;
     _updatingDeviceUi = true;
     _boardCombo->setEnabled(!opened && !_operationActive);
-    _loadAppletButton->setText(opened ? tr("Unload Applet") : tr("Load Applet"));
     _grabOneButton->setEnabled(opened && !_grabbing);
     _grabLiveButton->setEnabled(opened);
 
@@ -787,7 +968,9 @@ void QFramegrabberWidget::updateGrabState(const bool grabbing)
         _grabLiveButton->setChecked(grabbing);
     }
     _grabOneButton->setEnabled(_framegrabber && _framegrabber->isOpened() && !grabbing);
-    _loadAppletButton->setEnabled(!grabbing && !_operationActive);
+    _loadButton->setEnabled(!grabbing && !_operationActive);
+    _saveConfigurationButton->setEnabled(
+        _framegrabber && _framegrabber->isOpened() && !grabbing && !_operationActive);
     for (const auto& page : _cameraPages)
     {
         page->refreshButton->setEnabled(

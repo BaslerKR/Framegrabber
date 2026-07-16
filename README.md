@@ -66,13 +66,24 @@ multi-DMA acquisition, transport-aware camera control, and Qt feature editing.
 - Consumer callbacks run on the DMA worker and must return; `stop()` joins that worker
   before releasing DMA memory and SDK handles, so a blocking consumer intentionally
   keeps shutdown pending rather than risking use-after-free of a live DMA buffer.
-- Applets are initialized first through `loadApplet()`/`Fg_Init()`. VisualApplets HAP
-  files and wrapped DLL/SO applets must be deployed independently of MCF snapshots.
+- Applets are initialized through `loadApplet()`/`Fg_Init()`. For an MCF snapshot,
+  `appletPathFromConfiguration()` reads its `HapName` first (falling back to
+  `fglib5/FileName`) and resolves a bare applet name through the selected board's SDK loadable-applet iterator
+  before
+  `loadAppletConfiguration()` reuses a matching initialized applet and applies
+  `Fg_loadConfig()` directly; otherwise it serializes `Fg_Init()` followed by
+  `Fg_loadConfig()`. When the MCF refers to the currently loaded applet, its
+  CXP/GenICam board remains alive and only cameras are reconnected.
+  A missing configured applet path must be resolved by the host before initialization.
+  VisualApplets HAP files and wrapped DLL/SO applets must be deployed independently of
+  MCF snapshots.
 - Before manual selection, the Qt widget queries the selected board's active applet and
   then its power-up applet through the SDK board iterator. It matches that board identity
   by applet UID against the SDK's loadable filesystem iterator and initializes the matched
   path automatically; no application-side recent-applet cache is used.
-- MCF files are applied only to an initialized applet through `Fg_loadConfig()`.
+- MCF files are applied only to an initialized applet through `Fg_loadConfig()`; the
+  matching MFS sidecar is loaded by the SDK through the MCF reference and is never
+  selected directly.
   Live feature edits mark the snapshot dirty; Save and Save As export the current
   board configuration.
 - `cameraControlCapabilities()` reports only camera-control transports exposed by the
@@ -103,9 +114,13 @@ multi-DMA acquisition, transport-aware camera control, and Qt feature editing.
   This identity is not repeated inside the Setup tab because one applet owns the
   whole board session. If the loaded-handle version query is empty, the version
   falls back to the SDK filesystem iterator metadata for the same applet path.
-- The Setup tab contains applet selection and initialization followed by the
-  DMA-channel selector and applet feature editor. MCF and DMA-buffer APIs remain
-  module-level capabilities and are not exposed in this compact widget.
+- The Setup tab has Load and Save icon actions followed by the applet path,
+  DMA-channel selector, and applet feature editor. Load accepts direct HAP/DLL/SO
+  applets and MCF snapshots. Save writes the current idle applet state as an MCF
+  snapshot (and its SDK-managed MFS sidecar when required). If an MCF's configured
+  applet path is unavailable, the host resolves a replacement path before the module
+  initializes the applet and applies the configuration. DMA-buffer controls remain
+  module-level capabilities.
 - Applet feature XML is interpreted by a GenApi node map. `Framegrabber` exposes a
   Qt-neutral hierarchy with category, display-name, tooltip, enum, and access metadata;
   each feature's GenApi register address is bound to the corresponding frame grabber

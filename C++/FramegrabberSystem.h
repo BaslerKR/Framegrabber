@@ -50,6 +50,9 @@ public:
     [[nodiscard]] std::vector<BoardInfo> getCachedBoardInfo() const;
     [[nodiscard]] bool isAccessible(const std::string& boardName) const;
     [[nodiscard]] std::string getBoardAppletPath(const std::string& boardName) const;
+    [[nodiscard]] std::string resolveLoadableAppletPath(
+        const std::string& boardName,
+        const std::string& appletReference) const;
     [[nodiscard]] AppletMetadata getAppletMetadata(
         const std::string& boardName,
         const std::string& appletPath) const;

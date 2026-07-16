@@ -5,6 +5,7 @@
 #include "sisoboards.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
@@ -140,6 +141,77 @@ std::string findLoadableAppletPath(const unsigned int boardIndex,
 
     Fg_freeAppletIterator(iterator);
     return matchedPath;
+}
+
+std::string lowercase(std::string value)
+{
+    std::transform(value.begin(), value.end(), value.begin(), [](const unsigned char character)
+    {
+        return static_cast<char>(std::tolower(character));
+    });
+    return value;
+}
+
+std::string findLoadableAppletPathByReference(
+    const unsigned int boardIndex,
+    const std::string& appletReference)
+{
+    const std::filesystem::path referencePath(appletReference);
+    const std::string referenceFileName = referencePath.filename().string();
+    if (referenceFileName.empty())
+    {
+        return {};
+    }
+
+    Fg_AppletIteratorType iterator = nullptr;
+    const int count = Fg_getAppletIterator(
+        static_cast<int>(boardIndex),
+        FG_AIS_FILESYSTEM,
+        &iterator,
+        FG_AF_IS_LOADABLE);
+    if (count <= 0)
+    {
+        if (iterator)
+        {
+            Fg_freeAppletIterator(iterator);
+        }
+        return {};
+    }
+
+    const std::string normalizedReference = lowercase(referenceFileName);
+    const bool matchStem = referencePath.extension().empty();
+    std::vector<std::string> matches;
+    for (int index = 0; index < count; ++index)
+    {
+        AppletRecord candidate;
+        if (!readAppletRecord(
+                Fg_getAppletIteratorItem(iterator, index),
+                candidate)
+            || !std::filesystem::is_regular_file(candidate.path))
+        {
+            continue;
+        }
+
+        const std::filesystem::path candidateFile(candidate.file);
+        const std::filesystem::path candidatePath(candidate.path);
+        const bool fileNameMatches =
+            lowercase(candidateFile.filename().string()) == normalizedReference
+            || lowercase(candidatePath.filename().string()) == normalizedReference;
+        const bool stemMatches = matchStem
+            && (lowercase(candidateFile.stem().string()) == normalizedReference
+                || lowercase(candidatePath.stem().string()) == normalizedReference);
+        if (!fileNameMatches && !stemMatches)
+        {
+            continue;
+        }
+        if (std::find(matches.begin(), matches.end(), candidate.path) == matches.end())
+        {
+            matches.push_back(std::move(candidate.path));
+        }
+    }
+
+    Fg_freeAppletIterator(iterator);
+    return matches.size() == 1 ? matches.front() : std::string{};
 }
 
 bool findAppletRecord(const unsigned int boardIndex,
@@ -362,6 +434,25 @@ std::string FramegrabberSystem::getBoardAppletPath(
         }
     }
     return {};
+}
+
+std::string FramegrabberSystem::resolveLoadableAppletPath(
+    const std::string& boardName,
+    const std::string& appletReference) const
+{
+    if (!_initialized || appletReference.empty())
+    {
+        return {};
+    }
+
+    BoardInfo board;
+    if (!resolveBoard(boardName, board))
+    {
+        return {};
+    }
+
+    std::lock_guard<std::mutex> lock(_appletDiscoveryMutex);
+    return findLoadableAppletPathByReference(board.index, appletReference);
 }
 
 FramegrabberSystem::AppletMetadata FramegrabberSystem::getAppletMetadata(
