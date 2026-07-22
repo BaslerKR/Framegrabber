@@ -1,162 +1,182 @@
-# Framegrabber
+# 🖼️ Framegrabber Module
 
-Basler frame grabber module for board discovery, applet/MCF configuration,
-multi-DMA acquisition, transport-aware camera control, and Qt feature editing.
+[![C++ Standard](https://img.shields.io/badge/C%2B%2B-17%20%2F%2020-blue.svg?style=flat-square)](https://en.cppreference.com/w/cpp/compiler_support)
+[![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20Linux-lightgrey.svg?style=flat-square)](#)
+[![Dependency](https://img.shields.io/badge/SDK-Basler%20Frame%20Grabber%205.x%2B-orange.svg?style=flat-square)](https://www.baslerweb.com/)
 
-## Boundaries
+Basler frame grabber 보드 탐색, 애플릿/MCF 구성, 다중 DMA 고속 이미지 수신 및 CoaXPress 카메라 제어를 제공하는 Pure C++ 이미지 취득(Acquisition) 라이브러리 모듈입니다.
 
-- The module owns all Basler Frame Grabber SDK handles and DMA memory.
-- `Framegrabber::Image` owns copied frame bytes; consumers never retain an SDK buffer.
-- Each DMA channel preallocates an owned byte-buffer pool with the configured DMA
-  buffer count. Frames copy once from the SDK ring into a leased pool slot, and the
-  last consumer reference returns that slot for reuse. Pool exhaustion waits rather
-  than overwriting bytes still visible to a consumer.
-- Legacy SDK `FG_COL24` and `FG_COL48` output is BGR-ordered. The public pixel
-  format preserves that identity so Qt uses `Format_BGR888` for 8-bit data and
-  swaps the 16-bit BGR channels only while reducing them for 8-bit display.
-- DMA output `FG_FORMAT` constants are mapped explicitly. Supported display paths
-  include Mono 8/10/12/14/16/32-bit output, 1-bit binary output, BGR/RGB/RGBA/BGRA
-  8/10/12/14/16-bit output, RGBX 8/10/12/14/16-bit output, YUV422/YCbCr422 8-bit
-  output, Bayer GR/RG/GB/BG 8/10/12/14/16-bit output, and BiColor RGBG/GRGB/BGRG/GBGR
-  8/10/12-bit output. DMA buffers use the SDK bit depth for conservative allocation,
-  while each delivered image uses `FG_TRANSFER_LEN` for its actual payload size and
-  stride. The GraphicsEngine adapter maps the core `Framegrabber::PixelFormat` and
-  bit-alignment metadata without interpreting SDK constants a second time.
-- `FG_RAW` and `FG_JPEG` are recognized identities but are not accepted by generic
-  acquisition because they do not provide the fixed pixel layout and SDK bit depth
-  needed to derive a safe DMA allocation size.
-- Bayer DMA output is displayed through a lightweight 2x2 Bayer-cell RGB
-  reconstruction. The host does not expose raw Bayer samples as artificial
-  per-pixel RGB checker data in the live viewer.
-- `FG_YUV422_8` and `FG_YCBCR422_8` DMA output both use two bytes per pixel.
-  `YUV422_8` and `FG_YUV422_8` use Y0-Cb-Y1-Cr; `FG_YCBCR422_8` uses
-  Cb-Y0-Cr-Y1. Camera input `FG_PIXELFORMAT` and DMA output `FG_FORMAT` remain
-  separate applet settings.
-- Acquisition sizes and displays frames from DMA output `FG_FORMAT` only. If
-  `FG_PIXELFORMAT` is YUV422 but `FG_FORMAT` is `FG_GRAY`, the host receives and
-  displays Mono8 output.
-- When a camera's active geometry and the applet ROI differ, the module keeps the
-  delivered DMA payload and derives a displayable width from `FG_TRANSFER_LEN` and
-  the output bit depth. It logs the configured and delivered geometries once per
-  acquisition instead of dropping the frame.
-- The core module does not depend on Camera, Gocator, Resources, Playground, or
-  GraphicsEngine. Set `FRAMEGRABBER_BUILD_GRAPHICSENGINE_ADAPTER=ON` after adding
-  GraphicsEngine to create `Framegrabber::GraphicsEngineAdapter`; hosts link that
-  target explicitly without adding GraphicsEngine/VTK to `Framegrabber::Framegrabber`.
-- `QFramegrabberWidget` remains usable with plain Qt when the host does not install Resources.
+---
 
-## Runtime Contract
+## 🚀 Key Features
 
-- `FramegrabberSystem` initializes the SDK before board discovery and releases it after all wrappers.
-- `Framegrabber` follows the Camera lifecycle shape: callback registration, `open`, `close`,
-  `grab`, `requestStop`, `stop`, and status notifications.
-- Continuous acquisition uses DMA-specific `ready(dmaIndex)` admission.
-- Open, grab, stop, and close operations are serialized. Loading a replacement applet
-  closes the current SDK handle under the same lifecycle lock before initializing the
-  new handle, so UI refresh, camera discovery, and acquisition cannot observe a
-  half-released board.
-- A new grab joins and clears every stopped DMA worker before allocating replacement
-  channels, and channel registration publishes its worker atomically so concurrent
-  lifecycle calls cannot miss a thread.
-- DMA stop/free operations are synchronized per channel, `ready(dmaIndex)` is a binary
-  admission signal, and exceptions from consumer callbacks do not escape into SDK workers.
-- Worker frame waits time out after one second. A stop request also wakes the local
-  admission and buffer-pool waits before issuing the SDK stop, bounding no-frame
-  shutdown latency without treating an idle trigger source as an acquisition error.
-- Consumer callbacks run on the DMA worker and must return; `stop()` joins that worker
-  before releasing DMA memory and SDK handles, so a blocking consumer intentionally
-  keeps shutdown pending rather than risking use-after-free of a live DMA buffer.
-- Applets are initialized through `loadApplet()`/`Fg_Init()`. For an MCF snapshot,
-  `appletPathFromConfiguration()` reads its `HapName` first (falling back to
-  `fglib5/FileName`) and resolves a bare applet name through the selected board's SDK loadable-applet iterator
-  before
-  `loadAppletConfiguration()` reuses a matching initialized applet and applies
-  `Fg_loadConfig()` directly; otherwise it serializes `Fg_Init()` followed by
-  `Fg_loadConfig()`. When the MCF refers to the currently loaded applet, its
-  CXP/GenICam board remains alive and only cameras are reconnected.
-  A missing configured applet path must be resolved by the host before initialization.
-  VisualApplets HAP files and wrapped DLL/SO applets must be deployed independently of
-  MCF snapshots.
-- Before manual selection, the Qt widget queries the selected board's active applet and
-  then its power-up applet through the SDK board iterator. It matches that board identity
-  by applet UID against the SDK's loadable filesystem iterator and initializes the matched
-  path automatically; no application-side recent-applet cache is used.
-- MCF files are applied only to an initialized applet through `Fg_loadConfig()`; the
-  matching MFS sidecar is loaded by the SDK through the MCF reference and is never
-  selected directly.
-  Live feature edits mark the snapshot dirty; Save and Save As export the current
-  board configuration.
-- `cameraControlCapabilities()` reports only camera-control transports exposed by the
-  opened board and applet. The current backend reports CoaXPress when Siso GenICam
-  initialization succeeds; Camera Link remains an explicit transport extension point.
-- Siso GenICam initialization is attempted only for applets whose SDK metadata declares
-  a CoaXPress interface and excludes the `family=test` diagnostic family.
-  `FrameGrabberTest` therefore keeps its Fg/DMA controls without entering the SDK camera
-  control path, which is not valid for that applet.
-- CXP discovery immediately connects every discovered camera so GenICam features are
-  available without a separate user action. The camera-page refresh action remains only
-  for an explicit rescan after hardware or link changes.
-- `QFramegrabberWidget` creates transport camera tabs from those capabilities after
-  the board opens and removes them when it closes.
-- Camera feature trees are rebuilt automatically after board connection, camera combo
-  changes, and explicit rescans. During acquisition, camera feature editors are disabled
-  and the existing tree remains visible.
-- Camera feature XML is cached during camera connect/rescan from `CAM_PROP_XML_DATA`
-  and the widget reparses that cache for tree refreshes. The UI refresh path does not
-  call `Sgc_getGenICamXML()`, because that SDK path can log access errors for optional
-  or dynamically unreadable camera nodes before the widget asks for live values.
-- Camera feature trees hide non-readable leaf nodes before asking the SDK for a live
-  value. Write-only commands remain visible as executable buttons; other write-only or
-  unavailable nodes stay out of the value tree because reading them can make Siso
-  GenICam log access exceptions.
-- A session-level read-only information field above the tabs shows the loaded applet
-  file name and runtime version; its tooltip preserves the full local applet path.
-  This identity is not repeated inside the Setup tab because one applet owns the
-  whole board session. If the loaded-handle version query is empty, the version
-  falls back to the SDK filesystem iterator metadata for the same applet path.
-- The Setup tab has Load and Save icon actions followed by the applet path,
-  DMA-channel selector, and applet feature editor. Load accepts direct HAP/DLL/SO
-  applets and MCF snapshots. Save writes the current idle applet state as an MCF
-  snapshot (and its SDK-managed MFS sidecar when required). If an MCF's configured
-  applet path is unavailable, the host resolves a replacement path before the module
-  initializes the applet and applies the configuration. DMA-buffer controls remain
-  module-level capabilities.
-- Applet feature XML is interpreted by a GenApi node map. `Framegrabber` exposes a
-  Qt-neutral hierarchy with category, display-name, tooltip, enum, and access metadata;
-  each feature's GenApi register address is bound to the corresponding frame grabber
-  SDK parameter ID for live values. The Qt widget falls back to its legacy XML renderer
-  if a deployed applet cannot produce a node map.
-- Applet writes are read back when the parameter is readable. Every applet node update
-  invalidates the selected DMA hierarchy and rebuilds it from current XML because one
-  feature may create, remove, move, or change the value/access state of other features;
-  tree expansion and selection remain UI state.
-- Camera feature writes are read back only when the UI path has a readable current
-  value. Write-only or dynamically unreadable camera writes rely on the SDK write
-  result. Failed feature writes refresh the current tree instead of locally reverting
-  one editor, because the rejected write can also change dependent access or value state.
-- The Qt widget runs feature writes on a short-lived worker thread and returns cleanup
-  to the GUI thread through callable objects with explicit shared lifetime, so stateful
-  completion handlers compile consistently across MSVC and other C++17 toolchains.
-- Dynamic access uses the SDK's `PROP_ID_ACCESS_ID` virtual parameter when present and
-  falls back to the GenApi register `AccessMode` when the applet reports access ID zero.
-  Live write/lock/modify flags are enforced again immediately before an SDK write.
+* **강력한 프레임그래버 수명주기 관리**: Basler Frame Grabber SDK(microDisplay / fglib)를 래핑하여 보드 탐색, Applet/MCF 로딩, Multi-DMA 이미지 수신을 안전하게 핸들링합니다.
+* **독자적 DMA 버퍼 포인터 메모리 모델**: SDK 링 버퍼를 직접 노출하지 않고 `Framegrabber::Image` 내부에 안전하게 소유권을 전이(`std::shared_ptr`)하며, DMA 버퍼 풀 레벨의 락 프리 메모리 재사용을 보장합니다.
+* **CXP / GenICam 카메라 제어 통합**: SISO GenICam SDK 기반의 CoaXPress 카메라 자동 디스커버리 및 GenICam 노드 트리 연동(속성 읽기/쓰기, 커맨드 실행)을 제공합니다.
+* **다양한 PixelFormat 변환 및 스트라이드 지원**: Mono, RGB, BGR, YUV/YCbCr, Bayer 2x2 복원, BiColor 등 광범위한 DMA 출력을 명시적으로 매핑하며, `FG_TRANSFER_LEN` 기반의 안전한 페이로드를 제공합니다.
+* **독립적 로깅 및 백프레셔 제어**: `FramegrabberSystem::syslog()`를 통한 표준 스트림 기반 로깅과 프레임 드롭 방지를 위한 `ready(dmaIndex)` 흐름 제어 신호를 기본 내장하고 있습니다.
 
-## Follow-up
+---
 
-- Validate Sgc camera event coverage on CXP hardware before replacing explicit camera
-  refresh with camera-side node event updates.
-- Profile the remaining safe DMA-to-owned-buffer copy before considering an SDK-buffer
-  lease or zero-copy frame contract.
-- Validate host `DeviceSession` DMA-specific display routing on multi-DMA hardware
-  before presenting simultaneous multi-camera display as supported.
-- Split DMA acquisition channel ownership from CXP camera lifecycle ownership into
-  dedicated classes only when further hot-path optimization requires the extra structure.
+## 📦 System Architecture
 
-## Build
+보드 탐색, 애플릿 로딩, 다중 DMA 이미지 수신 루프의 간결한 흐름도입니다.
 
-```bash
-cmake -S C++ -B build -DFRAMEGRABBER_BUILD_QT_WIDGET=ON
-cmake --build build --config Debug
+```mermaid
+sequenceDiagram
+    participant HostApp as Host Application
+    participant Sys as FramegrabberSystem
+    participant FG as Framegrabber
+    participant SDK as Basler Frame Grabber SDK
+
+    HostApp->>Sys: addFramegrabber()
+    Sys->>FG: Instantiation
+    HostApp->>FG: loadApplet(appletPath, boardName)
+    FG->>SDK: Fg_Init() & Fg_loadConfig()
+    HostApp->>FG: open(boardName)
+    FG->>SDK: Connect Board & Establish Handles
+    HostApp->>FG: registerGrabCallback()
+    HostApp->>FG: grab()
+    loop Multi-DMA Acquisition Loop
+        SDK->>FG: DMA Frame Interrupt / Ring Buffer
+        FG->>FG: Copy to Leased Pool Buffer (Framegrabber::Image)
+        FG->>HostApp: Execute Grab Callback(image, frameSeq)
+        Note over HostApp: Process Image Buffer
+        HostApp->>FG: fg->ready(dmaIndex) [Flow Control]
+    end
+    HostApp->>FG: stop() & close()
 ```
 
-Set `BASLER_FG_SDK_DIR` when the SDK is not installed in a default location.
+---
+
+## 🛠️ Requirements & Dependencies
+
+| Requirement | Description |
+| :--- | :--- |
+| **OS Support** | Windows / Linux (Basler Frame Grabber SDK 지원 OS) |
+| **C++ Standard** | C++17 이상 필수 (C++20 권장) |
+| **Frame Grabber SDK** | Basler Frame Grabber SDK 5.x 이상 (환경 변수 `BASLER_FG_SDK_DIR` 또는 `SISODIR5` 설정 필요) |
+| **GenICam SDK** | CoaXPress 카메라 제어 시 Siso GenICam 라이브러리 연동 |
+
+---
+
+## 💻 Quick Start
+
+### 1. CMake Integration
+상위 프로젝트 CMakeLists.txt에서 서브디렉토리로 등록한 후 타겟 링크합니다. Pure C++ 전용으로 빌드할 경우 Qt 위젯 옵션을 `OFF`로 설정합니다.
+
+```cmake
+# Qt 위젯 미사용 Pure C++ 전용 빌드 시 (선택)
+set(FRAMEGRABBER_BUILD_QT_WIDGET OFF CACHE BOOL "" FORCE)
+
+# Add module target
+add_subdirectory(modules/Framegrabber/C++)
+
+# Link to host target
+target_link_libraries(YourHostApp PRIVATE Framegrabber)
+```
+
+> **SDK 경로 설정**: Basler Frame Grabber SDK가 기본 경로(`/opt/Basler/FramegrabberSDK` 또는 `C:/Program Files/Basler/FramegrabberSDK`)에 설치되어 있지 않은 경우, CMake 실행 전 `BASLER_FG_SDK_DIR` 환경 변수 또는 CMake 변수를 지정해 주어야 합니다.
+
+### 2. Basic Example
+```cpp
+#include "FramegrabberSystem.h"
+#include "Framegrabber.h"
+#include <iostream>
+
+int main()
+{
+    FramegrabberSystem system;
+    system.updateFramegrabberList();
+
+    auto boards = system.getCachedBoardInfo();
+    if (boards.empty()) {
+        std::cerr << "No Framegrabber board detected." << std::endl;
+        return 1;
+    }
+
+    Framegrabber* fg = system.addFramegrabber();
+
+    // 1. 애플릿 지정 및 보드 오픈
+    std::string appletPath = system.getBoardAppletPath(boards[0].name);
+    if (!fg->loadApplet(appletPath, boards[0].name) || !fg->open(boards[0].name)) {
+        std::cerr << "Failed to open Framegrabber board: " << boards[0].name << std::endl;
+        return 1;
+    }
+
+    // 2. 이미지 Grab 콜백 등록
+    fg->registerGrabCallback([fg](const Framegrabber::Image& image, std::size_t frameSeq) {
+        std::cout << "Acquired Frame #" << frameSeq 
+                  << " [DMA: " << image.dmaIndex 
+                  << ", Size: " << image.width << "x" << image.height << "]" << std::endl;
+        
+        // 중요: 처리 완료 후 해당 DMA 채널의 ready 신호를 보냅니다.
+        fg->ready(image.dmaIndex);
+    });
+
+    // 3. Grabbing 시작 (연속 취득)
+    fg->grab();
+
+    // ... 비동기 취득 진행 ...
+
+    // 4. 해제 시
+    fg->stop();
+    fg->close();
+
+    return 0;
+}
+```
+
+### 3. OpenCV (`cv::Mat`) Integration
+`Framegrabber::Image`의 생 포인터와 `stride` 정보를 활용하여 복사 없이 `cv::Mat`으로 직접 래핑할 수 있습니다.
+
+```cpp
+fg->registerGrabCallback([fg](const Framegrabber::Image& image, std::size_t frameSeq) {
+    if (!image.isValid()) return;
+
+    cv::Mat mat;
+    switch (image.pixelFormat) {
+    case Framegrabber::PixelFormat::Mono8:
+        mat = cv::Mat(image.height, image.width, CV_8UC1, 
+                      const_cast<std::uint8_t*>(image.data()), image.stride);
+        break;
+    case Framegrabber::PixelFormat::BGR24:
+        mat = cv::Mat(image.height, image.width, CV_8UC3, 
+                      const_cast<std::uint8_t*>(image.data()), image.stride);
+        break;
+    case Framegrabber::PixelFormat::RGB24: {
+        cv::Mat rgb(image.height, image.width, CV_8UC3, 
+                     const_cast<std::uint8_t*>(image.data()), image.stride);
+        cv::cvtColor(rgb, mat, cv::COLOR_RGB2BGR);
+        break;
+    }
+    default:
+        break;
+    }
+
+    // OpenCV 이미지 처리 (예: cv::imshow, cv::imwrite 등)
+
+    // 처리 완료 후 반드시 ready 호출
+    fg->ready(image.dmaIndex);
+});
+```
+
+---
+
+## ⚠️ Development Notes
+
+> [!IMPORTANT]
+> **백프레셔 및 DMA 흐름 제어 (`ready(dmaIndex)`)**
+> 고속 DMA 이미지 수신 시 호스트 처리 지연으로 인한 ring buffer overflow 및 memory pool exhaustion을 방지하기 위해 흐름 제어를 사용합니다. Grab 콜백 처리 완료 후 해당 프레임의 DMA 채널 인덱스에 대해 반드시 `fg->ready(image.dmaIndex)`를 호출해야 다음 프레임을 인큐합니다.
+
+> [!IMPORTANT]
+> **DMA 버퍼 라이프타임 및 버퍼 풀 (Buffer Pool)**
+> `Framegrabber::Image`는 SDK의 링 버퍼에서 소유권을 갖는 메모리 풀 블록으로 복사된 래퍼(`std::shared_ptr<const uint8_t>`)를 가집니다. 사용자는 SDK 버퍼 포인터 해제에 관하여 신경 쓸 필요가 없으나, 프레임 수신 콜백 바깥으로 `Image` 객체를 장시간 보관할 경우 버퍼 풀 고갈이 발생할 수 있습니다.
+
+> [!WARNING]
+> **스레드 안전성 및 워커 스레드**
+> Grab 콜백 및 NodeUpdated 콜백은 SDK DMA 백그라운드 워커 스레드에서 직접 호출됩니다. 콜백 내부에서 예외를 던지거나 스레드를 블로킹해서는 안 되며, GUI 또는 타 스레드로 전달할 경우 적절한 스레드 간 동기화(Thread Synchronization)를 거쳐야 합니다.
+
+> [!CAUTION]
+> **자원 해제 수명주기**
+> 애플리케이션 종료 시 `FramegrabberSystem`이 소멸하기 전에 `fg->stop()`, `fg->close()`를 호출하여 DMA 수신 워커와 보드 핸들을 정상적으로 닫아야 합니다. `stop()` 호출 시 진행 중인 DMA 작업 및 워커 스레드가 모두 조인(Join)될 때까지 대기합니다.
