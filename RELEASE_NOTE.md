@@ -1,5 +1,11 @@
 ## Unreleased
 
+- Publish the frame-grabber controls through the generic host-managed plugin dock contract.
+
+- Link `FramegrabberPlugin` only through `Framegrabber::QtWidget` and `Framegrabber::PlaygroundAdapter` so the core static library is not passed twice to the linker.
+
+- Require ABI / Qt IID 4.0 and recompilation; v3 packages are rejected. Declare immutable GraphicsEngine + Script Editor capabilities directly on the session.
+
 - Link `Playground::DevicePlugin` for the `IDevicePlugin` MODULE.
 - Own package identity in `Utility/PlaygroundAdapter/Package/Package.cmake`; the host emits `plugin.json` from `DevicePluginPackage.h`.
 - Keep the session source controller in `Utility/PlaygroundAdapter/Source` as `FramegrabberSourceController`.

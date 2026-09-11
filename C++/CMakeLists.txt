@@ -216,7 +216,6 @@ if(FRAMEGRABBER_BUILD_PLAYGROUND_PLUGIN)
     )
     target_link_libraries(FramegrabberPlugin PRIVATE
         Playground::DevicePlugin
-        Framegrabber::Framegrabber
         Framegrabber::QtWidget
         Framegrabber::PlaygroundAdapter
         Resources::Resources

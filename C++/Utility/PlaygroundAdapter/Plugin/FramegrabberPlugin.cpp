@@ -1,4 +1,4 @@
-#include "DevicePlugin.h"
+#include "DevicePluginTemplate.h"
 
 #include "FramegrabberSourceController.h"
 #include "Framegrabber.h"
@@ -136,7 +136,7 @@ public:
     }
 
     QString title() const override { return _titleState->title(); }
-    QWidget* createControlWidget(QWidget* parent) override
+    std::vector<DevicePluginDock> createDockWidgets(QWidget* parent) override
     {
         if (!_widget) {
             _widget = new QFramegrabberWidget(parent, _framegrabber);
@@ -148,9 +148,15 @@ public:
                     QObject::tr("Frame Grabber Applet (*.hap *.dll *.so);;All Files (*)"));
             });
         }
-        return _widget;
+        return {{QStringLiteral("device-controls"), QStringLiteral("Device Controls"),
+                 Qt::LeftDockWidgetArea, _widget, true}};
     }
     AbstractSourceController* sourceController() const override { return _controller.get(); }
+    unsigned int capabilities() const noexcept override
+    {
+        return DevicePluginSessionCapability::GraphicsEngine
+            | DevicePluginSessionCapability::ScriptEditor;
+    }
     void setTitleChangedCallback(std::function<void(const QString&)> callback) override { _titleState->setCallback(std::move(callback)); }
 
 private:
@@ -162,7 +168,7 @@ private:
     std::shared_ptr<FramegrabberPluginTitleState> _titleState = std::make_shared<FramegrabberPluginTitleState>();
 };
 
-class FramegrabberPlugin final : public QObject, public IDevicePlugin {
+class FramegrabberPlugin final : public DevicePluginTemplate {
     Q_OBJECT
     Q_PLUGIN_METADATA(IID PlaygroundDevicePlugin_iid)
     Q_INTERFACES(IDevicePlugin)
