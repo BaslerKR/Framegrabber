@@ -1,5 +1,7 @@
 ## Unreleased
 
+- Limit the control statusbar to Idle, Connected, and Live; route operation messages to application logs.
+
 - Publish the frame-grabber controls through the generic host-managed plugin dock contract.
 
 - Link `FramegrabberPlugin` only through `Framegrabber::QtWidget` and `Framegrabber::PlaygroundAdapter` so the core static library is not passed twice to the linker.

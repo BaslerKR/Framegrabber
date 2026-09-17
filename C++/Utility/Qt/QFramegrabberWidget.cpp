@@ -19,6 +19,7 @@
 #include <QScrollBar>
 #include <QSignalBlocker>
 #include <QStatusBar>
+#include <QDebug>
 #include <QStyle>
 #include <QTabWidget>
 #include <QThread>
@@ -181,7 +182,7 @@ QFramegrabberWidget::QFramegrabberWidget(QWidget* parent, Framegrabber* framegra
     if (!_framegrabber)
     {
         setOperationActive(true);
-        showStatusMessage(tr("Frame grabber instance is not configured."), true);
+        logMessage(tr("Frame grabber instance is not configured."), true);
         return;
     }
 
@@ -309,14 +310,7 @@ void QFramegrabberWidget::buildUi()
     _statusLabel = new QLabel(this);
     _statusLabel->setObjectName(QStringLiteral("FramegrabberStatusLabel"));
     _statusLabel->setAlignment(Qt::AlignCenter);
-    _messageLabel = new QLabel(this);
-    _messageLabel->setObjectName(QStringLiteral("FramegrabberMessageLabel"));
-    _messageLabel->setProperty("statusRole", "message");
-    _messageLabel->setProperty("messageState", "normal");
-    _messageLabel->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
-    _messageLabel->hide();
     _statusBar->addWidget(_statusLabel);
-    _statusBar->addWidget(_messageLabel, 1);
 
     auto* rootLayout = new QVBoxLayout;
     rootLayout->setObjectName(QStringLiteral("DeviceRootLayout"));
@@ -614,7 +608,7 @@ void QFramegrabberWidget::startAutomaticAppletLoad()
     worker->setParent(this);
     _operationThread = worker;
     setOperationActive(true);
-    showStatusMessage(tr("Checking the board applet..."));
+    logMessage(tr("Checking the board applet..."));
     connect(worker, &QThread::finished, this, [guard, worker, path, success]
     {
         worker->deleteLater();
@@ -628,23 +622,22 @@ void QFramegrabberWidget::startAutomaticAppletLoad()
         {
             return;
         }
-        guard->_connectionAttempted = !path->empty();
         guard->setOperationActive(false);
         guard->_appletPathEdit->setText(
             QString::fromStdString(guard->_framegrabber->appletPath()));
         guard->applyConnectionState(*success);
         if (*success)
         {
-            guard->showStatusMessage(tr("Board applet loaded."));
+            guard->logMessage(tr("Board applet loaded."));
         }
         else if (path->empty())
         {
-            guard->showStatusMessage(
+            guard->logMessage(
                 tr("No active or power-up applet is available."));
         }
         else
         {
-            guard->showStatusMessage(
+            guard->logMessage(
                 tr("Failed to load the board applet."),
                 true);
         }
@@ -660,7 +653,7 @@ void QFramegrabberWidget::startAppletLoad(const QString& path)
     }
     if (_boardCombo->currentIndex() < 0)
     {
-        showStatusMessage(tr("Select a frame grabber board first."), true);
+        logMessage(tr("Select a frame grabber board first."), true);
         return;
     }
 
@@ -676,9 +669,9 @@ void QFramegrabberWidget::startAppletLoad(const QString& path)
         });
     worker->setParent(this);
     _operationThread = worker;
-    _connectionAttempted = true;
+
     setOperationActive(true);
-    showStatusMessage(tr("Loading applet..."));
+    logMessage(tr("Loading applet..."));
     connect(worker, &QThread::finished, this, [guard, worker, success]
     {
         worker->deleteLater();
@@ -695,7 +688,7 @@ void QFramegrabberWidget::startAppletLoad(const QString& path)
         guard->_appletPathEdit->setText(
             QString::fromStdString(guard->_framegrabber->appletPath()));
         guard->applyConnectionState(guard->_framegrabber->isOpened());
-        guard->showStatusMessage(
+        guard->logMessage(
             *success ? tr("Applet loaded.") : tr("Failed to load the applet."),
             !*success);
     });
@@ -710,7 +703,7 @@ void QFramegrabberWidget::startConfigurationLoad(const QString& configurationPat
     }
     if (_boardCombo->currentIndex() < 0)
     {
-        showStatusMessage(tr("Select a frame grabber board first."), true);
+        logMessage(tr("Select a frame grabber board first."), true);
         return;
     }
 
@@ -729,7 +722,7 @@ void QFramegrabberWidget::startConfigurationLoad(const QString& configurationPat
     worker->setParent(this);
     _operationThread = worker;
     setOperationActive(true);
-    showStatusMessage(tr("Reading frame grabber configuration..."));
+    logMessage(tr("Reading frame grabber configuration..."));
     connect(worker, &QThread::finished, this, [guard, worker, configurationPath, configuredAppletPath]
     {
         worker->deleteLater();
@@ -751,7 +744,7 @@ void QFramegrabberWidget::startConfigurationLoad(const QString& configurationPat
             return;
         }
 
-        guard->showStatusMessage(tr("The configured applet is unavailable."), true);
+        guard->logMessage(tr("The configured applet is unavailable."), true);
         QString selectedAppletPath;
         if (guard->_missingAppletResolver)
         {
@@ -767,7 +760,7 @@ void QFramegrabberWidget::startConfigurationLoad(const QString& configurationPat
         }
         if (selectedAppletPath.isEmpty())
         {
-            guard->showStatusMessage(tr("Configuration loading cancelled."));
+            guard->logMessage(tr("Configuration loading cancelled."));
             return;
         }
         guard->startConfigurationLoadWithApplet(configurationPath, selectedAppletPath);
@@ -800,9 +793,9 @@ void QFramegrabberWidget::startConfigurationLoadWithApplet(
     });
     worker->setParent(this);
     _operationThread = worker;
-    _connectionAttempted = true;
+
     setOperationActive(true);
-    showStatusMessage(tr("Loading applet configuration..."));
+    logMessage(tr("Loading applet configuration..."));
     connect(worker, &QThread::finished, this, [guard, worker, success]
     {
         worker->deleteLater();
@@ -819,7 +812,7 @@ void QFramegrabberWidget::startConfigurationLoadWithApplet(
         guard->_appletPathEdit->setText(
             QString::fromStdString(guard->_framegrabber->appletPath()));
         guard->applyConnectionState(guard->_framegrabber->isOpened());
-        guard->showStatusMessage(
+        guard->logMessage(
             *success
                 ? guard->tr("Applet and configuration loaded.")
                 : guard->tr("Failed to initialize the applet or apply the configuration."),
@@ -848,7 +841,7 @@ void QFramegrabberWidget::startConfigurationSave(const QString& configurationPat
     worker->setParent(this);
     _operationThread = worker;
     setOperationActive(true);
-    showStatusMessage(tr("Saving applet configuration..."));
+    logMessage(tr("Saving applet configuration..."));
     connect(worker, &QThread::finished, this, [guard, worker, success]
     {
         worker->deleteLater();
@@ -862,7 +855,7 @@ void QFramegrabberWidget::startConfigurationSave(const QString& configurationPat
             return;
         }
         guard->setOperationActive(false);
-        guard->showStatusMessage(
+        guard->logMessage(
             *success
                 ? guard->tr("Applet configuration saved.")
                 : guard->tr("Failed to save the applet configuration."),
@@ -889,7 +882,7 @@ void QFramegrabberWidget::startCameraRefresh(
     worker->setParent(this);
     _operationThread = worker;
     setOperationActive(true);
-    showStatusMessage(
+    logMessage(
         tr("Scanning and connecting %1 cameras...")
             .arg(cameraTransportName(transport)));
     connect(worker, &QThread::finished, this, [guard, worker, transport, success]
@@ -911,7 +904,7 @@ void QFramegrabberWidget::startCameraRefresh(
             return;
         }
         guard->refreshCameraSelector(*currentPage);
-        guard->showStatusMessage(
+        guard->logMessage(
             *success
                 ? tr("%1 camera setup finished.").arg(cameraTransportName(transport))
                 : tr("%1 camera setup failed.").arg(cameraTransportName(transport)),
@@ -983,34 +976,8 @@ void QFramegrabberWidget::updateGrabState(const bool grabbing)
 void QFramegrabberWidget::updateStatusLabel()
 {
     const bool opened = _framegrabber && _framegrabber->isOpened();
-
-    if (_operationActive) {
-        _statusLabel->setText(tr("Loading"));
-        _statusLabel->setProperty("status", "idle");
-    } else {
-        if (!opened && !_connectionAttempted)
-        {
-            _statusLabel->setText(tr("Idle"));
-            _statusLabel->setProperty("status", "idle");
-        }
-        else if (!opened)
-        {
-            _statusLabel->setText(tr("Disconnected"));
-            _statusLabel->setProperty("status", "disconnected");
-        }
-        else if (_grabbing)
-        {
-            _statusLabel->setText(tr("Live"));
-            _statusLabel->setProperty("status", "grabbing");
-        }
-        else
-        {
-            _statusLabel->setText(tr("Connected"));
-            _statusLabel->setProperty("status", "connected");
-        }
-    }
-    _statusLabel->style()->unpolish(_statusLabel);
-    _statusLabel->style()->polish(_statusLabel);
+    _statusLabel->setText(!opened ? QStringLiteral("Idle")
+        : _grabbing ? QStringLiteral("Live") : QStringLiteral("Connected"));
 }
 
 void QFramegrabberWidget::refreshDmaSelectors()
@@ -1289,7 +1256,7 @@ QWidget* QFramegrabberWidget::createAppletFeatureEditor(
                 [=](bool success) {
                     checkBox->setEnabled(node.writable);
                     if (!success) {
-                        showStatusMessage(tr("Failed to update parameter."), true);
+                        logMessage(tr("Failed to update parameter."), true);
                         rebuildAppletTree();
                     }
                 }
@@ -1328,7 +1295,7 @@ QWidget* QFramegrabberWidget::createAppletFeatureEditor(
                     [=](bool success) {
                         combo->setEnabled(node.writable);
                         if (!success) {
-                            showStatusMessage(tr("Failed to update parameter."), true);
+                            logMessage(tr("Failed to update parameter."), true);
                             rebuildAppletTree();
                         }
                     }
@@ -1355,7 +1322,7 @@ QWidget* QFramegrabberWidget::createAppletFeatureEditor(
                 },
                 [=](bool success) {
                     button->setEnabled(node.writable);
-                    showStatusMessage(
+                    logMessage(
                         success ? tr("Command executed.") : tr("Command execution failed."),
                         !success);
                 }
@@ -1385,7 +1352,7 @@ QWidget* QFramegrabberWidget::createAppletFeatureEditor(
             [=](bool success) mutable {
                 edit->setEnabled(node.writable);
                 if (!success) {
-                    showStatusMessage(tr("Failed to update '%1'.").arg(featureName), true);
+                    logMessage(tr("Failed to update '%1'.").arg(featureName), true);
                     rebuildAppletTree();
                 } else {
                     current = std::move(updated);
@@ -1412,7 +1379,7 @@ void QFramegrabberWidget::populateFeatureTree(QTreeWidget* tree,
     QDomDocument document;
     if (!document.setContent(xml))
     {
-        showStatusMessage(tr("Feature XML could not be parsed."), true);
+        logMessage(tr("Feature XML could not be parsed."), true);
         return;
     }
     const QDomElement root = document.documentElement();
@@ -1606,7 +1573,7 @@ QWidget* QFramegrabberWidget::createFeatureEditor(const QDomElement& node,
                 [=](bool success) {
                     checkBox->setEnabled(writable);
                     if (!success) {
-                        showStatusMessage(tr("Failed to update parameter."), true);
+                        logMessage(tr("Failed to update parameter."), true);
                         refreshFeatureTree(source, transport, dmaIndex);
                     }
                 }
@@ -1669,7 +1636,7 @@ QWidget* QFramegrabberWidget::createFeatureEditor(const QDomElement& node,
                 [=](bool success) {
                     combo->setEnabled(writable);
                     if (!success) {
-                        showStatusMessage(tr("Failed to update parameter."), true);
+                        logMessage(tr("Failed to update parameter."), true);
                         refreshFeatureTree(source, transport, dmaIndex);
                     }
                 }
@@ -1705,7 +1672,7 @@ QWidget* QFramegrabberWidget::createFeatureEditor(const QDomElement& node,
                 },
                 [=](bool success) {
                     button->setEnabled(writable);
-                    showStatusMessage(
+                    logMessage(
                         success ? tr("Command executed.") : tr("Command execution failed."),
                         !success);
                 }
@@ -1741,11 +1708,11 @@ QWidget* QFramegrabberWidget::createFeatureEditor(const QDomElement& node,
             [=](bool success) mutable {
                 edit->setEnabled(writable);
                 if (!success) {
-                    showStatusMessage(tr("Failed to update '%1'.").arg(featureName), true);
+                    logMessage(tr("Failed to update '%1'.").arg(featureName), true);
                     refreshFeatureTree(source, transport, dmaIndex);
                 } else {
                     current = std::move(updated);
-                    showStatusMessage(tr("Updated '%1'.").arg(featureName));
+                    logMessage(tr("Updated '%1'.").arg(featureName));
                 }
             }
         );
@@ -1947,14 +1914,11 @@ void QFramegrabberWidget::collectExpandedNodes(QTreeWidgetItem* item,
     }
 }
 
-void QFramegrabberWidget::showStatusMessage(const QString& message, const bool error)
+void QFramegrabberWidget::logMessage(const QString& message, bool error)
 {
-    _messageLabel->setText(message);
-    _messageLabel->setToolTip(message);
-    _messageLabel->setProperty("messageState", error ? "error" : "normal");
-    _messageLabel->style()->unpolish(_messageLabel);
-    _messageLabel->style()->polish(_messageLabel);
-    _messageLabel->setVisible(!message.isEmpty());
+    if (message.isEmpty()) return;
+    if (error) qWarning().noquote() << "[Framegrabber UI]" << message;
+    else qInfo().noquote() << "[Framegrabber UI]" << message;
 }
 
 #endif // QT_GUI_LIB

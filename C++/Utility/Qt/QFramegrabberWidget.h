@@ -80,7 +80,6 @@ private:
     bool _shuttingDown = false;
     bool _operationActive = false;
     int _pendingParameterWrites = 0;
-    bool _connectionAttempted = false;
     bool _grabbing = false;
     bool _updatingDeviceUi = false;
     MissingAppletResolver _missingAppletResolver;
@@ -101,7 +100,6 @@ private:
 
     QStatusBar* _statusBar = nullptr;
     QLabel* _statusLabel = nullptr;
-    QLabel* _messageLabel = nullptr;
 
     void buildUi();
     QWidget* createSetupTab();
@@ -178,7 +176,8 @@ private:
     TreeState captureTreeState(QTreeWidget* tree) const;
     void restoreTreeState(QTreeWidget* tree, const TreeState& state);
     void collectExpandedNodes(QTreeWidgetItem* item, QSet<QString>& nodes) const;
-    void showStatusMessage(const QString& message, bool error = false);
+    /** Routes operation diagnostics to application logs. */
+    void logMessage(const QString& message, bool error = false);
 
     template <typename Func, typename Cleanup>
     void runAsyncWrite(Func&& writeFunc, Cleanup&& cleanupFunc) {
