@@ -21,6 +21,7 @@ public:
     void stop() override;
     bool isGrabbing() const override;
     void setFrameConsumer(FrameConsumer consumer) override;
+    [[nodiscard]] std::vector<GraphicsSourceDescriptor> sourceDescriptors() const override;
     bool supports3D() const override { return false; }
 
 private:

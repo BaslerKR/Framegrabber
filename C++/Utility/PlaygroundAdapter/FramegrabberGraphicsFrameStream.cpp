@@ -63,7 +63,9 @@ FramegrabberGraphicsFrameStream::Impl::Impl(
                 if (!graphicsImage.isValid()) return;
 
                 GraphicsFrame frame;
-                frame.setImage(std::move(graphicsImage));
+                frame.addImage("image", std::move(graphicsImage), "Image");
+                frame.metadata.sourceName = "Framegrabber";
+                frame.metadata.frameIndex = sequence;
                 _callback(std::move(frame), image.dmaIndex);
             }
             catch (const std::exception& error)

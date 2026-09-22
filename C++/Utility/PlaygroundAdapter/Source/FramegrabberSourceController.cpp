@@ -27,6 +27,7 @@ void FramegrabberSourceController::start()
 {
     if (_framegrabber)
     {
+        publishSourceDescriptors();
         _framegrabber->grab();
     }
 }
@@ -38,6 +39,21 @@ void FramegrabberSourceController::stop()
         _framegrabber->stop();
     }
     _isGrabbing.store(false, std::memory_order_release);
+}
+
+std::vector<GraphicsSourceDescriptor> FramegrabberSourceController::sourceDescriptors() const
+{
+    std::vector<GraphicsSourceDescriptor> sources;
+    const int count = _framegrabber ? _framegrabber->getDMACount() : 0;
+    sources.reserve(count > 0 ? static_cast<std::size_t>(count) : 1U);
+    for (int index = 0; index < count; ++index)
+    {
+        const std::string id = "dma." + std::to_string(index);
+        sources.push_back({static_cast<unsigned int>(index), id,
+                           "DMA " + std::to_string(index)});
+    }
+    if (sources.empty()) sources.push_back({0U, "dma.0", "DMA 0"});
+    return sources;
 }
 
 bool FramegrabberSourceController::isGrabbing() const
@@ -73,9 +89,7 @@ void FramegrabberSourceController::registerCallbacks()
             if (!_frameConsumer) return;
             SessionFrame frame;
             frame.payload = std::move(payload);
-            frame.frameSeq = frame.payload.image.has_value()
-                ? frame.payload.image->frameSequence
-                : 0U;
+            frame.frameSeq = frame.payload.metadata.frameIndex;
             _frameConsumer(std::move(frame), sourceIndex);
         });
 }

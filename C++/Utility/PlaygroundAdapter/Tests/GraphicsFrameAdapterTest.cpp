@@ -1,5 +1,4 @@
 #include "FramegrabberGraphicsFrameAdapter.h"
-
 #include <cassert>
 #include <cstdint>
 #include <memory>
