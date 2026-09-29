@@ -1,5 +1,7 @@
 ## Unreleased
 
+- Declare the Frame Grabber display name, SDK subtitle, and multi-DMA acquisition summary in package metadata.
+
 - Register stable `dma.N` presentation sources and publish one single-image GraphicsFrame per DMA channel so GraphicsEngine owns automatic single-view/Tabs/Grid presentation without cross-DMA frame assembly.
 
 - Publish DMA images through the identified GraphicsFrame resource collection contract.

@@ -4,7 +4,10 @@
 # Repeat NAME=value to declare multiple environment paths for one variable.
 set(PLAYGROUND_PLUGIN_ID "framegrabber")
 set(PLAYGROUND_PLUGIN_VERSION "0.1.2")
-set(PLAYGROUND_PLUGIN_DISPLAY_NAME "Basler Frame Grabber")
+set(PLAYGROUND_PLUGIN_DISPLAY_NAME "Frame Grabber")
+# Optional presentation metadata; consumers must export it to manifests/catalogs.
+set(PLAYGROUND_PLUGIN_SUBTITLE "Basler Frame Grabber SDK")
+set(PLAYGROUND_PLUGIN_DESCRIPTION "Discover Basler frame grabbers, load applets, and acquire images from multiple DMA channels.")
 set(PLAYGROUND_PLUGIN_ADD_ACTION_TEXT "Frame Grabber")
 set(PLAYGROUND_PLUGIN_SESSION_TYPE "Frame Grabber")
 set(PLAYGROUND_PLUGIN_MENU_ORDER 200)
