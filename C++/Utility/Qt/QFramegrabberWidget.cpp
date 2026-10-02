@@ -20,6 +20,11 @@
 #include <QSignalBlocker>
 #include <QStatusBar>
 #include <QDebug>
+#include <QLoggingCategory>
+#include <QJsonDocument>
+#include <QJsonArray>
+#include <QJsonObject>
+Q_LOGGING_CATEGORY(framegrabberDiagnosticLog, "diagnostics.Framegrabber", QtInfoMsg)
 #include <QStyle>
 #include <QTabWidget>
 #include <QThread>
@@ -34,6 +39,22 @@
 
 namespace
 {
+/** @brief Preserves scalar SDK values, including 64-bit identifiers, in diagnostic records. */
+QString diagnosticParameterText(const Framegrabber::ParameterValue& value) {
+    return std::visit([](const auto& typed) -> QString {
+        using T = std::decay_t<decltype(typed)>;
+        if constexpr (std::is_same_v<T, std::string>) return QString::fromStdString(typed);
+        else if constexpr (std::is_floating_point_v<T>) return QString::number(typed, 'g', 17);
+        else return QString::fromStdString(std::to_string(typed));
+    }, value);
+}
+
+/** @brief Reports the actual SDK write result separately from the requested UI value. */
+void logFramegrabberWrite(const QString& name, unsigned int dma, const Framegrabber::ParameterValue& value, bool accepted) {
+    qCDebug(framegrabberDiagnosticLog).noquote() << "@diagnostic " + QString::fromUtf8(QJsonDocument(QJsonObject{
+        {"event", "parameter_result"}, {"fields", QJsonObject{{"name", name}, {"dma", static_cast<int>(dma)},
+        {"requestedValue", diagnosticParameterText(value)}, {"accepted", accepted}}}}).toJson(QJsonDocument::Compact));
+}
 QString elementText(const QDomElement& element, const QString& childName)
 {
     return element.firstChildElement(childName).text().trimmed();
@@ -955,7 +976,59 @@ void QFramegrabberWidget::applyConnectionState(const bool opened)
 
 void QFramegrabberWidget::updateGrabState(const bool grabbing)
 {
+    const bool wasGrabbing = _grabbing;
     _grabbing = grabbing;
+    if (wasGrabbing && !grabbing && _framegrabber && _framegrabber->isOpened() && framegrabberDiagnosticLog().isDebugEnabled()) {
+        QJsonArray snapshot;
+        for (int dma = 0; dma < _framegrabber->getDMACount(); ++dma) {
+            std::function<void(const Framegrabber::AppletFeatureNode&)> visit;
+            visit = [&](const Framegrabber::AppletFeatureNode& node) {
+                QJsonObject record{{"scope", "applet"}, {"dma", dma}, {"name", QString::fromStdString(node.name)},
+                    {"kind", static_cast<int>(node.kind)}, {"readable", node.readable}, {"writable", node.writable}};
+                if (!node.children.empty() || node.kind == Framegrabber::AppletFeatureKind::Category
+                    || node.kind == Framegrabber::AppletFeatureKind::Command || !node.readable) record.insert("outcome", "not-readable-scalar");
+                else {
+                    Framegrabber::ParameterValue value;
+                    const bool read = node.parameterId >= 0
+                        ? _framegrabber->getAppletParameterById(node.parameterId, dma, value)
+                        : _framegrabber->getAppletParameter(node.name, dma, value);
+                    record.insert("outcome", read ? "read" : "read-failed");
+                    if (read) record.insert("value", diagnosticParameterText(value));
+                }
+                snapshot.append(record);
+                for (const auto& child : node.children) visit(child);
+            };
+            for (const auto& root : _framegrabber->getAppletFeatureModel(dma)) visit(root);
+        }
+        for (const auto& page : _cameraPages) {
+            if (!page->capability.canReadFeatures) continue;
+            for (int camera = 0; camera < page->cameraCombo->count(); ++camera) {
+                const auto dma = page->cameraCombo->itemData(camera).toUInt();
+                QDomDocument xml;
+                if (!xml.setContent(QString::fromStdString(_framegrabber->getCameraFeatureXml(page->capability.transport, dma)))) {
+                    snapshot.append(QJsonObject{{"scope", "camera"}, {"dma", int(dma)}, {"outcome", "xml-unavailable"}});
+                    continue;
+                }
+                for (auto node = xml.documentElement().firstChildElement(); !node.isNull(); node = node.nextSiblingElement()) {
+                    const auto name = node.attribute("Name");
+                    if (name.isEmpty()) continue;
+                    QJsonObject record{{"scope", "camera"}, {"dma", int(dma)}, {"name", name},
+                        {"transport", static_cast<int>(page->capability.transport)}, {"kind", node.tagName()}};
+                    const QStringList scalarTags{"Integer", "IntReg", "MaskedIntReg", "Float", "FloatReg", "Boolean", "Enumeration", "String", "StringReg"};
+                    if (scalarTags.contains(node.tagName()) && featureReadable(node, TreeSource::Camera)) {
+                        Framegrabber::ParameterValue value;
+                        const bool read = _framegrabber->getCameraFeature(page->capability.transport, dma, name.toStdString(), value);
+                        record.insert("outcome", read ? "read" : "read-failed");
+                        if (read) record.insert("value", diagnosticParameterText(value));
+                    } else record.insert("outcome", "not-readable-scalar");
+                    snapshot.append(record);
+                }
+            }
+        }
+        qCDebug(framegrabberDiagnosticLog).noquote() << "@diagnostic " + QString::fromUtf8(QJsonDocument(QJsonObject{
+            {"event", "feature_snapshot"}, {"fields", QJsonObject{{"coverage", "all-dma-applets-and-exposed-cameras/current-selector-state"},
+            {"nodes", snapshot}}}}).toJson(QJsonDocument::Compact));
+    }
     {
         QSignalBlocker blocker(_grabLiveButton);
         _grabLiveButton->setChecked(grabbing);
@@ -1251,7 +1324,9 @@ QWidget* QFramegrabberWidget::createAppletFeatureEditor(
                 updated);
             runAsyncWrite(
                 [=]() {
-                    return _framegrabber && _framegrabber->setAppletParameterById(node.parameterId, dmaIndex, updated);
+                    const bool accepted = _framegrabber && _framegrabber->setAppletParameterById(node.parameterId, dmaIndex, updated);
+                    logFramegrabberWrite(QString::fromStdString(node.name), dmaIndex, updated, accepted);
+                    return accepted;
                 },
                 [=](bool success) {
                     checkBox->setEnabled(node.writable);
@@ -1290,7 +1365,9 @@ QWidget* QFramegrabberWidget::createAppletFeatureEditor(
             {
                 runAsyncWrite(
                     [=]() {
-                        return _framegrabber && _framegrabber->setAppletParameterById(node.parameterId, dmaIndex, updated);
+                        const bool accepted = _framegrabber && _framegrabber->setAppletParameterById(node.parameterId, dmaIndex, updated);
+                    logFramegrabberWrite(QString::fromStdString(node.name), dmaIndex, updated, accepted);
+                    return accepted;
                     },
                     [=](bool success) {
                         combo->setEnabled(node.writable);
@@ -1347,7 +1424,9 @@ QWidget* QFramegrabberWidget::createAppletFeatureEditor(
 
         runAsyncWrite(
             [=]() {
-                return _framegrabber && _framegrabber->setAppletParameterById(node.parameterId, dmaIndex, updated);
+                const bool accepted = _framegrabber && _framegrabber->setAppletParameterById(node.parameterId, dmaIndex, updated);
+                    logFramegrabberWrite(QString::fromStdString(node.name), dmaIndex, updated, accepted);
+                    return accepted;
             },
             [=](bool success) mutable {
                 edit->setEnabled(node.writable);
@@ -1802,17 +1881,21 @@ bool QFramegrabberWidget::writeFeature(const TreeSource source,
     }
     if (source == TreeSource::Applet)
     {
-        return _framegrabber->setAppletParameter(
+        const bool accepted = _framegrabber->setAppletParameter(
             name.toStdString(),
             dmaIndex,
             value);
+        logFramegrabberWrite(name, dmaIndex, value, accepted);
+        return accepted;
     }
-    return _framegrabber->setCameraFeature(
+    const bool accepted = _framegrabber->setCameraFeature(
         transport,
         dmaIndex,
         name.toStdString(),
         value,
         verifyReadBack);
+    logFramegrabberWrite(name, dmaIndex, value, accepted);
+    return accepted;
 }
 
 void QFramegrabberWidget::refreshFeatureTree(const TreeSource source,

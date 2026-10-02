@@ -1,5 +1,7 @@
 ## Unreleased
 
+- Report acquisition lifecycle to consumers and retain opt-in stopped-device feature snapshots at the current selector state; expose parameter requests and operation outcomes through diagnostics without changing capture policy.
+
 - Declare the Frame Grabber display name, SDK subtitle, and multi-DMA acquisition summary in package metadata.
 
 - Register stable `dma.N` presentation sources and publish one single-image GraphicsFrame per DMA channel so GraphicsEngine owns automatic single-view/Tabs/Grid presentation without cross-DMA frame assembly.

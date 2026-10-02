@@ -79,6 +79,7 @@ void FramegrabberSourceController::registerCallbacks()
             if (status == Framegrabber::GrabbingStatus)
             {
                 _isGrabbing.store(on, std::memory_order_release);
+                emit diagnosticAcquisitionChanged(on, QStringLiteral("framegrabber"));
             }
         });
 
