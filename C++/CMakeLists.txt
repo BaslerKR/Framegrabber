@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(Framegrabber LANGUAGES C CXX)
+project(Framegrabber VERSION 0.2.0 LANGUAGES C CXX)
 
 option(FRAMEGRABBER_BUILD_QT_WIDGET "Build the optional Qt control widget." OFF)
 option(FRAMEGRABBER_BUILD_PLAYGROUND_ADAPTER

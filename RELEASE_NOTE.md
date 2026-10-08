@@ -1,5 +1,7 @@
 ## Unreleased
 
+## v0.2.0 (2026-10-08)
+
 - Report acquisition lifecycle to consumers and retain opt-in stopped-device feature snapshots at the current selector state; expose parameter requests and operation outcomes through diagnostics without changing capture policy.
 
 - Declare the Frame Grabber display name, SDK subtitle, and multi-DMA acquisition summary in package metadata.
