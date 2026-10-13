@@ -1,5 +1,6 @@
 ## Unreleased
 
+- Document explicit Release-only installed SDK configuration.
 - Build the standalone device plugin against an installed consumer SDK and stage its module-owned runtime package.
 
 ## v0.2.0 (2026-10-08)
