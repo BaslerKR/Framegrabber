@@ -12,6 +12,16 @@ option(FRAMEGRABBER_BUILD_PLAYGROUND_PLUGIN
 )
 option(FRAMEGRABBER_BUILD_TESTS "Build focused Framegrabber adapter tests." OFF)
 
+if(FRAMEGRABBER_BUILD_PLAYGROUND_PLUGIN)
+    set(FRAMEGRABBER_BUILD_PLAYGROUND_ADAPTER ON)
+    set(FRAMEGRABBER_BUILD_QT_WIDGET ON)
+endif()
+if(PROJECT_NAME STREQUAL "Framegrabber" AND PROJECT_IS_TOP_LEVEL AND
+   (FRAMEGRABBER_BUILD_PLAYGROUND_ADAPTER OR FRAMEGRABBER_BUILD_PLAYGROUND_PLUGIN))
+    find_package(PlaygroundPluginSDK 0.1 CONFIG REQUIRED)
+    set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+endif()
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -183,10 +193,10 @@ if(FRAMEGRABBER_BUILD_PLAYGROUND_PLUGIN)
             "Playground::DevicePlugin."
         )
     endif()
-    if(NOT TARGET Resources::Resources)
+    if(NOT TARGET Resources::Dialogs)
         message(FATAL_ERROR
             "[Framegrabber] FRAMEGRABBER_BUILD_PLAYGROUND_PLUGIN=ON requires "
-            "Resources::Resources."
+            "Resources::Dialogs."
         )
     endif()
     if(NOT TARGET Qt6::Widgets)
@@ -218,7 +228,7 @@ if(FRAMEGRABBER_BUILD_PLAYGROUND_PLUGIN)
         Playground::DevicePlugin
         Framegrabber::QtWidget
         Framegrabber::PlaygroundAdapter
-        Resources::Resources
+        Resources::Dialogs
         Qt6::Widgets
         Qt6::OpenGL
         Qt6::OpenGLWidgets
@@ -226,7 +236,28 @@ if(FRAMEGRABBER_BUILD_PLAYGROUND_PLUGIN)
     )
     include("${CMAKE_CURRENT_SOURCE_DIR}/Utility/PlaygroundAdapter/Package/RuntimeStaging.cmake")
     framegrabber_prepare_playground_plugin_runtime(FramegrabberPlugin)
+    if(PROJECT_NAME STREQUAL "Framegrabber" AND PROJECT_IS_TOP_LEVEL)
+        if(APPLE)
+            set_target_properties(FramegrabberPlugin PROPERTIES BUILD_WITH_INSTALL_RPATH ON
+                INSTALL_RPATH "@loader_path/runtime;@executable_path/../Frameworks")
+        elseif(UNIX)
+            set_target_properties(FramegrabberPlugin PROPERTIES BUILD_WITH_INSTALL_RPATH ON
+                INSTALL_RPATH "$ORIGIN/runtime")
+        endif()
+        playground_sdk_package_plugin(FramegrabberPlugin
+            PACKAGE_FILE "${CMAKE_CURRENT_SOURCE_DIR}/Utility/PlaygroundAdapter/Package/Package.cmake"
+            ICON "${PlaygroundPluginSDK_ICON_DIR}/icons8-network-card-48.png")
+    endif()
     message(STATUS "[Framegrabber] FramegrabberPlugin enabled.")
 endif()
 
 message(STATUS "[Framegrabber] Basler Frame Grabber SDK root: ${BASLER_FG_SDK_DIR}")
+
+# Keep contract assertions active in Release validation.
+foreach(module_test IN ITEMS framegrabber_graphics_image_adapter_test)
+    if(TARGET ${module_test})
+        target_compile_options(${module_test} PRIVATE
+            $<$<CXX_COMPILER_ID:MSVC>:/UNDEBUG>
+            $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-UNDEBUG>)
+    endif()
+endforeach()

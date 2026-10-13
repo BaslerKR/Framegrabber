@@ -70,3 +70,27 @@ Callbacks run on acquisition workers. Keep them bounded, do not access GUI objec
 ## Validation
 
 Validate applet loading, every active DMA channel, payload size and pixel format, timeout handling, camera discovery, feature access, shutdown, and sustained copy/pool pressure on the intended board and camera. A configure or link result is not a hardware acceptance test.
+
+## Installed consumer SDK plugin build
+
+Build the existing plugin project using this repository, an installed Plugin
+SDK, the matching Qt kit and its vendor SDK. No consumer source tree or
+renderer is needed. The plugin switch enables its owning widget/adapter
+(and vendor SDK implementation where required). Theme installation remains
+consumer-owned.
+
+```sh
+cmake -S C++ -B build/plugin -DCMAKE_PREFIX_PATH="<PluginSDK>;<Qt-prefix>" -DFRAMEGRABBER_BUILD_PLAYGROUND_PLUGIN=ON -DFRAMEGRABBER_BUILD_TESTS=ON
+cmake --build build/plugin --config Release --parallel 4
+ctest --test-dir build/plugin -C Release --output-on-failure
+cmake --build build/plugin --config Release --target FramegrabberPluginPackageStage
+```
+
+Supply the existing vendor SDK options when it is not in the documented default
+location. The generated package is `build/plugin/packages/Release/plugins/<id>/current`
+on multi-configuration generators and retains the module-owned runtime layout.
+It includes the manifest, icon and SDK identity. Staging reconciles only this
+generated package. Use a fresh build directory or explicitly update
+`PlaygroundPluginSDK_DIR` when selecting another SDK. This Release software
+gate does not establish physical-device, Debug or cross-platform acceptance.
+Set `CMAKE_BUILD_TYPE=Release` for a single-configuration generator.
