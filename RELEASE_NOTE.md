@@ -1,5 +1,6 @@
 ## Unreleased
 
+- Package the current GenICam 3.5 runtime without requiring retired GenICam 3.1 serial-protocol DLLs.
 - Document explicit Release-only installed SDK configuration.
 - Build the standalone device plugin against an installed consumer SDK and stage its module-owned runtime package.
 

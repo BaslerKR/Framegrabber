@@ -38,9 +38,7 @@ function(framegrabber_prepare_playground_plugin_runtime target_name)
 
         set(framegrabber_runtime_bin_files
             "${PLAYGROUND_LOCAL_FRAMEGRABBER_RUNTIME_DIR}/BaslerCLProtocol.dll"
-            "${PLAYGROUND_LOCAL_FRAMEGRABBER_RUNTIME_DIR}/CLAllSerial_MD_VC141_v3_1_Basler_pylon.dll"
             "${PLAYGROUND_LOCAL_FRAMEGRABBER_RUNTIME_DIR}/CLAllSerial_MD_VC142_v3_5_Basler_pylon_v1.dll"
-            "${PLAYGROUND_LOCAL_FRAMEGRABBER_RUNTIME_DIR}/CLProtocol_MD_VC141_v3_1_Basler_pylon.dll"
             "${PLAYGROUND_LOCAL_FRAMEGRABBER_RUNTIME_DIR}/CLProtocol_MD_VC142_v3_5_Basler_pylon_v1.dll"
             "${PLAYGROUND_LOCAL_FRAMEGRABBER_RUNTIME_DIR}/clsercom.dll"
             "${PLAYGROUND_LOCAL_FRAMEGRABBER_RUNTIME_DIR}/clsersis.dll"
