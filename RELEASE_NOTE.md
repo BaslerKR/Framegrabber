@@ -1,5 +1,9 @@
 ## Unreleased
 
+## v0.2.1 (2026-10-15)
+
+- Publish the independently built device package with installed SDK validation.
+
 ## v0.2.0 (2026-10-08)
 
 - Declare package version 0.2.0, matching the existing project version and release.
