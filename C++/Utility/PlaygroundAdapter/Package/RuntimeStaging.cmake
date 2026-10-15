@@ -32,69 +32,35 @@ function(framegrabber_prepare_playground_plugin_runtime target_name)
 
         set(payload_dir "${CMAKE_CURRENT_BINARY_DIR}/plugin-runtime")
         file(REMOVE_RECURSE "${payload_dir}")
-        file(MAKE_DIRECTORY "${payload_dir}/bin")
-        file(MAKE_DIRECTORY "${payload_dir}/bin/plugins")
         file(MAKE_DIRECTORY "${payload_dir}/lib")
 
-        set(framegrabber_runtime_bin_files
-            "${PLAYGROUND_LOCAL_FRAMEGRABBER_RUNTIME_DIR}/BaslerCLProtocol.dll"
-            "${PLAYGROUND_LOCAL_FRAMEGRABBER_RUNTIME_DIR}/CLAllSerial_MD_VC142_v3_5_Basler_pylon_v1.dll"
-            "${PLAYGROUND_LOCAL_FRAMEGRABBER_RUNTIME_DIR}/CLProtocol_MD_VC142_v3_5_Basler_pylon_v1.dll"
-            "${PLAYGROUND_LOCAL_FRAMEGRABBER_RUNTIME_DIR}/clsercom.dll"
-            "${PLAYGROUND_LOCAL_FRAMEGRABBER_RUNTIME_DIR}/clsersis.dll"
-            "${PLAYGROUND_LOCAL_FRAMEGRABBER_RUNTIME_DIR}/common-logging-dispatcher.dll"
-            "${PLAYGROUND_LOCAL_FRAMEGRABBER_RUNTIME_DIR}/common-logging-log4cpp.dll"
-            "${PLAYGROUND_LOCAL_FRAMEGRABBER_RUNTIME_DIR}/common-logging-log4cxx.dll"
-            "${PLAYGROUND_LOCAL_FRAMEGRABBER_RUNTIME_DIR}/common-logging-log4cxx.xml"
-            "${PLAYGROUND_LOCAL_FRAMEGRABBER_RUNTIME_DIR}/common-logging-siso.dll"
-            "${PLAYGROUND_LOCAL_FRAMEGRABBER_RUNTIME_DIR}/fglib5.dll"
-            "${PLAYGROUND_LOCAL_FRAMEGRABBER_RUNTIME_DIR}/haprt.dll"
-            "${PLAYGROUND_LOCAL_FRAMEGRABBER_RUNTIME_DIR}/iolibrt.dll"
-            "${PLAYGROUND_LOCAL_FRAMEGRABBER_RUNTIME_DIR}/libcrypto-1_1-x64.dll"
-            "${PLAYGROUND_LOCAL_FRAMEGRABBER_RUNTIME_DIR}/libssl-1_1-x64.dll"
-            "${PLAYGROUND_LOCAL_FRAMEGRABBER_RUNTIME_DIR}/logging-context.dll"
-            "${PLAYGROUND_LOCAL_FRAMEGRABBER_RUNTIME_DIR}/ProducerCL.cti"
-            "${PLAYGROUND_LOCAL_FRAMEGRABBER_RUNTIME_DIR}/ProducerCXP.cti"
-        )
-        foreach(framegrabber_siso_runtime_name
+        foreach(framegrabber_required_runtime_name
+                fglib5.dll
                 siso-core.dll
                 siso_auxport.dll
                 siso_genicam.dll
                 siso_hal.dll
                 siso_hw.dll
                 siso_log.dll
-                SiSoCsRt.dll)
-            set(framegrabber_siso_runtime
-                "${PLAYGROUND_LOCAL_FRAMEGRABBER_RUNTIME_DIR}/${framegrabber_siso_runtime_name}")
-            if(NOT EXISTS "${framegrabber_siso_runtime}")
+                SiSoCsRt.dll
+                siso-lib-environment.dll
+                common-logging-dispatcher.dll
+                ProducerCXP.cti)
+            set(framegrabber_required_runtime
+                "${PLAYGROUND_LOCAL_FRAMEGRABBER_RUNTIME_DIR}/${framegrabber_required_runtime_name}")
+            if(NOT EXISTS "${framegrabber_required_runtime}")
                 message(FATAL_ERROR
                     "[Framegrabber] Required capture runtime is missing: "
-                    "${framegrabber_siso_runtime}")
+                    "${framegrabber_required_runtime}")
             endif()
-            list(APPEND framegrabber_runtime_bin_files "${framegrabber_siso_runtime}")
         endforeach()
-        set(framegrabber_environment_runtime
-            "${PLAYGROUND_LOCAL_FRAMEGRABBER_RUNTIME_DIR}/siso-lib-environment.dll")
-        if(NOT EXISTS "${framegrabber_environment_runtime}")
+        if(NOT EXISTS "${PLAYGROUND_LOCAL_FRAMEGRABBER_RUNTIME_DIR}/common-logging-log4cpp.dll" AND
+           NOT EXISTS "${PLAYGROUND_LOCAL_FRAMEGRABBER_RUNTIME_DIR}/common-logging-log4cxx.dll")
             message(FATAL_ERROR
-                "[Framegrabber] Required environment runtime is missing: "
-                "${framegrabber_environment_runtime}")
+                "[Framegrabber] Required logging backend is missing under "
+                "'${PLAYGROUND_LOCAL_FRAMEGRABBER_RUNTIME_DIR}'. "
+                "Expected common-logging-log4cpp.dll or common-logging-log4cxx.dll.")
         endif()
-        list(APPEND framegrabber_runtime_bin_files "${framegrabber_environment_runtime}")
-        file(GLOB framegrabber_genicam_runtime_files
-            "${PLAYGROUND_LOCAL_FRAMEGRABBER_RUNTIME_DIR}/*_MD_VC142_v3_5_Basler_pylon_v1.dll"
-        )
-        list(APPEND framegrabber_runtime_bin_files ${framegrabber_genicam_runtime_files})
-        foreach(framegrabber_runtime_bin_file IN LISTS framegrabber_runtime_bin_files)
-            if(NOT EXISTS "${framegrabber_runtime_bin_file}")
-                message(FATAL_ERROR
-                    "[Framegrabber] Required runtime file is missing: "
-                    "${framegrabber_runtime_bin_file}")
-            endif()
-            file(COPY "${framegrabber_runtime_bin_file}" DESTINATION "${payload_dir}/bin")
-        endforeach()
-        file(COPY "${logging_config}" DESTINATION "${payload_dir}/bin")
-
         foreach(framegrabber_plugin_name
                 siso-plugin-environment-physical-boards.dll
                 siso-plugin-environment-physical-dll.dll
@@ -105,8 +71,13 @@ function(framegrabber_prepare_playground_plugin_runtime target_name)
                 message(FATAL_ERROR
                     "[Framegrabber] Required board plugin is missing: ${framegrabber_plugin}")
             endif()
-            file(COPY "${framegrabber_plugin}" DESTINATION "${payload_dir}/bin/plugins")
         endforeach()
+
+        # Names loaded after process start stay in this directory, so the
+        # installed bin is copied whole instead of enumerated.
+        file(COPY "${PLAYGROUND_LOCAL_FRAMEGRABBER_RUNTIME_DIR}/"
+            DESTINATION "${payload_dir}/bin")
+        file(COPY "${logging_config}" DESTINATION "${payload_dir}/bin")
 
         get_filename_component(framegrabber_sdk_root
             "${PLAYGROUND_LOCAL_FRAMEGRABBER_RUNTIME_DIR}/.." ABSOLUTE)
@@ -126,19 +97,18 @@ function(framegrabber_prepare_playground_plugin_runtime target_name)
             set(framegrabber_board_dir
                 "${framegrabber_sdk_root}/dll/${framegrabber_board_entry}")
             if(IS_DIRECTORY "${framegrabber_board_dir}" AND
-               framegrabber_board_entry MATCHES
-                   "^(CXP12-IC-.*|iF-CXP12-.*|iW-CXP12-.*|iF2D100|mE5-MA-ACX-.*|mE5-MA-VCX-.*)$")
+               framegrabber_board_entry MATCHES "^(iF-CXP.*|iW-CXP.*)$")
                 list(APPEND framegrabber_cxp_models "${framegrabber_board_entry}")
             endif()
         endforeach()
         if(NOT framegrabber_cxp_models)
             message(FATAL_ERROR
-                "[Framegrabber] No supported CXP/CoF applet directories were found under "
+                "[Framegrabber] No iF/iW CXP applet directories were found under "
                 "'${framegrabber_sdk_root}/dll'.")
         endif()
         list(SORT framegrabber_cxp_models)
         message(STATUS
-            "[Framegrabber] Bundling CXP/CoF applets for: ${framegrabber_cxp_models}")
+            "[Framegrabber] Bundling iF/iW CXP applets for: ${framegrabber_cxp_models}")
         file(MAKE_DIRECTORY "${payload_dir}/dll")
         foreach(framegrabber_model IN LISTS framegrabber_cxp_models)
             file(COPY "${framegrabber_sdk_root}/dll/${framegrabber_model}"
