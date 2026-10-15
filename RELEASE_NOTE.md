@@ -1,12 +1,12 @@
 ## Unreleased
 
+## v0.2.0 (2026-10-08)
+
 - Declare package version 0.2.0, matching the existing project version and release.
 - Stage the installed Frame Grabber SDK `bin` directory, and bundle applet directories only for iF and iW CXP boards.
 - Package the current GenICam 3.5 runtime without requiring retired GenICam 3.1 serial-protocol DLLs.
 - Document explicit Release-only installed SDK configuration.
 - Build the standalone device plugin against an installed consumer SDK and stage its module-owned runtime package.
-
-## v0.2.0 (2026-10-08)
 
 - Report acquisition lifecycle to consumers and retain opt-in stopped-device feature snapshots at the current selector state; expose parameter requests and operation outcomes through diagnostics without changing capture policy.
 
