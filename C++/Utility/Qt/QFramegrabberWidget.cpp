@@ -288,19 +288,19 @@ void QFramegrabberWidget::buildUi()
     _boardCombo->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
 
     _grabOneButton = new QToolButton(this);
-    _grabOneButton->setIcon(QIcon(QStringLiteral(":/Resources/Icons/icons8-camera-48.png")));
+    _grabOneButton->setIcon(QIcon(QStringLiteral(":/Resources/icon/camera-48.png")));
     _grabOneButton->setToolTip(tr("Grab one frame per DMA"));
 
     _grabLiveButton = new QToolButton(this);
     _grabLiveButton->setCheckable(true);
     QIcon grabIcon;
     grabIcon.addFile(
-        QStringLiteral(":/Resources/Icons/icons8-cameras-48.png"),
+        QStringLiteral(":/Resources/icon/cameras-48.png"),
         QSize(),
         QIcon::Normal,
         QIcon::Off);
     grabIcon.addFile(
-        QStringLiteral(":/Resources/Icons/icons8-pause-48.png"),
+        QStringLiteral(":/Resources/icon/pause-48.png"),
         QSize(),
         QIcon::Normal,
         QIcon::On);
@@ -488,7 +488,7 @@ QFramegrabberWidget::createCameraPage(
 
     page->refreshButton = new QToolButton(page->widget);
     page->refreshButton->setIcon(
-        QIcon(QStringLiteral(":/Resources/Icons/icons8-refresh-48.png")));
+        QIcon(QStringLiteral(":/Resources/icon/refresh-48.png")));
     page->refreshButton->setToolTip(
         tr("Rescan and reconnect %1 cameras")
             .arg(cameraTransportName(capability.transport)));
