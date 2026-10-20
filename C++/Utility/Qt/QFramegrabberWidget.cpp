@@ -385,13 +385,13 @@ QWidget* QFramegrabberWidget::createSetupTab()
     _appletPathEdit = new QLineEdit(page);
     _appletPathEdit->setReadOnly(true);
     _loadButton = new QToolButton(page);
-    _loadButton->setIcon(QIcon(QStringLiteral(":/Resources/Icons/icons8-opened-folder-48.png")));
+    _loadButton->setIcon(QIcon(QStringLiteral(":/Resources/icon/opened-folder-48.png")));
     _loadButton->setToolButtonStyle(Qt::ToolButtonIconOnly);
     _loadButton->setIconSize(QSize(16, 16));
     _loadButton->setToolTip(tr("Load applet or configuration"));
 
     _saveConfigurationButton = new QToolButton(page);
-    _saveConfigurationButton->setIcon(QIcon(QStringLiteral(":/Resources/Icons/icons8-save-as-48.png")));
+    _saveConfigurationButton->setIcon(QIcon(QStringLiteral(":/Resources/icon/save-48.png")));
     _saveConfigurationButton->setToolButtonStyle(Qt::ToolButtonIconOnly);
     _saveConfigurationButton->setIconSize(QSize(16, 16));
     _saveConfigurationButton->setToolTip(tr("Save current applet configuration"));
