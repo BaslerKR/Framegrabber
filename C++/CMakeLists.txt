@@ -246,7 +246,7 @@ if(FRAMEGRABBER_BUILD_PLAYGROUND_PLUGIN)
         endif()
         playground_sdk_package_plugin(FramegrabberPlugin
             PACKAGE_FILE "${CMAKE_CURRENT_SOURCE_DIR}/Utility/PlaygroundAdapter/Package/Package.cmake"
-            ICON "${PlaygroundPluginSDK_ICON_DIR}/icons8-network-card-48.png")
+            ICON "${PlaygroundPluginSDK_ICON_DIR}/network-card-48.png")
     endif()
     message(STATUS "[Framegrabber] FramegrabberPlugin enabled.")
 endif()

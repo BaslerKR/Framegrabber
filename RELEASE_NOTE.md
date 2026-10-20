@@ -1,5 +1,7 @@
 ## Unreleased
 
+- Use the shared neutral network-card artwork for the package icon.
+
 - Use the shared refresh, single-grab, and live glyphs on the device toolbar.
 
 ## v0.2.1 (2026-10-15)
