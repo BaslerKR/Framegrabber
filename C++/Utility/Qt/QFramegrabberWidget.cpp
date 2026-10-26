@@ -196,8 +196,6 @@ QFramegrabberWidget::QFramegrabberWidget(QWidget* parent, Framegrabber* framegra
     : QWidget(parent),
       _framegrabber(framegrabber)
 {
-    setWindowTitle(tr("Basler Frame Grabber Configuration"));
-    setMinimumSize(300, 350);
     buildUi();
 
     if (!_framegrabber)
@@ -284,142 +282,7 @@ void QFramegrabberWidget::setMissingAppletResolver(MissingAppletResolver resolve
 
 void QFramegrabberWidget::buildUi()
 {
-    _boardCombo = new QComboBox(this);
-    _boardCombo->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
-
-    _grabOneButton = new QToolButton(this);
-    _grabOneButton->setIcon(QIcon(QStringLiteral(":/Resources/icon/camera-48.png")));
-    _grabOneButton->setToolTip(tr("Grab one frame per DMA"));
-
-    _grabLiveButton = new QToolButton(this);
-    _grabLiveButton->setCheckable(true);
-    QIcon grabIcon;
-    grabIcon.addFile(
-        QStringLiteral(":/Resources/icon/cameras-48.png"),
-        QSize(),
-        QIcon::Normal,
-        QIcon::Off);
-    grabIcon.addFile(
-        QStringLiteral(":/Resources/icon/pause-48.png"),
-        QSize(),
-        QIcon::Normal,
-        QIcon::On);
-    _grabLiveButton->setIcon(grabIcon);
-    _grabLiveButton->setToolTip(tr("Start or stop live acquisition"));
-
-    auto* selectorLayout = new QHBoxLayout;
-    selectorLayout->setObjectName(QStringLiteral("DeviceSelectorLayout"));
-    selectorLayout->addWidget(_boardCombo);
-
-    auto* toolLayout = new QHBoxLayout;
-    toolLayout->setObjectName(QStringLiteral("DeviceToolLayout"));
-    toolLayout->addWidget(_grabOneButton);
-    toolLayout->addWidget(_grabLiveButton);
-
-    auto* topLayout = new QHBoxLayout;
-    topLayout->setObjectName(QStringLiteral("DeviceTopBarLayout"));
-    topLayout->addLayout(selectorLayout);
-    topLayout->addLayout(toolLayout);
-
-    _tabs = new QTabWidget(this);
-    _tabs->setObjectName(QStringLiteral("FramegrabberControlTabs"));
-    _tabs->addTab(createSetupTab(), tr("Setup"));
-
-    _statusBar = new QStatusBar(this);
-    _statusBar->setObjectName(QStringLiteral("FramegrabberStatusBar"));
-    _statusBar->setSizeGripEnabled(false);
-    _statusLabel = new QLabel(this);
-    _statusLabel->setObjectName(QStringLiteral("FramegrabberStatusLabel"));
-    _statusLabel->setAlignment(Qt::AlignCenter);
-    _statusBar->addWidget(_statusLabel);
-
-    auto* rootLayout = new QVBoxLayout;
-    rootLayout->setObjectName(QStringLiteral("DeviceRootLayout"));
-    rootLayout->addLayout(topLayout);
-    rootLayout->addWidget(_tabs);
-    rootLayout->addWidget(_statusBar);
-    setLayout(rootLayout);
-
-    connect(_grabOneButton, &QToolButton::clicked, this, [this]
-    {
-        if (_framegrabber)
-        {
-            _framegrabber->grab(1);
-        }
-    });
-    connect(_grabLiveButton, &QToolButton::toggled, this, [this](const bool checked)
-    {
-        if (!_framegrabber)
-        {
-            return;
-        }
-        if (checked)
-        {
-            _framegrabber->grab();
-        }
-        else
-        {
-            _framegrabber->requestStop();
-        }
-    });
-    connect(
-        _boardCombo,
-        QOverload<int>::of(&QComboBox::currentIndexChanged),
-        this,
-        [this](const int index)
-        {
-            if (index >= 0
-                && _framegrabber
-                && !_framegrabber->isOpened()
-                && !_operationThread
-                && !_shuttingDown)
-            {
-                startAutomaticAppletLoad();
-            }
-        });
-}
-
-QWidget* QFramegrabberWidget::createSetupTab()
-{
-    auto* page = new QWidget(this);
-    _appletPathEdit = new QLineEdit(page);
-    _appletPathEdit->setReadOnly(true);
-    _loadButton = new QToolButton(page);
-    _loadButton->setIcon(QIcon(QStringLiteral(":/Resources/icon/opened-folder-48.png")));
-    _loadButton->setToolButtonStyle(Qt::ToolButtonIconOnly);
-    _loadButton->setIconSize(QSize(16, 16));
-    _loadButton->setToolTip(tr("Load applet or configuration"));
-
-    _saveConfigurationButton = new QToolButton(page);
-    _saveConfigurationButton->setIcon(QIcon(QStringLiteral(":/Resources/icon/save-48.png")));
-    _saveConfigurationButton->setToolButtonStyle(Qt::ToolButtonIconOnly);
-    _saveConfigurationButton->setIconSize(QSize(16, 16));
-    _saveConfigurationButton->setToolTip(tr("Save current applet configuration"));
-
-    auto* pathLayout = new QHBoxLayout;
-    pathLayout->setObjectName(QStringLiteral("FramegrabberAppletPathLayout"));
-    pathLayout->addWidget(_loadButton);
-    pathLayout->addWidget(_saveConfigurationButton);
-    pathLayout->addWidget(_appletPathEdit);
-
-    _appletDmaCombo = new QComboBox(page);
-
-    auto* selectorLayout = new QHBoxLayout;
-    selectorLayout->setObjectName(QStringLiteral("FramegrabberAppletSelectorLayout"));
-    selectorLayout->addWidget(_appletDmaCombo);
-
-    _appletTree = new QTreeWidget(page);
-    _appletTree->setObjectName(QStringLiteral("FramegrabberAppletFeaturesTree"));
-    _appletTree->setProperty("treeRole", QStringLiteral("DeviceFeatureTree"));
-    _appletTree->setHeaderLabels({tr("Feature"), tr("Value")});
-
-    auto* layout = new QVBoxLayout;
-    layout->setObjectName(QStringLiteral("FramegrabberAppletLayout"));
-    layout->addLayout(pathLayout);
-    layout->addLayout(selectorLayout);
-    layout->addWidget(_appletTree);
-    page->setLayout(layout);
-
+    FramegrabberControlUi::create(this);
     connect(_loadButton, &QToolButton::clicked, this, [this]
     {
         const QString path = QFileDialog::getOpenFileName(
@@ -474,8 +337,45 @@ QWidget* QFramegrabberWidget::createSetupTab()
     {
         rebuildAppletTree();
     });
-    return page;
+    connect(_grabOneButton, &QToolButton::clicked, this, [this]
+    {
+        if (_framegrabber)
+        {
+            _framegrabber->grab(1);
+        }
+    });
+    connect(_grabLiveButton, &QToolButton::toggled, this, [this](const bool checked)
+    {
+        if (!_framegrabber)
+        {
+            return;
+        }
+        if (checked)
+        {
+            _framegrabber->grab();
+        }
+        else
+        {
+            _framegrabber->requestStop();
+        }
+    });
+    connect(
+        _boardCombo,
+        QOverload<int>::of(&QComboBox::currentIndexChanged),
+        this,
+        [this](const int index)
+        {
+            if (index >= 0
+                && _framegrabber
+                && !_framegrabber->isOpened()
+                && !_operationThread
+                && !_shuttingDown)
+            {
+                startAutomaticAppletLoad();
+            }
+        });
 }
+
 
 std::unique_ptr<QFramegrabberWidget::CameraPage>
 QFramegrabberWidget::createCameraPage(

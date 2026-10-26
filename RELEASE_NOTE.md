@@ -8,6 +8,10 @@
 
 - Publish the independently built device package with installed SDK validation.
 
+## Unreleased
+
+- Share the SDK-independent Qt control composition between the runtime widget and isolated presentation consumers.
+
 ## v0.2.0 (2026-10-08)
 
 - Declare package version 0.2.0, matching the existing project version and release.

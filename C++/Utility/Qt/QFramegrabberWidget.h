@@ -7,6 +7,7 @@
  */
 
 #ifdef QT_GUI_LIB
+#include "FramegrabberControlUi.h"
 
 #include "Framegrabber.h"
 
@@ -32,7 +33,7 @@ class QToolButton;
 class QTreeWidget;
 class QTreeWidgetItem;
 
-class QFramegrabberWidget final : public QWidget
+class QFramegrabberWidget final : public QWidget, protected FramegrabberControlUi
 {
     Q_OBJECT
 
@@ -84,25 +85,13 @@ private:
     bool _updatingDeviceUi = false;
     MissingAppletResolver _missingAppletResolver;
 
-    QComboBox* _boardCombo = nullptr;
-    QToolButton* _grabOneButton = nullptr;
-    QToolButton* _grabLiveButton = nullptr;
-
-    QComboBox* _appletDmaCombo = nullptr;
-    QTreeWidget* _appletTree = nullptr;
-    QLineEdit* _appletPathEdit = nullptr;
-    QToolButton* _loadButton = nullptr;
-    QToolButton* _saveConfigurationButton = nullptr;
 
 
-    QTabWidget* _tabs = nullptr;
+
     std::vector<std::unique_ptr<CameraPage>> _cameraPages;
 
-    QStatusBar* _statusBar = nullptr;
-    QLabel* _statusLabel = nullptr;
 
     void buildUi();
-    QWidget* createSetupTab();
     std::unique_ptr<CameraPage> createCameraPage(
         const Framegrabber::CameraControlCapability& capability);
     void registerCallbacks();

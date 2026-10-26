@@ -101,6 +101,7 @@ if(FRAMEGRABBER_BUILD_QT_WIDGET)
         COMPONENTS Core Gui Widgets Xml
     )
 
+    add_subdirectory(Utility/Qt)
     add_library(FramegrabberQtWidget STATIC
         Utility/Qt/QFramegrabberWidget.h
         Utility/Qt/QFramegrabberWidget.cpp
@@ -261,3 +262,7 @@ foreach(module_test IN ITEMS framegrabber_graphics_image_adapter_test)
             $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-UNDEBUG>)
     endif()
 endforeach()
+
+if(TARGET FramegrabberQtWidget)
+    target_link_libraries(FramegrabberQtWidget PUBLIC FramegrabberPresentation)
+endif()
