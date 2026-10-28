@@ -10,6 +10,8 @@
 
 ## Unreleased
 
+- Declare semantic layout, device-panel and action-density scopes through Qt properties; preserve independent plain-Qt builds without a theme dependency.
+
 - Share the SDK-independent Qt control composition between the runtime widget and isolated presentation consumers.
 
 ## v0.2.0 (2026-10-08)

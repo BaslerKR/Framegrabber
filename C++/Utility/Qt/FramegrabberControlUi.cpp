@@ -3,6 +3,8 @@
 
 
 void FramegrabberControlUi::create(QWidget* owner) {
+    owner->setProperty("actionDensity", "compact");
+    owner->setProperty("controlRole", "devicePanel");
     owner->setWindowTitle(QCoreApplication::translate("QFramegrabberWidget", "Basler Frame Grabber Configuration"));
     owner->setMinimumSize(300, 350);
 
@@ -31,15 +33,18 @@ void FramegrabberControlUi::create(QWidget* owner) {
 
     auto* selectorLayout = new QHBoxLayout;
     selectorLayout->setObjectName(QStringLiteral("DeviceSelectorLayout"));
+    selectorLayout->setProperty("layoutRole", "row");
     selectorLayout->addWidget(_boardCombo);
 
     auto* toolLayout = new QHBoxLayout;
     toolLayout->setObjectName(QStringLiteral("DeviceToolLayout"));
+    toolLayout->setProperty("layoutRole", "actions");
     toolLayout->addWidget(_grabOneButton);
     toolLayout->addWidget(_grabLiveButton);
 
     auto* topLayout = new QHBoxLayout;
     topLayout->setObjectName(QStringLiteral("DeviceTopBarLayout"));
+    topLayout->setProperty("layoutRole", "content");
     topLayout->addLayout(selectorLayout);
     topLayout->addLayout(toolLayout);
 
@@ -57,6 +62,7 @@ void FramegrabberControlUi::create(QWidget* owner) {
 
     auto* rootLayout = new QVBoxLayout;
     rootLayout->setObjectName(QStringLiteral("DeviceRootLayout"));
+    rootLayout->setProperty("layoutRole", "flush");
     rootLayout->addLayout(topLayout);
     rootLayout->addWidget(_tabs);
     rootLayout->addWidget(_statusBar);
