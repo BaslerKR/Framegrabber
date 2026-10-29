@@ -19,6 +19,11 @@ struct FramegrabberControlUi {
     QLineEdit* _appletPathEdit = nullptr;
     QToolButton* _loadButton = nullptr;
     QToolButton* _saveConfigurationButton = nullptr;
+    /** @brief Lists loadable applets enumerated by the SDK for the selected board. */
+    QComboBox* _appletCombo = nullptr;
+    QToolButton* _appletRefreshButton = nullptr;
+    QToolButton* _appletLoadButton = nullptr;
+    QToolButton* _closeButton = nullptr;
     /** @brief Creates the applet configuration tab used by the runtime widget. */
     QWidget* createSetupTab(QWidget* owner);
 };

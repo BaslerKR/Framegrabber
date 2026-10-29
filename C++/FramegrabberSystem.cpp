@@ -5,11 +5,13 @@
 #include "sisoboards.h"
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
 #include <iostream>
+#include <tuple>
 #include <utility>
 
 namespace
@@ -197,9 +199,11 @@ std::string findLoadableAppletPathByReference(
         const bool fileNameMatches =
             lowercase(candidateFile.filename().string()) == normalizedReference
             || lowercase(candidatePath.filename().string()) == normalizedReference;
+        // The documented Fg_Init form is the applet name (FG_AP_STRING_APPLET_NAME).
         const bool stemMatches = matchStem
             && (lowercase(candidateFile.stem().string()) == normalizedReference
-                || lowercase(candidatePath.stem().string()) == normalizedReference);
+                || lowercase(candidatePath.stem().string()) == normalizedReference
+                || lowercase(candidate.name) == normalizedReference);
         if (!fileNameMatches && !stemMatches)
         {
             continue;
@@ -282,11 +286,83 @@ bool hasAppletTag(const std::string& tags, const std::string& expected)
     return false;
 }
 
-const char* configuredFramegrabberSdkRoot()
+bool sdkVersionBefore(const std::string& version, const std::array<int, 3> minimum)
 {
-    const char* sdkRoot = std::getenv("BASLER_FG_SDK_DIR");
-    return sdkRoot != nullptr && *sdkRoot != '\0' ? sdkRoot : nullptr;
+    std::array<int, 3> parts{0, 0, 0};
+    std::size_t start = 0;
+    for (std::size_t index = 0; index < parts.size(); ++index)
+    {
+        if (start >= version.size() || !std::isdigit(static_cast<unsigned char>(version[start])))
+        {
+            return false; // An unrecognized version string is not reported as outdated.
+        }
+        std::size_t end = start;
+        while (end < version.size() && std::isdigit(static_cast<unsigned char>(version[end])))
+        {
+            ++end;
+        }
+        parts[index] = std::atoi(version.substr(start, end - start).c_str());
+        start = end + 1;
+    }
+    return parts < minimum;
 }
+
+std::mutex& libraryMutex()
+{
+    static std::mutex mutex;
+    return mutex;
+}
+
+std::size_t& libraryReferences()
+{
+    static std::size_t references = 0;
+    return references;
+}
+}
+
+bool FramegrabberSystem::acquireLibraries()
+{
+    std::lock_guard<std::mutex> lock(libraryMutex());
+    if (libraryReferences() == 0)
+    {
+        // The Framegrabber API documents nullptr for this internal argument; the SDK
+        // resolves its installation from BASLER_FG_SDK_DIR set by the package manifest.
+        const int result = Fg_InitLibraries(nullptr);
+        if (result != FG_OK)
+        {
+            syslog("Library initialization failed: "
+                       + std::string(Fg_getErrorDescription(nullptr, result)),
+                true);
+            return false;
+        }
+        const char* version = Fg_getSWVersion();
+        syslog("Library initialization succeeded (Framegrabber SDK "
+            + std::string(version ? version : "unknown") + ").");
+        if (sdkVersionBefore(version ? version : "", {5, 11, 9}))
+        {
+            // Framegrabber SDK 5.11.9 fixes fglib board-state crashes during applet
+            // operations (ticket 359034); earlier runtimes can fault when an applet with
+            // CXP camera control is replaced in the same process.
+            syslog("Framegrabber SDK 5.11.9 or later is recommended: replacing an applet "
+                   "can crash earlier SDK runtimes.",
+                true);
+        }
+    }
+    ++libraryReferences();
+    return true;
+}
+
+void FramegrabberSystem::releaseLibraries()
+{
+    std::lock_guard<std::mutex> lock(libraryMutex());
+    if (libraryReferences() == 0)
+    {
+        return;
+    }
+    if (--libraryReferences() == 0)
+    {
+        Fg_FreeLibraries();
+    }
 }
 
 std::string FramegrabberSystem::BoardInfo::displayName() const
@@ -300,28 +376,27 @@ std::string FramegrabberSystem::BoardInfo::displayName() const
 
 FramegrabberSystem::FramegrabberSystem(const bool discoverBoardsOnCreate)
 {
-    _initialized = Fg_InitLibraries(configuredFramegrabberSdkRoot()) == FG_OK;
-    if (!_initialized)
+    _initialized = acquireLibraries();
+    if (_initialized && discoverBoardsOnCreate)
     {
-        syslog("Library initialization failed.", true);
-        return;
+        updateFramegrabberList();
     }
-
-    syslog("Library initialization succeeded.");
-    if (discoverBoardsOnCreate) updateFramegrabberList();
 }
 
 FramegrabberSystem::~FramegrabberSystem()
 {
+    std::vector<std::unique_ptr<Framegrabber>> framegrabbers;
     {
         std::lock_guard<std::mutex> lock(_mutex);
-        _framegrabbers.clear();
+        framegrabbers.swap(_framegrabbers);
         _boards.clear();
     }
+    // Board handles must be released before this system drops its library reference.
+    framegrabbers.clear();
 
     if (_initialized)
     {
-        Fg_FreeLibraries();
+        releaseLibraries();
         _initialized = false;
     }
 }
@@ -489,6 +564,81 @@ FramegrabberSystem::AppletMetadata FramegrabberSystem::getAppletMetadata(
         hasAppletTag(applet.tags, "interface=cxp")
         && !hasAppletTag(applet.tags, "family=test");
     return metadata;
+}
+
+std::vector<FramegrabberSystem::AppletInfo> FramegrabberSystem::getLoadableApplets(
+    const std::string& boardName) const
+{
+    std::vector<AppletInfo> applets;
+    if (!_initialized)
+    {
+        return applets;
+    }
+
+    BoardInfo board;
+    if (!resolveBoard(boardName, board))
+    {
+        return applets;
+    }
+
+    std::lock_guard<std::mutex> lock(_appletDiscoveryMutex);
+    AppletRecord powerUpApplet;
+    const bool hasPowerUpApplet =
+        findBoardApplet(board.index, FG_AF_IS_POWERUP_APPLET, powerUpApplet);
+
+    Fg_AppletIteratorType iterator = nullptr;
+    const int count = Fg_getAppletIterator(
+        static_cast<int>(board.index),
+        FG_AIS_FILESYSTEM,
+        &iterator,
+        FG_AF_IS_LOADABLE);
+    if (count <= 0)
+    {
+        if (iterator)
+        {
+            Fg_freeAppletIterator(iterator);
+        }
+        return applets;
+    }
+
+    applets.reserve(static_cast<std::size_t>(count));
+    for (int index = 0; index < count; ++index)
+    {
+        Fg_AppletIteratorItem item = Fg_getAppletIteratorItem(iterator, index);
+        AppletRecord record;
+        if (!readAppletRecord(item, record) || record.path.empty())
+        {
+            continue;
+        }
+        const std::int64_t flags = Fg_getAppletIntProperty(item, FG_AP_INT_FLAGS);
+
+        AppletInfo applet;
+        applet.name = std::move(record.name);
+        applet.file = std::move(record.file);
+        applet.path = std::move(record.path);
+        applet.uid = std::move(record.uid);
+        applet.version = std::move(record.version);
+        applet.tags = std::move(record.tags);
+        applet.description = appletString(item, FG_AP_STRING_DESCRIPTION);
+        applet.category = appletString(item, FG_AP_STRING_CATEGORY);
+        applet.dmaCount = static_cast<int>(Fg_getAppletIntProperty(item, FG_AP_INT_NR_OF_DMA));
+        applet.cameraCount = static_cast<int>(Fg_getAppletIntProperty(item, FG_AP_INT_NR_OF_CAMS));
+        applet.active = (flags & FG_AF_IS_ACTIVE) != 0;
+        applet.powerUp = (flags & FG_AF_IS_POWERUP_APPLET) != 0
+            || (hasPowerUpApplet && !powerUpApplet.uid.empty()
+                && powerUpApplet.uid == applet.uid);
+        applet.supportsCameraControl =
+            hasAppletTag(applet.tags, "interface=cxp")
+            && !hasAppletTag(applet.tags, "family=test");
+        applets.push_back(std::move(applet));
+    }
+    Fg_freeAppletIterator(iterator);
+
+    std::sort(applets.begin(), applets.end(), [](const AppletInfo& left, const AppletInfo& right)
+    {
+        return std::tie(left.name, left.path) < std::tie(right.name, right.path);
+    });
+    return applets;
 }
 
 bool FramegrabberSystem::isInitialized() const noexcept

@@ -5,7 +5,8 @@ Framegrabber is a C++17 acquisition library for Basler frame grabber boards. It 
 ## Capabilities
 
 - Discover boards and create independently owned `Framegrabber` instances.
-- Load applets and MCF configuration files.
+- Enumerate the applets the SDK can load on a board and load them by name or path.
+- Load and save MCF configuration files.
 - Start every configured DMA channel and identify each image by `dmaIndex`.
 - Expose applet features and supported camera features through typed APIs.
 - Build an optional Qt control widget and an optional external GraphicsFrame adapter.
@@ -40,7 +41,7 @@ target_link_libraries(qt_consumer PRIVATE Framegrabber::QtWidget)
 Enabling `FRAMEGRABBER_BUILD_QT_WIDGET` requires Qt Core, Gui, Widgets, and Xml.
 Configuration fails when the requested Qt components are unavailable.
 
-The optional Playground adapter is disabled by default. Enable `FRAMEGRABBER_BUILD_PLAYGROUND_ADAPTER` only when the neutral GraphicsEngine contract target is available. Consumers that want owned frames include `Utility/PlaygroundAdapter/FramegrabberGraphicsFrameStream.h` and link `Framegrabber::PlaygroundAdapter`; pixel-format conversion stays in `FramegrabberGraphicsFrameAdapter`. The stream retains one latest owned image per observed DMA channel and publishes an ordered GraphicsFrame snapshot with stable `dma.N` resources after each accepted callback. This is a latest-per-channel view, not a same-exposure cohort. Its single publication boundary rejects delayed lower global frame sequences and clears retained channels between acquisition runs.
+The optional Playground adapter is disabled by default. Enable `FRAMEGRABBER_BUILD_PLAYGROUND_ADAPTER` only when the neutral GraphicsEngine contract target is available. Consumers that want owned frames include `Utility/PlaygroundAdapter/FramegrabberGraphicsFrameStream.h` and link `Framegrabber::PlaygroundAdapter`; pixel-format conversion stays in `FramegrabberGraphicsFrameAdapter`. The stream publishes one single-image GraphicsFrame for each accepted DMA image, using the DMA index as the source index. It does not assemble frames across DMA channels; the consumer owns multi-source presentation.
 
 The optional Playground device plugin is a separate MODULE. Enable `FRAMEGRABBER_BUILD_PLAYGROUND_PLUGIN` only when `Playground::DevicePlugin`, the adapter, `Framegrabber::QtWidget`, and `Resources::Resources` are available. Package identity lives in `Utility/PlaygroundAdapter/Package/Package.cmake` as quoted `set(PLAYGROUND_PLUGIN_* ...)` assignments; the MODULE must set `PLAYGROUND_PLUGIN_PACKAGE` and include `DevicePlugin.h`. The host emits `plugin.json` from that identity plus `DevicePluginPackage.h`.
 
@@ -65,7 +66,39 @@ const auto callbackId = board->registerGrabCallback(
 
 Each accepted SDK frame is copied once into a leased pool buffer because DMA memory is owned and reused by the SDK. The pool is coordinated with a mutex and condition variable; it is not lock-free. Copying an `Image` retains its `shared_ptr` storage and can keep a pool slot occupied, so bound retention in consumers.
 
+Acquisition uses `Fg_AcquireEx(..., ACQ_STANDARD, ...)` with `setDMABufferCount()` frame buffers (default 4) and waits with `Fg_getLastPicNumberBlockingEx`. In this model the driver never blocks a buffer, so the worker delivers the newest completed frame and handles backpressure as follows:
+
+- Frames that completed while the previous frame was still being processed are counted as `skipped`.
+- After each copy the worker reads `NUMBER_OF_GRABBED_IMAGES`. The buffer of frame `n` is reused by frame `n + bufferCount`. If that transfer may have started (`grabbed - n >= bufferCount - 1`), the copy is dropped and counted as `overwritten`, because it can contain data from the later frame.
+- `acquisitionStatistics()` reports `delivered`, `skipped`, `overwritten` and `rejected` (invalid pointer or transfer length) for each DMA during and after a run.
+- A wait result other than the short wait timeout (for example `FG_TRANSFER_NOT_ACTIVE` after the driver's `FG_TIMEOUT`) ends that DMA worker.
+
+Stopping follows the SDK order: the CXP camera stream (`Sgc_stopAcquisition`) stops first, then the DMA (`Fg_stopAcquireEx`). After that the buffers are freed (`Fg_FreeMemEx`).
+
 Callbacks run on acquisition workers. Keep them bounded, do not access GUI objects directly, and return `ready(dmaIndex)` only after the corresponding frame has been accepted by the downstream consumer. Stop acquisition and join workers before closing the board or destroying callbacks.
+
+## Applet and Configuration Contract
+
+All `FramegrabberSystem` instances in a process share one `Fg_InitLibraries(nullptr)` / `Fg_FreeLibraries()` reference. Discovery can run while a session holds an open board.
+
+- **Enumeration.** `refreshAppletCatalog(board)` lists the applets the SDK can load on the board: `Fg_getAppletIterator(FG_AIS_FILESYSTEM, FG_AF_IS_LOADABLE)`, including the `FG_AF_IS_ACTIVE` applet. It runs only while this instance has no open applet; `appletCatalog()` returns the last result.
+- **Applet loading.** `loadApplet(reference, board)` accepts a file path, a catalog path, or a unique applet name or file name. Use a full path when names are ambiguous or the applet is outside the SDK standard locations (`dll/<board>`, `Hardware Applets/<board>`).
+  - Validation failures (unknown board or applet, acquisition running) leave the loaded applet untouched.
+  - Otherwise the current applet is released and the board is initialized with `Fg_Init` (`Fg_InitEx` with `FG_INIT_FLAG_DEFAULT`).
+  - If initialization fails, the previous applet and configuration are restored.
+  - `lastError()` returns the SDK code and description of the failed request.
+  - Each successful open increments `connectionGeneration()`.
+  - Slave initialization (`FG_INIT_FLAG_SLAVE`) is not supported.
+- **Configuration files.** `loadAppletConfiguration("", mcf, board)` reads the applet from the `.mcf` file (`[fglib5] FileName`).
+  - If that applet is already loaded, only `Fg_loadConfig` runs.
+  - Otherwise the board is initialized with `Fg_InitConfig`. If the SDK cannot locate the MCF applet itself, the locally resolved applet is used with `Fg_Init` + `Fg_loadConfig`.
+  - A non-empty applet argument replaces the MCF reference.
+  - `saveConfiguration()` writes the `.mcf` with `Fg_saveConfig`; field parameters go to the `.mfs` file with the same stem.
+- **CoaXPress.** Applets tagged `interface=cxp` (except test applets) initialize `Sgc_initBoard`.
+  - Discovery scans every port (`0xf`) for 10 s. `refreshCameras()` restarts discovery with `SGC_SP_FLAG_RESET_DISCOVERY_INFOS`.
+  - `ERR_SGC_TOPOLOGY_MISMATCH` is reported through `lastCameraDiscovery()`: the cameras answer, but the applet layout cannot transfer their images.
+  - Cameras without an applet operator index (`CAM_PROP_APPLETOPERATORINDEX`) are not bound to a DMA.
+- **Control gate.** `tryBeginControl()` / `endControl()` serialize lifecycle commands from every control surface. Status callbacks report the gate as `ControlStatus`, and parameter replacement without a reopen as `ConfigurationStatus`.
 
 ## Validation
 
@@ -102,3 +135,54 @@ The runtime Qt widget and isolated presentation consumers use the same
 `FramegrabberControlUi` composition; device discovery, feature access and
 acquisition remain in the runtime widget. The presentation target does not
 install an application theme.
+
+The Setup tab contains:
+
+- a loadable-applet selector with refresh, load and release commands;
+- file-based loading of an applet or `.mcf` file, and configuration saving;
+- the applet feature tree for each DMA.
+
+On creation the widget loads the board's active applet (or else its power-up applet). Every lifecycle command takes the module control gate. While another surface holds the gate the commands are disabled, but Live can still be stopped. `setFileDialogPresenter()` lets a consumer supply themed file dialogs. Without one, the widget uses plain Qt dialogs.
+
+## Declared device and parameter contracts
+
+`FramegrabberSourceController` implements `IToolProvider/1.0` and `IDeviceParameterControl/1.0` over the same `Framegrabber` authority as the widget.
+
+Observe tools complete synchronously:
+
+| Tool | Result |
+| --- | --- |
+| `device.connection` | Board, applet, configuration, DMA count, `connectionId`, last SDK error, camera discovery and per-DMA counters |
+| `device.boards` | Discovered boards |
+| `device.applets` | Catalog with active/power-up/loaded flags |
+| `device.cameras` | CXP cameras from the last discovery |
+
+Other tools run on one worker and hold the control gate:
+
+| Tool | Effect |
+| --- | --- |
+| `device.applets-refresh` | Re-enumerates applets; only while released (observe) |
+| `device.applet-load` | Loads `{board, applet}` (device) |
+| `device.configuration-load` | Loads `{board, configuration, applet?}` (device) |
+| `device.configuration-save` | Writes `{connectionId, configuration}` to a host file (device) |
+| `device.disconnect` | Releases the board (device) |
+| `device.cameras-refresh` | Restarts CXP discovery (device) |
+| `device.single` | Waits up to 30 s for one frame on every DMA (pipeline) |
+
+Live start/stop uses the common `source.*` tools.
+
+Admission rules:
+
+- Replacing a loaded applet requires its current `connectionId`.
+- Switching boards requires a release first.
+- Acquisition is never stopped implicitly.
+- A busy gate is reported as `busy`. A connection-generation mismatch is reported as `conflict`.
+
+Applet parameters use the scope `Applet:<dma>` and their SDK access names (for example `FG_WIDTH`). They have no selectors.
+
+- Values carry their exact types. Enumerations are written by entry name. Limits come from `PROP_ID_MIN`, `PROP_ID_MAX` and `PROP_ID_STEP`.
+- Revisions change only when an observation changes.
+- Each write is revalidated against a fresh observation and reports the actual readback and effect.
+- Commands are executed from the parameter's declared SDK type, so write-only commands work.
+
+CXP camera features remain available through the widget and the C++ API. They are not part of the parameter contract.

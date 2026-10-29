@@ -74,19 +74,35 @@ void FramegrabberControlUi::create(QWidget* owner) {
 QWidget* FramegrabberControlUi::createSetupTab(QWidget* owner) {
 
     auto* page = new QWidget(owner);
+    const auto iconButton = [page](const QString& icon, const char* toolTip) {
+        auto* button = new QToolButton(page);
+        button->setIcon(QIcon(QStringLiteral(":/Resources/icon/") + icon));
+        button->setToolButtonStyle(Qt::ToolButtonIconOnly);
+        button->setIconSize(QSize(16, 16));
+        button->setToolTip(QCoreApplication::translate("QFramegrabberWidget", toolTip));
+        return button;
+    };
+
+    _appletCombo = new QComboBox(page);
+    _appletCombo->setObjectName(QStringLiteral("FramegrabberAppletCombo"));
+    _appletCombo->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    _appletCombo->setToolTip(QCoreApplication::translate("QFramegrabberWidget", "Loadable applets for the selected board"));
+    _appletRefreshButton = iconButton(QStringLiteral("refresh-48.png"), "Refresh the loadable applet list");
+    _appletLoadButton = iconButton(QStringLiteral("connect-48.png"), "Load the selected applet");
+    _closeButton = iconButton(QStringLiteral("disconnected-48.png"), "Release the board and unload the applet");
+
+    auto* catalogLayout = new QHBoxLayout;
+    catalogLayout->setObjectName(QStringLiteral("FramegrabberAppletCatalogLayout"));
+    catalogLayout->addWidget(_appletCombo);
+    catalogLayout->addWidget(_appletRefreshButton);
+    catalogLayout->addWidget(_appletLoadButton);
+    catalogLayout->addWidget(_closeButton);
+
     _appletPathEdit = new QLineEdit(page);
     _appletPathEdit->setReadOnly(true);
-    _loadButton = new QToolButton(page);
-    _loadButton->setIcon(QIcon(QStringLiteral(":/Resources/icon/opened-folder-48.png")));
-    _loadButton->setToolButtonStyle(Qt::ToolButtonIconOnly);
-    _loadButton->setIconSize(QSize(16, 16));
-    _loadButton->setToolTip(QCoreApplication::translate("QFramegrabberWidget", "Load applet or configuration"));
+    _loadButton = iconButton(QStringLiteral("opened-folder-48.png"), "Load an applet file or configuration");
 
-    _saveConfigurationButton = new QToolButton(page);
-    _saveConfigurationButton->setIcon(QIcon(QStringLiteral(":/Resources/icon/save-48.png")));
-    _saveConfigurationButton->setToolButtonStyle(Qt::ToolButtonIconOnly);
-    _saveConfigurationButton->setIconSize(QSize(16, 16));
-    _saveConfigurationButton->setToolTip(QCoreApplication::translate("QFramegrabberWidget", "Save current applet configuration"));
+    _saveConfigurationButton = iconButton(QStringLiteral("save-48.png"), "Save current applet configuration");
 
     auto* pathLayout = new QHBoxLayout;
     pathLayout->setObjectName(QStringLiteral("FramegrabberAppletPathLayout"));
@@ -107,6 +123,7 @@ QWidget* FramegrabberControlUi::createSetupTab(QWidget* owner) {
 
     auto* layout = new QVBoxLayout;
     layout->setObjectName(QStringLiteral("FramegrabberAppletLayout"));
+    layout->addLayout(catalogLayout);
     layout->addLayout(pathLayout);
     layout->addLayout(selectorLayout);
     layout->addWidget(_appletTree);

@@ -147,6 +147,12 @@ public:
                     QFileInfo(configurationPath).absolutePath(),
                     QObject::tr("Frame Grabber Applet (*.hap *.dll *.so);;All Files (*)"));
             });
+            // Consumer-owned file dialogs keep the host chrome; the widget has no Resources dependency.
+            _widget->setFileDialogPresenter([parent](bool save, const QString& title,
+                                                     const QString& directory, const QString& filter) {
+                return save ? ThemedFileDialog::getSaveFileName(parent, title, directory, filter)
+                            : ThemedFileDialog::getOpenFileName(parent, title, directory, filter);
+            });
         }
         return {{QStringLiteral("device-controls"), QStringLiteral("Device Controls"),
                  Qt::LeftDockWidgetArea, _widget, true}};

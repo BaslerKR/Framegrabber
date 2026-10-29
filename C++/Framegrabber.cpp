@@ -19,6 +19,8 @@ namespace
 // The SDK interprets this timeout in seconds. Keep it short so a disconnected
 // camera or an idle trigger source cannot delay stop()/close() for a long time.
 constexpr int kFrameWaitTimeoutSeconds = 1;
+// Time Sgc_scanPortsEx waits for at least one camera, as in the SDK discovery examples.
+constexpr int kCameraDiscoveryTimeoutMilliseconds = 10000;
 
 template<typename Callback>
 Framegrabber::CallbackId registerCallback(
@@ -610,6 +612,18 @@ struct Framegrabber::DmaChannel
     std::atomic<bool> acquisitionStarted{false};
     std::atomic<bool> cameraStarted{false};
     std::atomic<std::size_t> permits{0};
+    std::atomic<std::uint64_t> delivered{0};
+    std::atomic<std::uint64_t> skipped{0};
+    std::atomic<std::uint64_t> overwritten{0};
+    std::atomic<std::uint64_t> rejected{0};
+};
+
+struct Framegrabber::PreviousApplet
+{
+    bool opened = false;
+    std::string appletPath;
+    std::string configurationPath;
+    std::string boardName;
 };
 
 struct Framegrabber::CameraEntry
@@ -783,6 +797,14 @@ std::string Framegrabber::appletPathFromConfiguration(
         {
             return loadedAppletPath;
         }
+        // SDK-saved MCF files name the applet ([fglib5] FileName='Acq_...'); the cached
+        // catalog resolves it without an iterator query.
+        const std::string cataloged = findCatalogApplet(
+            std::filesystem::path(appletReference).filename().string());
+        if (!cataloged.empty())
+        {
+            return cataloged;
+        }
 
         // Siso GenICam keeps state associated with an initialized applet. Avoid a
         // filesystem iterator query while that applet is live; the user can select
@@ -862,86 +884,211 @@ bool Framegrabber::loadAppletConfiguration(const std::string& appletPath,
                                             const std::string& configurationPath,
                                             const std::string& boardName)
 {
+    std::lock_guard<std::mutex> lifecycleLock(_lifecycleMutex);
+    clearLastError();
     if (configurationPath.empty()
         || lowerExtension(configurationPath) != ".mcf"
         || !std::filesystem::is_regular_file(configurationPath))
     {
+        setLastError(FG_INVALID_FILENAME, "Select an existing .mcf configuration file.");
+        return false;
+    }
+    if (_isRunning.load(std::memory_order_acquire))
+    {
+        setLastError(FG_ALREADY_STARTED, "Stop acquisition before loading a configuration.");
+        return false;
+    }
+    FramegrabberSystem::BoardInfo board;
+    if (!_system || !_system->isInitialized() || !_system->resolveBoard(boardName, board))
+    {
+        setLastError(FG_INVALID_BOARD_NUMBER, "No matching frame grabber board was found.");
         return false;
     }
 
-    std::lock_guard<std::mutex> lifecycleLock(_lifecycleMutex);
+    std::string overridePath;
+    if (!appletPath.empty())
+    {
+        overridePath = resolveAppletReference(appletPath);
+        if (overridePath.empty())
+        {
+            setLastError(FG_FILE_NOT_FOUND, "Applet '" + appletPath + "' is not available.");
+            return false;
+        }
+    }
+
     std::string currentAppletPath;
     bool isOpened = false;
+    bool sameBoard = false;
     {
         std::lock_guard<std::mutex> lock(_stateMutex);
         currentAppletPath = _appletPath;
         isOpened = _handle != nullptr;
+        sameBoard = isOpened && _boardIndex == board.index;
     }
+    // The MCF applet reference is resolved without an iterator query while an applet
+    // is open; see appletPathFromConfiguration().
+    const std::string configuredPath = overridePath.empty()
+        ? appletPathFromConfiguration(configurationPath, board.displayName())
+        : overridePath;
     std::error_code error;
-    const bool isCurrentApplet = isOpened
+    const bool isCurrentApplet = sameBoard
+        && !configuredPath.empty()
         && std::filesystem::equivalent(
             std::filesystem::path(currentAppletPath),
-            std::filesystem::path(appletPath),
+            std::filesystem::path(configuredPath),
             error)
         && !error;
 
-    if (!isCurrentApplet && !loadAppletUnlocked(appletPath, boardName))
+    if (isCurrentApplet)
     {
-        return false;
-    }
-    if (!loadConfigurationUnlocked(configurationPath))
-    {
-        return false;
-    }
-
-    bool hasCameraControl = false;
-    {
-        std::lock_guard<std::mutex> lock(_stateMutex);
-        hasCameraControl = _cxpBoard != nullptr;
-    }
-    // Siso GenICam is not safe to destroy and create again for the same applet
-    // during one process lifetime. Keep the existing board and only reconnect cameras.
-    return !hasCameraControl || refreshCameras(CameraTransport::CoaXPress);
-}
-
-bool Framegrabber::loadAppletUnlocked(const std::string& path, const std::string& boardName)
-{
-    if (path.empty() || !std::filesystem::is_regular_file(path))
-    {
-        return false;
-    }
-
-    std::string previousPath;
-    std::string previousConfigurationPath;
-    std::string previousBoardName;
-    bool wasOpened = false;
-    {
-        std::lock_guard<std::mutex> lock(_stateMutex);
-        previousPath = _appletPath;
-        previousConfigurationPath = _configurationPath;
-        previousBoardName = _connectedBoardName;
-        wasOpened = _handle != nullptr;
-        _appletPath = path;
-    }
-
-    if (openUnlocked(boardName))
-    {
+        // Siso GenICam is not released and re-created for the same applet: Fg_loadConfig
+        // replaces the parameters and the existing CXP board handle remains valid.
+        if (!loadConfigurationUnlocked(configurationPath))
+        {
+            return false;
+        }
+        notifyStatus(ConfigurationStatus, true);
+        bool hasCameraControl = false;
+        {
+            std::lock_guard<std::mutex> lock(_stateMutex);
+            hasCameraControl = _cxpBoard != nullptr;
+        }
+        if (hasCameraControl)
+        {
+            refreshCamerasUnlocked(true);
+        }
         return true;
     }
 
-    log("Restoring the previous frame grabber applet.", true);
-    setAppletPath(previousPath);
-    if (wasOpened && !previousPath.empty())
+    const PreviousApplet previous = capturePreviousApplet();
+    if (!closeUnlocked(true))
     {
-        if (openUnlocked(previousBoardName) && !previousConfigurationPath.empty())
+        setLastError(FG_ERROR, "The previous applet could not be released.");
+        return false;
+    }
+    refreshAppletCatalogUnlocked(board);
+
+    Fg_Struct* handle = nullptr;
+    std::string loadedAppletPath = overridePath;
+    if (overridePath.empty())
+    {
+        handle = Fg_InitConfig(configurationPath.c_str(), board.index);
+        if (handle)
         {
-            loadConfigurationUnlocked(previousConfigurationPath);
+            Fg_getStringSystemInformationForFgHandle(
+                handle,
+                INFO_APPLET_FULL_PATH,
+                PROP_ID_VALUE,
+                loadedAppletPath);
+            if (loadedAppletPath.empty())
+            {
+                loadedAppletPath = configuredPath;
+            }
+            std::error_code sameError;
+            if (!configuredPath.empty()
+                && std::filesystem::is_regular_file(configuredPath)
+                && !(std::filesystem::equivalent(loadedAppletPath, configuredPath, sameError)
+                     && !sameError))
+            {
+                // SDK 5.11.8 and earlier can load the first applet of a board subfolder
+                // instead of the MCF applet (fixed in 5.11.9, ticket 347258).
+                log("Fg_InitConfig loaded " + loadedAppletPath + " instead of "
+                        + configuredPath + "; applying the configuration to the configured applet.",
+                    true);
+                Fg_FreeGrabber(handle);
+                handle = nullptr;
+                loadedAppletPath = configuredPath;
+            }
+        }
+        else
+        {
+            const int code = Fg_getLastErrorNumber(nullptr);
+            if (configuredPath.empty() || !std::filesystem::is_regular_file(configuredPath))
+            {
+                setLastSdkError("Failed to initialize from '" + configurationPath + "'", code);
+                restorePreviousApplet(previous);
+                return false;
+            }
+            // The MCF names an applet the SDK cannot locate itself (for example an
+            // absolute path from another machine); apply it to the locally resolved applet.
+            log("Fg_InitConfig failed (" + safeString(Fg_getErrorDescription(nullptr, code))
+                    + "); applying the configuration to " + configuredPath + ".",
+                true);
+            loadedAppletPath = configuredPath;
         }
     }
-    else
+    if (!handle)
     {
-        setConfigurationPath(previousConfigurationPath);
+        handle = initializeBoard(board, loadedAppletPath);
+        if (!handle)
+        {
+            restorePreviousApplet(previous);
+            return false;
+        }
+        const int result = Fg_loadConfig(handle, configurationPath.c_str());
+        if (result != FG_OK)
+        {
+            setLastSdkError("Failed to load configuration '" + configurationPath + "'", result);
+            Fg_FreeGrabber(handle);
+            restorePreviousApplet(previous);
+            return false;
+        }
     }
+    return adoptBoard(handle, board, loadedAppletPath, configurationPath);
+}
+
+bool Framegrabber::loadAppletUnlocked(const std::string& reference, const std::string& boardName)
+{
+    clearLastError();
+    if (!_system || !_system->isInitialized())
+    {
+        setLastError(FG_NOT_INIT, "Frame grabber system is not initialized.");
+        return false;
+    }
+    FramegrabberSystem::BoardInfo board;
+    if (!_system->resolveBoard(boardName, board))
+    {
+        setLastError(FG_INVALID_BOARD_NUMBER, "No matching frame grabber board was found.");
+        return false;
+    }
+    if (reference.empty())
+    {
+        setLastError(FG_INVALID_FILENAME, "Select an applet before opening the board.");
+        return false;
+    }
+    if (_isRunning.load(std::memory_order_acquire))
+    {
+        setLastError(FG_ALREADY_STARTED, "Stop acquisition before loading an applet.");
+        return false;
+    }
+
+    // While an applet is open the catalog from its last closed state is used.
+    const bool catalogRefreshed = refreshAppletCatalogUnlocked(board);
+    const std::string path = resolveAppletReference(reference);
+    if (path.empty())
+    {
+        setLastError(FG_FILE_NOT_FOUND,
+            "Applet '" + reference + "' is not a loadable applet for " + board.displayName() + ".");
+        return false;
+    }
+
+    const PreviousApplet previous = capturePreviousApplet();
+    if (!closeUnlocked(true))
+    {
+        setLastError(FG_ERROR, "The previous applet could not be released.");
+        return false;
+    }
+    if (!catalogRefreshed)
+    {
+        refreshAppletCatalogUnlocked(board);
+    }
+
+    Fg_Struct* handle = initializeBoard(board, path);
+    if (handle && adoptBoard(handle, board, path, {}))
+    {
+        return true;
+    }
+    restorePreviousApplet(previous);
     return false;
 }
 
@@ -953,61 +1100,87 @@ bool Framegrabber::open(const std::string& boardName)
 
 bool Framegrabber::openUnlocked(const std::string& boardName)
 {
-    if (!_system || !_system->isInitialized())
+    return loadAppletUnlocked(appletPath(), boardName);
+}
+
+Framegrabber::PreviousApplet Framegrabber::capturePreviousApplet() const
+{
+    std::lock_guard<std::mutex> lock(_stateMutex);
+    PreviousApplet previous;
+    previous.opened = _handle != nullptr;
+    previous.appletPath = _appletPath;
+    previous.configurationPath = _configurationPath;
+    previous.boardName = _connectedBoardName;
+    return previous;
+}
+
+void Framegrabber::restorePreviousApplet(const PreviousApplet& previous)
+{
+    if (!previous.opened || previous.appletPath.empty() || !_system)
     {
-        log("Frame grabber system is not initialized.", true);
-        return false;
+        std::lock_guard<std::mutex> lock(_stateMutex);
+        _appletPath = previous.appletPath;
+        _configurationPath = previous.configurationPath;
+        return;
     }
 
     FramegrabberSystem::BoardInfo board;
-    if (!_system->resolveBoard(boardName, board))
+    if (!_system->resolveBoard(previous.boardName, board))
     {
-        log("No matching frame grabber board was found.", true);
-        return false;
+        return;
     }
-
-    const std::string path = appletPath();
-    if (path.empty())
+    log("Restoring the previous frame grabber applet.", true);
+    // Keep the error of the failed request; restoration reports only through the log.
+    const OperationError requestError = lastError();
+    Fg_Struct* handle = initializeBoard(board, previous.appletPath);
+    if (handle && !previous.configurationPath.empty())
     {
-        log("Select an applet before opening the board.", true);
-        return false;
+        const int result = Fg_loadConfig(handle, previous.configurationPath.c_str());
+        if (result != FG_OK)
+        {
+            log("Failed to restore configuration '" + previous.configurationPath + "': "
+                    + safeString(Fg_getErrorDescription(nullptr, result)),
+                true);
+        }
     }
-
-    const FramegrabberSystem::AppletMetadata appletMetadata =
-        _system->getAppletMetadata(board.displayName(), path);
-    if (!closeUnlocked(true))
+    if (handle)
     {
-        return false;
+        adoptBoard(handle, board, previous.appletPath, previous.configurationPath);
     }
-    return openResolvedBoard(
-        board.displayName(),
-        board.index,
-        path,
-        appletMetadata.version,
-        appletMetadata.supportsCameraControl);
+    std::lock_guard<std::mutex> lock(_stateMutex);
+    _lastError = requestError;
 }
 
-bool Framegrabber::openResolvedBoard(const std::string& boardName,
-                                     const unsigned int boardIndex,
-                                     const std::string& appletPath,
-                                     const std::string& discoveredAppletVersion,
-                                     const bool initializeCameraControl)
+Fg_Struct* Framegrabber::initializeBoard(const FramegrabberSystem::BoardInfo& board,
+                                         const std::string& appletPath)
 {
-    Fg_Struct* handle = Fg_Init(appletPath.c_str(), boardIndex);
+    // Fg_Init is Fg_InitEx(..., FG_INIT_FLAG_DEFAULT): this process configures the FPGA.
+    Fg_Struct* handle = Fg_Init(appletPath.c_str(), board.index);
     if (!handle)
     {
-        log("Failed to load applet '" + appletPath + "': "
-                + safeString(Fg_getLastErrorDescription(nullptr)),
-            true);
-        return false;
+        setLastSdkError("Failed to load applet '" + appletPath + "'",
+            Fg_getLastErrorNumber(nullptr));
     }
+    return handle;
+}
 
+bool Framegrabber::adoptBoard(Fg_Struct* handle,
+                              const FramegrabberSystem::BoardInfo& board,
+                              const std::string& appletPath,
+                              const std::string& configurationPath)
+{
+    const AppletInfo applet = catalogEntry(appletPath);
     SgcBoardHandle* cxpBoard = nullptr;
-    if (initializeCameraControl
-        && Sgc_initBoard(handle, 0, &cxpBoard) != SGC_OK)
+    if (applet.supportsCameraControl)
     {
-        cxpBoard = nullptr;
-        log("CXP control module is unavailable for this configuration.", true);
+        const int result = Sgc_initBoard(handle, 0, &cxpBoard);
+        if (result != SGC_OK)
+        {
+            cxpBoard = nullptr;
+            log("CXP control module is unavailable for this applet: "
+                    + safeString(Sgc_getErrorDescription(result)),
+                true);
+        }
     }
 
     std::string appletFileName;
@@ -1020,40 +1193,205 @@ bool Framegrabber::openResolvedBoard(const std::string& boardName,
     {
         appletFileName = std::filesystem::path(appletPath).filename().string();
     }
-    const std::string appletName =
-        std::filesystem::path(appletFileName).stem().string();
+    const std::string appletName = !applet.name.empty()
+        ? applet.name
+        : std::filesystem::path(appletFileName).stem().string();
     const int appletId = Fg_getAppletId(handle, nullptr);
     std::string appletVersion =
         appletId >= 0 ? safeString(Fg_getAppletVersion(handle, appletId)) : "";
     if (appletVersion.empty())
     {
-        appletVersion = discoveredAppletVersion;
+        appletVersion = applet.version;
     }
 
     {
         std::lock_guard<std::mutex> lock(_stateMutex);
         _handle = handle;
         _cxpBoard = cxpBoard;
-        _boardIndex = boardIndex;
-        _connectedBoardName = boardName;
+        _boardIndex = board.index;
+        _connectedBoardName = board.displayName();
         _appletPath = appletPath;
         _loadedAppletName = appletName;
         _loadedAppletVersion = appletVersion;
-        _configurationPath.clear();
+        _configurationPath = configurationPath;
         _channels.clear();
         _cxpCameras.clear();
+        _lastStatistics.clear();
+        _lastCameraDiscovery = {};
+        ++_connectionGeneration;
     }
     clearAppletFeatureModels();
 
     if (cxpBoard)
     {
-        refreshCameras(CameraTransport::CoaXPress);
+        // The first scan starts the SDK discovery thread; no reset is needed.
+        refreshCamerasUnlocked(false);
     }
 
     notifyStatus(ConnectionStatus, true);
-    log("Opened " + boardName + " with "
-        + std::filesystem::path(appletPath).filename().string() + ".");
+    log("Opened " + board.displayName() + " with "
+        + std::filesystem::path(appletPath).filename().string()
+        + (configurationPath.empty() ? std::string{} : " and " + configurationPath) + ".");
     return true;
+}
+
+bool Framegrabber::refreshAppletCatalog(const std::string& boardName)
+{
+    std::lock_guard<std::mutex> lifecycleLock(_lifecycleMutex);
+    if (!_system)
+    {
+        return false;
+    }
+    FramegrabberSystem::BoardInfo board;
+    if (!_system->resolveBoard(boardName, board))
+    {
+        return false;
+    }
+    {
+        std::lock_guard<std::mutex> lock(_stateMutex);
+        if (_handle)
+        {
+            return false;
+        }
+    }
+    return refreshAppletCatalogUnlocked(board);
+}
+
+bool Framegrabber::refreshAppletCatalogUnlocked(const FramegrabberSystem::BoardInfo& board)
+{
+    {
+        std::lock_guard<std::mutex> lock(_stateMutex);
+        if (_handle || !_system)
+        {
+            return false;
+        }
+    }
+    std::vector<AppletInfo> catalog = _system->getLoadableApplets(board.displayName());
+    std::lock_guard<std::mutex> lock(_stateMutex);
+    _appletCatalog = std::move(catalog);
+    return true;
+}
+
+std::vector<Framegrabber::AppletInfo> Framegrabber::appletCatalog() const
+{
+    std::lock_guard<std::mutex> lock(_stateMutex);
+    return _appletCatalog;
+}
+
+Framegrabber::AppletInfo Framegrabber::catalogEntry(const std::string& appletPath) const
+{
+    std::lock_guard<std::mutex> lock(_stateMutex);
+    for (const AppletInfo& applet : _appletCatalog)
+    {
+        std::error_code error;
+        if (applet.path == appletPath
+            || (std::filesystem::equivalent(applet.path, appletPath, error) && !error))
+        {
+            return applet;
+        }
+    }
+    // A HAP outside the standard locations is loadable but not enumerated.
+    AppletInfo applet;
+    applet.path = appletPath;
+    return applet;
+}
+
+std::string Framegrabber::resolveAppletReference(const std::string& reference) const
+{
+    if (reference.empty())
+    {
+        return {};
+    }
+    std::error_code error;
+    if (std::filesystem::is_regular_file(reference, error))
+    {
+        return std::filesystem::absolute(reference, error).lexically_normal().string();
+    }
+    return findCatalogApplet(reference);
+}
+
+std::string Framegrabber::findCatalogApplet(const std::string& reference) const
+{
+    if (reference.empty())
+    {
+        return {};
+    }
+    const std::string normalized = lowercase(reference);
+    std::vector<std::string> matches;
+    std::lock_guard<std::mutex> lock(_stateMutex);
+    for (const AppletInfo& applet : _appletCatalog)
+    {
+        const std::filesystem::path file(applet.file);
+        if (lowercase(applet.path) == normalized
+            || lowercase(applet.name) == normalized
+            || lowercase(file.string()) == normalized
+            || lowercase(file.stem().string()) == normalized)
+        {
+            if (std::find(matches.begin(), matches.end(), applet.path) == matches.end())
+            {
+                matches.push_back(applet.path);
+            }
+        }
+    }
+    // Duplicate names must be loaded by full path, as documented for Fg_Init.
+    return matches.size() == 1 ? matches.front() : std::string{};
+}
+
+std::uint64_t Framegrabber::connectionGeneration() const
+{
+    std::lock_guard<std::mutex> lock(_stateMutex);
+    return _handle ? _connectionGeneration : 0;
+}
+
+Framegrabber::OperationError Framegrabber::lastError() const
+{
+    std::lock_guard<std::mutex> lock(_stateMutex);
+    return _lastError;
+}
+
+void Framegrabber::setLastError(const int code, std::string message)
+{
+    log(message, true);
+    std::lock_guard<std::mutex> lock(_stateMutex);
+    _lastError.code = code;
+    _lastError.message = std::move(message);
+}
+
+void Framegrabber::setLastSdkError(const std::string& context, const int code)
+{
+    const std::string description = safeString(Fg_getErrorDescription(nullptr, code));
+    setLastError(code, context + ": " + (description.empty() ? "SDK error" : description)
+        + " (" + std::to_string(code) + ").");
+}
+
+void Framegrabber::clearLastError()
+{
+    std::lock_guard<std::mutex> lock(_stateMutex);
+    _lastError = {};
+}
+
+bool Framegrabber::tryBeginControl()
+{
+    bool expected = false;
+    if (!_controlBusy.compare_exchange_strong(expected, true, std::memory_order_acq_rel))
+    {
+        return false;
+    }
+    notifyStatus(ControlStatus, true);
+    return true;
+}
+
+void Framegrabber::endControl()
+{
+    if (_controlBusy.exchange(false, std::memory_order_acq_rel))
+    {
+        notifyStatus(ControlStatus, false);
+    }
+}
+
+bool Framegrabber::controlBusy() const noexcept
+{
+    return _controlBusy.load(std::memory_order_acquire);
 }
 
 bool Framegrabber::isOpened() const
@@ -1141,7 +1479,13 @@ std::string Framegrabber::getLoadedAppletVersion() const
 bool Framegrabber::loadConfiguration(const std::string& path)
 {
     std::lock_guard<std::mutex> lifecycleLock(_lifecycleMutex);
-    return loadConfigurationUnlocked(path);
+    clearLastError();
+    if (!loadConfigurationUnlocked(path))
+    {
+        return false;
+    }
+    notifyStatus(ConfigurationStatus, true);
+    return true;
 }
 
 bool Framegrabber::loadConfigurationUnlocked(const std::string& path)
@@ -1150,27 +1494,34 @@ bool Framegrabber::loadConfigurationUnlocked(const std::string& path)
         || lowerExtension(path) != ".mcf"
         || !std::filesystem::is_regular_file(path))
     {
+        setLastError(FG_INVALID_FILENAME, "Select an existing .mcf configuration file.");
         return false;
     }
 
     int result = FG_NOT_INIT;
     {
         std::lock_guard<std::mutex> lock(_stateMutex);
-        if (!_handle || _isRunning.load(std::memory_order_acquire))
+        if (!_handle)
         {
-            return false;
+            result = FG_NOT_INIT;
         }
-        result = Fg_loadConfig(_handle, path.c_str());
-        if (result == FG_OK)
+        else if (_isRunning.load(std::memory_order_acquire))
         {
-            _configurationPath = path;
+            result = FG_ALREADY_STARTED;
+        }
+        else
+        {
+            result = Fg_loadConfig(_handle, path.c_str());
+            if (result == FG_OK)
+            {
+                _configurationPath = path;
+            }
         }
     }
+    clearAppletFeatureModels();
     if (result != FG_OK)
     {
-        log("Failed to load configuration '" + path + "': "
-                + safeString(Fg_getErrorDescription(nullptr, result)),
-            true);
+        setLastSdkError("Failed to load configuration '" + path + "'", result);
         return false;
     }
     return true;
@@ -1178,30 +1529,38 @@ bool Framegrabber::loadConfigurationUnlocked(const std::string& path)
 
 bool Framegrabber::saveConfiguration(const std::string& path)
 {
+    std::lock_guard<std::mutex> lifecycleLock(_lifecycleMutex);
+    clearLastError();
+    // Fg_saveConfig writes the .mcf and, for field parameters, an .mfs with the same stem.
     if (path.empty() || lowerExtension(path) != ".mcf")
     {
+        setLastError(FG_INVALID_FILENAME, "Configuration files must use the .mcf extension.");
         return false;
     }
 
-    std::lock_guard<std::mutex> lifecycleLock(_lifecycleMutex);
     int result = FG_NOT_INIT;
     {
         std::lock_guard<std::mutex> lock(_stateMutex);
-        if (!_handle || _isRunning.load(std::memory_order_acquire))
+        if (!_handle)
         {
-            return false;
+            result = FG_NOT_INIT;
         }
-        result = Fg_saveConfig(_handle, path.c_str());
-        if (result == FG_OK)
+        else if (_isRunning.load(std::memory_order_acquire))
         {
-            _configurationPath = path;
+            result = FG_ALREADY_STARTED;
+        }
+        else
+        {
+            result = Fg_saveConfig(_handle, path.c_str());
+            if (result == FG_OK)
+            {
+                _configurationPath = path;
+            }
         }
     }
     if (result != FG_OK)
     {
-        log("Failed to save configuration '" + path + "': "
-                + safeString(Fg_getErrorDescription(nullptr, result)),
-            true);
+        setLastSdkError("Failed to save configuration '" + path + "'", result);
         return false;
     }
     return true;
@@ -1253,6 +1612,7 @@ void Framegrabber::grab(const std::size_t frames)
         std::lock_guard<std::mutex> lock(_stateMutex);
         _channels.clear();
         _channels.resize(static_cast<std::size_t>(dmaCount));
+        _lastStatistics.clear();
     }
 
     notifyStatus(GrabbingStatus, true);
@@ -1458,7 +1818,7 @@ void Framegrabber::startChannel(const unsigned int dmaIndex, const std::size_t f
     {
         channelPtr->thread = std::thread(
             [this, channelPtr, handle, frames, width, height, sdkFormat, pixelFormat, pixelBits,
-             pixelBytes, bitAlignment, frameBytes]
+             pixelBytes, bitAlignment, frameBytes, bufferCount]
             {
                 const unsigned int dmaIndex = channelPtr->index;
                 const int acquireResult =
@@ -1500,14 +1860,17 @@ void Framegrabber::startChannel(const unsigned int dmaIndex, const std::size_t f
                     }
                     channelPtr->permits.fetch_sub(1, std::memory_order_acq_rel);
 
+                    const frameindex_t nextPicture =
+                        lastPicture < FRAMEINDEX_MAX ? lastPicture + 1 : 1;
                     const frameindex_t picture = Fg_getLastPicNumberBlockingEx(
                         handle,
-                        lastPicture + 1,
+                        nextPicture,
                         static_cast<int>(dmaIndex),
                         kFrameWaitTimeoutSeconds,
                         channelPtr->memory);
                     if (picture <= 0)
                     {
+                        // The short wait timeout keeps stop responsive; it is not an error.
                         if (picture == FG_NO_PICTURE_AVAILABLE || picture == FG_TIMEOUT_ERR)
                         {
                             channelPtr->permits.fetch_add(1, std::memory_order_acq_rel);
@@ -1515,17 +1878,31 @@ void Framegrabber::startChannel(const unsigned int dmaIndex, const std::size_t f
                         }
                         if (!channelPtr->stopRequested.load(std::memory_order_acquire))
                         {
-                            log("DMA(" + std::to_string(dmaIndex) + ") frame wait failed.", true);
-                            channelPtr->permits.fetch_add(1, std::memory_order_acq_rel);
+                            // FG_TRANSFER_NOT_ACTIVE: the driver ended the acquisition, for
+                            // example after its FG_TIMEOUT. Waiting again cannot succeed.
+                            log("DMA(" + std::to_string(dmaIndex) + ") acquisition ended: "
+                                    + safeString(Fg_getErrorDescription(
+                                        nullptr,
+                                        static_cast<int>(picture)))
+                                    + " (" + std::to_string(picture) + ").",
+                                true);
                         }
-                        continue;
+                        break;
                     }
 
+                    if (picture > nextPicture)
+                    {
+                        // ACQ_STANDARD returns the newest frame; older frames are skipped.
+                        channelPtr->skipped.fetch_add(
+                            static_cast<std::uint64_t>(picture - nextPicture),
+                            std::memory_order_relaxed);
+                    }
                     lastPicture = picture;
                     const auto* source = static_cast<const std::uint8_t*>(Fg_getImagePtrEx(
                         handle, picture, static_cast<int>(dmaIndex), channelPtr->memory));
                     if (!source)
                     {
+                        channelPtr->rejected.fetch_add(1, std::memory_order_relaxed);
                         ready(dmaIndex);
                         continue;
                     }
@@ -1546,6 +1923,7 @@ void Framegrabber::startChannel(const unsigned int dmaIndex, const std::size_t f
                         log("DMA(" + std::to_string(dmaIndex)
                                 + ") reported an invalid transfer length.",
                             true);
+                        channelPtr->rejected.fetch_add(1, std::memory_order_relaxed);
                         ready(dmaIndex);
                         continue;
                     }
@@ -1601,6 +1979,25 @@ void Framegrabber::startChannel(const unsigned int dmaIndex, const std::size_t f
                     }
                     std::memcpy(ownedBytes.get(), source, payloadBytes);
 
+                    // ACQ_STANDARD does not protect frame buffers. The buffer of `picture`
+                    // is reused by frame picture + bufferCount, whose transfer can start
+                    // once picture + bufferCount - 1 is complete. Drop a copy that may
+                    // contain data from that later transfer.
+                    const frameindex_t grabbed = Fg_getStatusEx(
+                        handle,
+                        NUMBER_OF_GRABBED_IMAGES,
+                        0,
+                        dmaIndex,
+                        channelPtr->memory);
+                    if (grabbed > 0
+                        && grabbed - picture
+                            >= static_cast<frameindex_t>(bufferCount) - 1)
+                    {
+                        channelPtr->overwritten.fetch_add(1, std::memory_order_relaxed);
+                        ready(dmaIndex);
+                        continue;
+                    }
+
                     Image image;
                     image.storage = std::move(ownedBytes);
                     image.size = payloadBytes;
@@ -1641,6 +2038,7 @@ void Framegrabber::startChannel(const unsigned int dmaIndex, const std::size_t f
                     }
 
                     ++delivered;
+                    channelPtr->delivered.fetch_add(1, std::memory_order_relaxed);
                     if (frames != 0 && delivered >= frames)
                     {
                         break;
@@ -1670,6 +2068,22 @@ void Framegrabber::finishChannel(DmaChannel& channel)
     {
         std::lock_guard<std::mutex> lock(_stateMutex);
         handle = _handle;
+        ChannelStatistics statistics;
+        statistics.dmaIndex = channel.index;
+        statistics.delivered = channel.delivered.load(std::memory_order_relaxed);
+        statistics.skipped = channel.skipped.load(std::memory_order_relaxed);
+        statistics.overwritten = channel.overwritten.load(std::memory_order_relaxed);
+        statistics.rejected = channel.rejected.load(std::memory_order_relaxed);
+        _lastStatistics.push_back(statistics);
+        if (statistics.skipped != 0 || statistics.overwritten != 0 || statistics.rejected != 0)
+        {
+            log("DMA(" + std::to_string(channel.index) + ") run finished: delivered="
+                + std::to_string(statistics.delivered) + ", skipped="
+                + std::to_string(statistics.skipped) + ", overwritten="
+                + std::to_string(statistics.overwritten) + ", rejected="
+                + std::to_string(statistics.rejected) + ".",
+                statistics.overwritten != 0);
+        }
     }
 
     if (channel.cameraStarted.exchange(false, std::memory_order_acq_rel))
@@ -1783,6 +2197,11 @@ void Framegrabber::requestStopChannels()
     }
     for (DmaChannel* channel : channels)
     {
+        // Documented order: stop the camera stream, then the frame grabber DMA.
+        if (channel->cameraStarted.exchange(false, std::memory_order_acq_rel))
+        {
+            stopCameraAcquisitionForChannel(channel->index);
+        }
         std::lock_guard<std::mutex> resourceLock(channel->resourceMutex);
         if (channel->memory
             && channel->acquisitionStarted.exchange(false, std::memory_order_acq_rel))
@@ -1865,12 +2284,61 @@ int Framegrabber::getDMACount() const
     {
         return 0;
     }
-    int count = 0;
-    if (Fg_getParameterPropertyWithType(_handle, FG_NR_OF_DMAS, PROP_ID_VALUE, &count) != FG_OK)
+    // FG_NR_OF_DMAS exists once per applet process; its index argument is the process.
+    std::int32_t processes = 0;
+    if (Fg_getParameterWithType(_handle, FG_NR_OF_PROCESSES, &processes, 0u) != FG_OK
+        || processes <= 0)
     {
-        return 0;
+        processes = 1;
+    }
+    int count = 0;
+    for (std::int32_t process = 0; process < processes; ++process)
+    {
+        std::int32_t dmas = 0;
+        if (Fg_getParameterWithType(
+                _handle,
+                FG_NR_OF_DMAS,
+                &dmas,
+                static_cast<unsigned int>(process)) != FG_OK)
+        {
+            return process == 0 ? 0 : count;
+        }
+        count += (std::max)(0, static_cast<int>(dmas));
     }
     return count;
+}
+
+std::vector<Framegrabber::ChannelStatistics> Framegrabber::acquisitionStatistics() const
+{
+    std::lock_guard<std::mutex> lock(_stateMutex);
+    std::vector<ChannelStatistics> result = _lastStatistics;
+    for (const auto& channel : _channels)
+    {
+        if (!channel)
+        {
+            continue;
+        }
+        ChannelStatistics statistics;
+        statistics.dmaIndex = channel->index;
+        statistics.delivered = channel->delivered.load(std::memory_order_relaxed);
+        statistics.skipped = channel->skipped.load(std::memory_order_relaxed);
+        statistics.overwritten = channel->overwritten.load(std::memory_order_relaxed);
+        statistics.rejected = channel->rejected.load(std::memory_order_relaxed);
+        const auto existing = std::find_if(result.begin(), result.end(),
+            [&statistics](const ChannelStatistics& item)
+            {
+                return item.dmaIndex == statistics.dmaIndex;
+            });
+        if (existing == result.end())
+        {
+            result.push_back(statistics);
+        }
+    }
+    std::sort(result.begin(), result.end(), [](const auto& left, const auto& right)
+    {
+        return left.dmaIndex < right.dmaIndex;
+    });
+    return result;
 }
 
 std::vector<std::string> Framegrabber::getUpdatedFramegrabberList() const
@@ -1881,6 +2349,11 @@ std::vector<std::string> Framegrabber::getUpdatedFramegrabberList() const
 std::vector<std::string> Framegrabber::getCachedFramegrabberList() const
 {
     return _system ? _system->getCachedFramegrabberList() : std::vector<std::string>{};
+}
+
+std::vector<FramegrabberSystem::BoardInfo> Framegrabber::getCachedBoardInfo() const
+{
+    return _system ? _system->getCachedBoardInfo() : std::vector<FramegrabberSystem::BoardInfo>{};
 }
 
 std::string Framegrabber::getBoardAppletPath(const std::string& boardName) const
@@ -2207,14 +2680,10 @@ bool Framegrabber::getAppletParameterById(const std::int64_t parameterId,
     }
     case FG_PARAM_TYPE_CHAR_PTR:
     {
-        std::vector<char> output(4096, '\0');
-        result = Fg_getParameterWithType(
-            _handle,
-            sdkParameterId,
-            output.data(),
-            dmaIndex,
-            type);
-        value = std::string(output.data());
+        // The std::string overload reads an SDK-allocated string of any length.
+        std::string output;
+        result = Fg_getParameterWithType(_handle, sdkParameterId, output, dmaIndex);
+        value = std::move(output);
         break;
     }
     default:
@@ -2261,17 +2730,29 @@ bool Framegrabber::setAppletParameterById(const std::int64_t parameterId,
                                           const unsigned int dmaIndex,
                                           const ParameterValue& value,
                                           const bool silent,
-                                          const bool verifyReadBack)
+                                          const bool verifyReadBack,
+                                          int* sdkResult)
 {
+    int result = FG_ERROR;
+    struct ResultCopy
+    {
+        int* output;
+        const int& result;
+        ~ResultCopy()
+        {
+            if (output) *output = result;
+        }
+    } resultCopy{sdkResult, result};
     if (parameterId < 0 || parameterId > (std::numeric_limits<int>::max)())
     {
+        result = FG_INVALID_PARAMETER;
         return false;
     }
-    int result = FG_ERROR;
     {
         std::lock_guard<std::mutex> lock(_stateMutex);
         if (!_handle)
         {
+            result = FG_NOT_INIT;
             return false;
         }
         const int sdkParameterId = static_cast<int>(parameterId);
@@ -2292,6 +2773,7 @@ bool Framegrabber::setAppletParameterById(const std::int64_t parameterId,
                         + " is not writable in the current state.",
                     true);
             }
+            result = FG_WRITE_ACCESS_DENIED;
             return false;
         }
         const FgParamTypes type = Fg_getParameterTypeById(
@@ -2351,11 +2833,13 @@ bool Framegrabber::setAppletParameterById(const std::int64_t parameterId,
                 break;
             }
             default:
+                result = FG_INVALID_PARAMETER;
                 return false;
             }
         }
         catch (const std::bad_variant_access&)
         {
+            result = FG_INVALID_PARAMETER;
             if (!silent)
             {
                 log(
@@ -2421,44 +2905,129 @@ bool Framegrabber::setAppletParameterById(const std::int64_t parameterId,
 
 bool Framegrabber::executeAppletCommand(const unsigned int dmaIndex, const std::string& name)
 {
-    ParameterValue current = std::int32_t{0};
-    if (!getAppletParameter(name, dmaIndex, current, true))
+    int parameterId = -1;
     {
-        return false;
-    }
-    std::visit(
-        [](auto& value)
+        std::lock_guard<std::mutex> lock(_stateMutex);
+        if (!_handle || name.empty())
         {
-            using T = std::decay_t<decltype(value)>;
-            if constexpr (std::is_integral_v<T>)
-            {
-                value = static_cast<T>(1);
-            }
-        },
-        current);
-    return setAppletParameter(name, dmaIndex, current, false, false);
+            return false;
+        }
+        parameterId = Fg_getParameterIdByName(_handle, name.c_str());
+    }
+    return parameterId >= 0 && executeAppletCommandById(dmaIndex, parameterId);
 }
 
 bool Framegrabber::executeAppletCommandById(
     const unsigned int dmaIndex,
     const std::int64_t parameterId)
 {
-    ParameterValue current = std::int32_t{0};
-    if (!getAppletParameterById(parameterId, dmaIndex, current, true))
+    // Applet commands are often write-only; build the value from the declared SDK type
+    // instead of reading the parameter first.
+    std::optional<ParameterValue> command = appletParameterPrototype(parameterId, dmaIndex);
+    if (!command)
     {
         return false;
     }
+    bool integral = false;
     std::visit(
-        [](auto& value)
+        [&integral](auto& value)
         {
             using T = std::decay_t<decltype(value)>;
             if constexpr (std::is_integral_v<T>)
             {
                 value = static_cast<T>(1);
+                integral = true;
             }
         },
-        current);
-    return setAppletParameterById(parameterId, dmaIndex, current, false, false);
+        *command);
+    return integral && setAppletParameterById(parameterId, dmaIndex, *command, false, false);
+}
+
+std::optional<Framegrabber::ParameterValue> Framegrabber::appletParameterPrototype(
+    const std::int64_t parameterId,
+    const unsigned int dmaIndex) const
+{
+    if (parameterId < 0 || parameterId > (std::numeric_limits<int>::max)())
+    {
+        return std::nullopt;
+    }
+    std::lock_guard<std::mutex> lock(_stateMutex);
+    if (!_handle)
+    {
+        return std::nullopt;
+    }
+    switch (Fg_getParameterTypeById(_handle, static_cast<int>(parameterId), dmaIndex))
+    {
+    case FG_PARAM_TYPE_INT32_T:
+        return ParameterValue{std::int32_t{0}};
+    case FG_PARAM_TYPE_UINT32_T:
+        return ParameterValue{std::uint32_t{0}};
+    case FG_PARAM_TYPE_INT64_T:
+        return ParameterValue{std::int64_t{0}};
+    case FG_PARAM_TYPE_UINT64_T:
+    case FG_PARAM_TYPE_SIZE_T:
+        return ParameterValue{std::uint64_t{0}};
+    case FG_PARAM_TYPE_DOUBLE:
+        return ParameterValue{0.0};
+    case FG_PARAM_TYPE_CHAR_PTR:
+        return ParameterValue{std::string{}};
+    default:
+        return std::nullopt;
+    }
+}
+
+Framegrabber::AppletParameterLimits Framegrabber::getAppletParameterLimits(
+    const std::int64_t parameterId,
+    const unsigned int dmaIndex) const
+{
+    AppletParameterLimits limits;
+    if (parameterId < 0 || parameterId > (std::numeric_limits<int>::max)())
+    {
+        return limits;
+    }
+    std::lock_guard<std::mutex> lock(_stateMutex);
+    if (!_handle)
+    {
+        return limits;
+    }
+    const int id = static_cast<int>(parameterId);
+    const auto read = [this, id, dmaIndex](const FgProperty property, auto typed)
+        -> std::optional<ParameterValue>
+    {
+        if (Fg_getParameterPropertyWithTypeEx(_handle, id, property, &typed, dmaIndex) != FG_OK)
+        {
+            return std::nullopt;
+        }
+        return ParameterValue{typed};
+    };
+    const auto readAll = [&](auto typed)
+    {
+        limits.minimum = read(PROP_ID_MIN, typed);
+        limits.maximum = read(PROP_ID_MAX, typed);
+        limits.increment = read(PROP_ID_STEP, typed);
+    };
+    switch (Fg_getParameterTypeById(_handle, id, dmaIndex))
+    {
+    case FG_PARAM_TYPE_INT32_T:
+        readAll(std::int32_t{0});
+        break;
+    case FG_PARAM_TYPE_UINT32_T:
+        readAll(std::uint32_t{0});
+        break;
+    case FG_PARAM_TYPE_INT64_T:
+        readAll(std::int64_t{0});
+        break;
+    case FG_PARAM_TYPE_UINT64_T:
+    case FG_PARAM_TYPE_SIZE_T:
+        readAll(std::uint64_t{0});
+        break;
+    case FG_PARAM_TYPE_DOUBLE:
+        readAll(0.0);
+        break;
+    default:
+        break;
+    }
+    return limits;
 }
 
 std::vector<Framegrabber::CameraControlCapability>
@@ -2476,36 +3045,82 @@ Framegrabber::cameraControlCapabilities() const
 
 bool Framegrabber::refreshCameras(const CameraTransport transport)
 {
+    if (transport != CameraTransport::CoaXPress)
+    {
+        return false;
+    }
+    std::lock_guard<std::mutex> lifecycleLock(_lifecycleMutex);
+    return refreshCamerasUnlocked(true);
+}
+
+Framegrabber::CameraDiscovery Framegrabber::lastCameraDiscovery() const
+{
     std::lock_guard<std::mutex> lock(_stateMutex);
-    if (transport != CameraTransport::CoaXPress
-        || !_cxpBoard
-        || _isRunning.load(std::memory_order_acquire))
-    {
-        return false;
-    }
+    return _lastCameraDiscovery;
+}
 
-    for (CameraEntry& camera : _cxpCameras)
+bool Framegrabber::refreshCamerasUnlocked(const bool resetDiscovery)
+{
+    // The lifecycle lock keeps _cxpBoard alive; _stateMutex is not held during the
+    // discovery wait so GUI and API state reads stay responsive.
+    SgcBoardHandle* board = nullptr;
     {
-        if (camera.handle && camera.info.connected)
+        std::lock_guard<std::mutex> lock(_stateMutex);
+        if (!_cxpBoard || _isRunning.load(std::memory_order_acquire))
         {
-            Sgc_disconnectCamera(camera.handle);
+            return false;
         }
+        board = _cxpBoard;
+        for (CameraEntry& camera : _cxpCameras)
+        {
+            if (camera.handle && camera.info.connected)
+            {
+                Sgc_disconnectCamera(camera.handle);
+            }
+        }
+        _cxpCameras.clear();
     }
-    _cxpCameras.clear();
 
-    if (Sgc_scanPorts(_cxpBoard, 0xFF, 10000, LINK_SPEED_NONE) != SGC_OK)
+    // A single process scans every physical port (mask 0xf). A repeated Sgc_scanPorts
+    // only synchronizes with the first discovery; a reset restarts it.
+    const int scanResult = Sgc_scanPortsEx(
+        board,
+        0xf,
+        kCameraDiscoveryTimeoutMilliseconds,
+        LINK_SPEED_NONE,
+        resetDiscovery ? SGC_SP_FLAG_RESET_DISCOVERY_INFOS : 0u);
+    CameraDiscovery discovery;
+    discovery.sdkResult = scanResult;
+    discovery.topologyMismatch = scanResult == ERR_SGC_TOPOLOGY_MISMATCH;
+    discovery.message = scanResult == SGC_OK
+        ? std::string{}
+        : safeString(Sgc_getErrorDescription(scanResult));
+    if (discovery.topologyMismatch)
     {
-        log("CXP camera discovery failed.", true);
+        discovery.message += " Select an applet whose camera and link layout matches the "
+                             "connected cameras; image data cannot be transferred correctly.";
+    }
+    if (scanResult != SGC_OK && !discovery.topologyMismatch)
+    {
+        log("CXP camera discovery: " + discovery.message + " (" + std::to_string(scanResult)
+                + ").",
+            true);
+        std::lock_guard<std::mutex> lock(_stateMutex);
+        _lastCameraDiscovery = std::move(discovery);
         return false;
+    }
+    if (discovery.topologyMismatch)
+    {
+        log("CXP camera discovery: " + discovery.message, true);
     }
 
     std::vector<CameraEntry> discovered;
-    const int count = Sgc_getCameraCount(_cxpBoard);
+    const int count = Sgc_getCameraCount(board);
     discovered.reserve(static_cast<std::size_t>((std::max)(0, count)));
     for (int index = 0; index < count; ++index)
     {
         SgcCameraHandle* handle = nullptr;
-        if (Sgc_getCameraByIndex(_cxpBoard, static_cast<unsigned int>(index), &handle) != SGC_OK
+        if (Sgc_getCameraByIndex(board, static_cast<unsigned int>(index), &handle) != SGC_OK
             || !handle)
         {
             continue;
@@ -2523,12 +3138,21 @@ bool Framegrabber::refreshCameras(const CameraTransport transport)
 
         unsigned int propertyType = SGC_PROPERTY_TYPE_UINT;
         unsigned int dmaIndex = (std::numeric_limits<unsigned int>::max)();
-        Sgc_getCameraPropertyWithType(
+        const int operatorResult = Sgc_getCameraPropertyWithType(
             handle,
             CAM_PROP_APPLETOPERATORINDEX,
             &dmaIndex,
             &propertyType,
             nullptr);
+        if (operatorResult != SGC_OK)
+        {
+            // Without the applet operator index the camera cannot be bound to a DMA.
+            log("CXP camera " + entry.info.displayName()
+                    + " has no applet operator index: "
+                    + safeString(Sgc_getErrorDescription(operatorResult)),
+                true);
+            continue;
+        }
         entry.info.dmaIndex = dmaIndex;
         discovered.push_back(std::move(entry));
     }
@@ -2553,7 +3177,9 @@ bool Framegrabber::refreshCameras(const CameraTransport transport)
         }
     }
 
+    std::lock_guard<std::mutex> lock(_stateMutex);
     _cxpCameras = std::move(discovered);
+    _lastCameraDiscovery = std::move(discovery);
     return allConnected;
 }
 

@@ -38,6 +38,24 @@ public:
         bool supportsCameraControl = false;
     };
 
+    /** @brief Copies one loadable applet reported by the SDK applet iterator. */
+    struct AppletInfo
+    {
+        std::string name;
+        std::string file;
+        std::string path;
+        std::string uid;
+        std::string version;
+        std::string description;
+        std::string category;
+        std::string tags;
+        int dmaCount = 0;
+        int cameraCount = 0;
+        bool active = false;
+        bool powerUp = false;
+        bool supportsCameraControl = false;
+    };
+
     explicit FramegrabberSystem(bool discoverBoardsOnCreate = true);
     ~FramegrabberSystem();
 
@@ -57,6 +75,13 @@ public:
     [[nodiscard]] AppletMetadata getAppletMetadata(
         const std::string& boardName,
         const std::string& appletPath) const;
+    /**
+     * @brief Enumerates applets that Fg_Init can load on the board.
+     * @note Uses Fg_getAppletIterator(FG_AIS_FILESYSTEM, FG_AF_IS_LOADABLE) as documented
+     *       by the Framegrabber API. Avoid calling it while an applet of the board is open.
+     */
+    [[nodiscard]] std::vector<AppletInfo> getLoadableApplets(
+        const std::string& boardName) const;
     [[nodiscard]] bool isInitialized() const noexcept;
 
     Framegrabber* addFramegrabber();
@@ -68,6 +93,10 @@ public:
     static void syslog(const std::string& message, bool warning = false);
 
 private:
+    // fglib5 library state is process-wide; every system shares one reference.
+    static bool acquireLibraries();
+    static void releaseLibraries();
+
     bool _initialized = false;
     mutable std::mutex _mutex;
     mutable std::mutex _appletDiscoveryMutex;
