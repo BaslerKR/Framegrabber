@@ -17,20 +17,23 @@ void FramegrabberControlUi::create(QWidget* owner) {
 
     _grabLiveButton = new QToolButton(owner);
     _grabLiveButton->setCheckable(true);
-    // The glyph names the current state: paused while stopped, live while grabbing.
+    // Always show the next acquisition command, including during hover.
     QIcon grabIcon;
-    grabIcon.addFile(
-        QStringLiteral(":/Resources/icon/pause-48.png"),
-        QSize(),
-        QIcon::Normal,
-        QIcon::Off);
     grabIcon.addFile(
         QStringLiteral(":/Resources/icon/cameras-48.png"),
         QSize(),
         QIcon::Normal,
+        QIcon::Off);
+    grabIcon.addFile(
+        QStringLiteral(":/Resources/icon/stop-48.png"),
+        QSize(),
+        QIcon::Normal,
         QIcon::On);
+    _grabLiveButton->setProperty("iconStateRole", "action");
     _grabLiveButton->setIcon(grabIcon);
-    _grabLiveButton->setToolTip(QCoreApplication::translate("QFramegrabberWidget", "Start or stop live acquisition"));
+    QObject::connect(_grabLiveButton, &QToolButton::toggled, owner, [this] { updateLiveAction(); });
+    updateLiveAction();
+
 
     auto* selectorLayout = new QHBoxLayout;
     selectorLayout->setObjectName(QStringLiteral("DeviceSelectorLayout"));
@@ -135,4 +138,13 @@ QWidget* FramegrabberControlUi::createSetupTab(QWidget* owner) {
 
     return page;
 
+}
+
+void FramegrabberControlUi::updateLiveAction()
+{
+    const QString command = _grabLiveButton->isChecked()
+        ? QCoreApplication::translate("QFramegrabberWidget", "Stop live acquisition")
+        : QCoreApplication::translate("QFramegrabberWidget", "Start live acquisition");
+    _grabLiveButton->setToolTip(command);
+    _grabLiveButton->setAccessibleName(command);
 }

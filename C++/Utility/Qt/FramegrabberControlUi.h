@@ -8,6 +8,8 @@ class QLineEdit; class QTabWidget; class OneGenFeatureTree;
 struct FramegrabberControlUi {
     /** @brief Creates the same controls used by the runtime widget. */
     void create(QWidget* owner);
+    /** @brief Synchronizes the next command after observed or local acquisition state changes. */
+    void updateLiveAction();
     QComboBox* _boardCombo = nullptr;
     QToolButton* _grabOneButton = nullptr;
     QToolButton* _grabLiveButton = nullptr;

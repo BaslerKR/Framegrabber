@@ -1063,7 +1063,7 @@ void QFramegrabberWidget::updateGrabState(const bool grabbing)
     }
     {
         QSignalBlocker blocker(_grabLiveButton);
-        _grabLiveButton->setChecked(grabbing);
+        _grabLiveButton->setChecked(grabbing); updateLiveAction();
     }
     for (const auto& page : _cameraPages)
     {

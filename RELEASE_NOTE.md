@@ -10,7 +10,9 @@
 
 ## Unreleased
 
-- The Grab Live icon names the current state (`pause` while stopped, `cameras` while live); the host theme previews the other state on hover. Commands, tooltips and checked state are unchanged.
+- Show the next Live grab command with cameras/stop artwork in all pointer and focus states, and keep its tooltip and accessible name synchronized with acquisition state.
+
+
 - Raise the DMA buffer count to at least 2; with one buffer every copied frame was discarded as overwritten, so Live delivered nothing and Single timed out.
 - Report the SDK result of rejected applet commands instead of `FG_OK`; `executeAppletCommandById()` returns it through an optional output and reports `FG_INVALID_PARAMETER` for unavailable or non-integral command types.
 - Route missing-applet selection through the consumer `FileDialogPresenter` used by Load and Save, and remove the separate missing-applet resolver. Without a presenter the widget uses Qt's non-native file dialog.
