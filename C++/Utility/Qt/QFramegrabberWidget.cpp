@@ -844,28 +844,30 @@ void QFramegrabberWidget::startConfigurationLoad(const QString& configurationPat
                 boardName);
             return true;
         },
-        [this, configurationPath, configuredAppletPath](bool)
+        [guard = QPointer<QFramegrabberWidget>(this), configurationPath, configuredAppletPath](bool)
         {
+            if (!guard || guard->_shuttingDown || !guard->_framegrabber) return;
             const QString appletPath = QString::fromStdString(*configuredAppletPath);
             if (!appletPath.isEmpty() && QFileInfo(appletPath).isFile())
             {
                 // The SDK initializes from the MCF itself (Fg_InitConfig).
-                startConfigurationLoadWithApplet(configurationPath, QString());
+                guard->startConfigurationLoadWithApplet(configurationPath, QString());
                 return;
             }
 
-            logMessage(tr("The configured applet is unavailable."), true);
-            const QString selectedAppletPath = presentFileDialog(
+            guard->logMessage(tr("The configured applet is unavailable."), true);
+            const QString selectedAppletPath = guard->presentFileDialog(
                 false,
                 tr("Locate frame grabber applet"),
                 QFileInfo(configurationPath).absolutePath(),
                 tr("Frame Grabber Applet (*.hap *.dll *.so);;All Files (*)"));
+            if (!guard || guard->_shuttingDown || !guard->_framegrabber) return;
             if (selectedAppletPath.isEmpty())
             {
-                logMessage(tr("Configuration loading cancelled."));
+                guard->logMessage(tr("Configuration loading cancelled."));
                 return;
             }
-            startConfigurationLoadWithApplet(configurationPath, selectedAppletPath);
+            guard->startConfigurationLoadWithApplet(configurationPath, selectedAppletPath);
         });
 }
 

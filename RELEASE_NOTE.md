@@ -10,6 +10,8 @@
 
 ## Unreleased
 
+- Stop the missing-applet flow when shutdown begins while its picker is open.
+
 - Show the next Live grab command with cameras/stop artwork in all pointer and focus states, and keep its tooltip and accessible name synchronized with acquisition state.
 
 
