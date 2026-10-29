@@ -17,14 +17,15 @@ void FramegrabberControlUi::create(QWidget* owner) {
 
     _grabLiveButton = new QToolButton(owner);
     _grabLiveButton->setCheckable(true);
+    // The glyph names the current state: paused while stopped, live while grabbing.
     QIcon grabIcon;
     grabIcon.addFile(
-        QStringLiteral(":/Resources/icon/cameras-48.png"),
+        QStringLiteral(":/Resources/icon/pause-48.png"),
         QSize(),
         QIcon::Normal,
         QIcon::Off);
     grabIcon.addFile(
-        QStringLiteral(":/Resources/icon/pause-48.png"),
+        QStringLiteral(":/Resources/icon/cameras-48.png"),
         QSize(),
         QIcon::Normal,
         QIcon::On);
