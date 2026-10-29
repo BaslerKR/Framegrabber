@@ -66,7 +66,7 @@ const auto callbackId = board->registerGrabCallback(
 
 Each accepted SDK frame is copied once into a leased pool buffer because DMA memory is owned and reused by the SDK. The pool is coordinated with a mutex and condition variable; it is not lock-free. Copying an `Image` retains its `shared_ptr` storage and can keep a pool slot occupied, so bound retention in consumers.
 
-Acquisition uses `Fg_AcquireEx(..., ACQ_STANDARD, ...)` with `setDMABufferCount()` frame buffers (default 4) and waits with `Fg_getLastPicNumberBlockingEx`. In this model the driver never blocks a buffer, so the worker delivers the newest completed frame and handles backpressure as follows:
+Acquisition uses `Fg_AcquireEx(..., ACQ_STANDARD, ...)` with `setDMABufferCount()` frame buffers (default 4, minimum 2; smaller values are raised to 2) and waits with `Fg_getLastPicNumberBlockingEx`. In this model the driver never blocks a buffer, so the worker delivers the newest completed frame and handles backpressure as follows:
 
 - Frames that completed while the previous frame was still being processed are counted as `skipped`.
 - After each copy the worker reads `NUMBER_OF_GRABBED_IMAGES`. The buffer of frame `n` is reused by frame `n + bufferCount`. If that transfer may have started (`grabbed - n >= bufferCount - 1`), the copy is dropped and counted as `overwritten`, because it can contain data from the later frame.

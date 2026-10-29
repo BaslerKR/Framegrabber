@@ -361,6 +361,7 @@ public:
     [[nodiscard]] std::string getBoardAppletPath(
         const std::string& boardName = "") const;
 
+    /** @brief Sets the DMA frame-buffer count for the next acquisition; values below 2 are raised to 2. */
     void setDMABufferCount(std::size_t count);
     [[nodiscard]] std::size_t dmaBufferCount() const;
 
@@ -388,7 +389,13 @@ public:
                                 bool verifyReadBack = true,
                                 int* sdkResult = nullptr);
     bool executeAppletCommand(unsigned int dmaIndex, const std::string& name);
-    bool executeAppletCommandById(unsigned int dmaIndex, std::int64_t parameterId);
+    /**
+     * @brief Executes an integral applet command parameter by writing 1.
+     * @param sdkResult Optional output of the SDK result; FG_INVALID_PARAMETER when the
+     *        parameter type is unavailable or not integral.
+     */
+    bool executeAppletCommandById(unsigned int dmaIndex, std::int64_t parameterId,
+                                  int* sdkResult = nullptr);
     /**
      * @brief Returns a value of the parameter's SDK type (FG_PARAM_TYPE_*) without reading it.
      * @note Required for write-only parameters and commands.

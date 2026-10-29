@@ -2366,7 +2366,8 @@ void Framegrabber::setDMABufferCount(const std::size_t count)
     std::lock_guard<std::mutex> lock(_stateMutex);
     if (!_isRunning.load(std::memory_order_acquire))
     {
-        _dmaBufferCount = std::max<std::size_t>(1, count);
+        // A frame copy is valid only until the next transfer completes; one buffer would drop every frame.
+        _dmaBufferCount = (std::max<std::size_t>)(2, count);
     }
 }
 
@@ -2919,13 +2920,15 @@ bool Framegrabber::executeAppletCommand(const unsigned int dmaIndex, const std::
 
 bool Framegrabber::executeAppletCommandById(
     const unsigned int dmaIndex,
-    const std::int64_t parameterId)
+    const std::int64_t parameterId,
+    int* sdkResult)
 {
     // Applet commands are often write-only; build the value from the declared SDK type
     // instead of reading the parameter first.
     std::optional<ParameterValue> command = appletParameterPrototype(parameterId, dmaIndex);
     if (!command)
     {
+        if (sdkResult) *sdkResult = FG_INVALID_PARAMETER;
         return false;
     }
     bool integral = false;
@@ -2940,7 +2943,12 @@ bool Framegrabber::executeAppletCommandById(
             }
         },
         *command);
-    return integral && setAppletParameterById(parameterId, dmaIndex, *command, false, false);
+    if (!integral)
+    {
+        if (sdkResult) *sdkResult = FG_INVALID_PARAMETER;
+        return false;
+    }
+    return setAppletParameterById(parameterId, dmaIndex, *command, false, false, sdkResult);
 }
 
 std::optional<Framegrabber::ParameterValue> Framegrabber::appletParameterPrototype(

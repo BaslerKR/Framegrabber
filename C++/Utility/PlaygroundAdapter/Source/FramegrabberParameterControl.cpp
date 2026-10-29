@@ -421,7 +421,7 @@ DeviceParameterResult FramegrabberSourceController::requestParameter(
                         dispatched = true;
                         int sdkResult = FG_OK;
                         const bool applied = current.kind == Kind::Command
-                            ? _framegrabber->executeAppletCommandById(dma, node->parameterId)
+                            ? _framegrabber->executeAppletCommandById(dma, node->parameterId, &sdkResult)
                             : _framegrabber->setAppletParameterById(
                                   node->parameterId, dma, sdkValue, true, false, &sdkResult);
                         result.effect = applied ? DeviceParameterEffect::Applied : DeviceParameterEffect::None;
