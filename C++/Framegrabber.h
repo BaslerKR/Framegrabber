@@ -12,6 +12,8 @@
 #include "basler_fg.h"
 #include "siso_genicam.h"
 
+#include "FramegrabberSystem.h"
+
 #include <atomic>
 #include <condition_variable>
 #include <cstddef>
@@ -19,13 +21,12 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <unordered_map>
 #include <variant>
 #include <vector>
-
-class FramegrabberSystem;
 
 class Framegrabber
 {
@@ -33,11 +34,49 @@ class Framegrabber
 
 public:
     using CallbackId = std::size_t;
+    using AppletInfo = FramegrabberSystem::AppletInfo;
 
+    /**
+     * @brief Identifies the state transition reported to status callbacks.
+     * @note ConfigurationStatus reports applet parameters replaced without reopening the
+     *       board (MCF load). ControlStatus reports the shared lifecycle gate; `on` is busy.
+     */
     enum Status
     {
         GrabbingStatus,
-        ConnectionStatus
+        ConnectionStatus,
+        ConfigurationStatus,
+        ControlStatus
+    };
+
+    /** @brief Copies the SDK result of the last failed lifecycle operation. */
+    struct OperationError
+    {
+        int code = 0;
+        std::string message;
+    };
+
+    /**
+     * @brief Counts per-DMA outcomes of the current or most recent acquisition run.
+     * @note `skipped` frames were never read because a newer frame was already complete
+     *       (ACQ_STANDARD delivers the newest frame). `overwritten` frames were copied but
+     *       dropped because the driver may have reused their buffer during the copy.
+     */
+    struct ChannelStatistics
+    {
+        unsigned int dmaIndex = 0;
+        std::uint64_t delivered = 0;
+        std::uint64_t skipped = 0;
+        std::uint64_t overwritten = 0;
+        std::uint64_t rejected = 0;
+    };
+
+    /** @brief Reports the outcome of the last CoaXPress discovery. */
+    struct CameraDiscovery
+    {
+        int sdkResult = 0;
+        std::string message;
+        bool topologyMismatch = false;
     };
 
     enum class PixelFormat
@@ -250,10 +289,39 @@ public:
     void setConfigurationPath(std::string path);
     [[nodiscard]] std::string configurationPath() const;
 
-    bool loadApplet(const std::string& path, const std::string& boardName = "");
+    /**
+     * @brief Re-enumerates the board's loadable applets (FG_AIS_FILESYSTEM, FG_AF_IS_LOADABLE).
+     * @note Enumeration runs only while this instance has no open applet; otherwise the
+     *       cached catalog is kept and false is returned.
+     */
+    bool refreshAppletCatalog(const std::string& boardName = "");
+    /** @brief Returns the last enumerated catalog for the board it was refreshed for. */
+    [[nodiscard]] std::vector<AppletInfo> appletCatalog() const;
+    /**
+     * @brief Resolves an applet file path, catalog path, applet name or file name.
+     * @returns The absolute applet path, or an empty string when the reference is unknown
+     *          or ambiguous.
+     */
+    [[nodiscard]] std::string resolveAppletReference(const std::string& reference) const;
+
+    /**
+     * @brief Initializes the board with an applet (Fg_Init), replacing the loaded applet.
+     * @param reference Applet path, or an applet name/file from the catalog.
+     * @note Pre-validation failures leave the current applet untouched. When Fg_Init fails
+     *       after the previous applet was released, the previous applet and configuration
+     *       are restored. Acquisition must be stopped first.
+     */
+    bool loadApplet(const std::string& reference, const std::string& boardName = "");
     [[nodiscard]] std::string appletPathFromConfiguration(
         const std::string& configurationPath,
         const std::string& boardName = "") const;
+    /**
+     * @brief Applies an MCF configuration file.
+     * @param appletPath Empty to let the SDK initialize from the MCF (Fg_InitConfig), or an
+     *        applet that replaces the MCF's applet reference (Fg_Init + Fg_loadConfig).
+     * @note When the MCF references the applet that is already loaded, only Fg_loadConfig
+     *       runs, so the CXP control board is kept.
+     */
     bool loadAppletConfiguration(const std::string& appletPath,
                                  const std::string& configurationPath,
                                  const std::string& boardName = "");
@@ -263,9 +331,21 @@ public:
     [[nodiscard]] std::string getConnectedFramegrabberName() const;
     [[nodiscard]] std::string getLoadedAppletName() const;
     [[nodiscard]] std::string getLoadedAppletVersion() const;
+    /** @brief Increments each time an applet is opened; identifies one open generation. */
+    [[nodiscard]] std::uint64_t connectionGeneration() const;
+    /** @brief Returns the SDK error of the last failed lifecycle operation, if any. */
+    [[nodiscard]] OperationError lastError() const;
 
     bool loadConfiguration(const std::string& path);
     bool saveConfiguration(const std::string& path);
+
+    /**
+     * @brief Serializes lifecycle commands from every control surface (GUI and API).
+     * @returns false when another lifecycle command already holds the gate.
+     */
+    bool tryBeginControl();
+    void endControl();
+    [[nodiscard]] bool controlBusy() const noexcept;
 
     void grab(std::size_t frames = 0);
     void stop();
@@ -274,8 +354,10 @@ public:
 
     [[nodiscard]] bool isGrabbing() const noexcept;
     [[nodiscard]] int getDMACount() const;
+    [[nodiscard]] std::vector<ChannelStatistics> acquisitionStatistics() const;
     [[nodiscard]] std::vector<std::string> getUpdatedFramegrabberList() const;
     [[nodiscard]] std::vector<std::string> getCachedFramegrabberList() const;
+    [[nodiscard]] std::vector<FramegrabberSystem::BoardInfo> getCachedBoardInfo() const;
     [[nodiscard]] std::string getBoardAppletPath(
         const std::string& boardName = "") const;
 
@@ -298,16 +380,38 @@ public:
                             const ParameterValue& value,
                             bool silent = false,
                             bool verifyReadBack = true);
+    /** @param sdkResult Optional output of the Fg_setParameterWithType result. */
     bool setAppletParameterById(std::int64_t parameterId,
                                 unsigned int dmaIndex,
                                 const ParameterValue& value,
                                 bool silent = false,
-                                bool verifyReadBack = true);
+                                bool verifyReadBack = true,
+                                int* sdkResult = nullptr);
     bool executeAppletCommand(unsigned int dmaIndex, const std::string& name);
     bool executeAppletCommandById(unsigned int dmaIndex, std::int64_t parameterId);
+    /**
+     * @brief Returns a value of the parameter's SDK type (FG_PARAM_TYPE_*) without reading it.
+     * @note Required for write-only parameters and commands.
+     */
+    [[nodiscard]] std::optional<ParameterValue> appletParameterPrototype(
+        std::int64_t parameterId,
+        unsigned int dmaIndex) const;
+
+    /** @brief Copies PROP_ID_MIN, PROP_ID_MAX and PROP_ID_STEP where the SDK reports them. */
+    struct AppletParameterLimits
+    {
+        std::optional<ParameterValue> minimum;
+        std::optional<ParameterValue> maximum;
+        std::optional<ParameterValue> increment;
+    };
+    [[nodiscard]] AppletParameterLimits getAppletParameterLimits(
+        std::int64_t parameterId,
+        unsigned int dmaIndex) const;
 
     [[nodiscard]] std::vector<CameraControlCapability> cameraControlCapabilities() const;
+    /** @brief Restarts CXP discovery (SGC_SP_FLAG_RESET_DISCOVERY_INFOS) and reconnects. */
     bool refreshCameras(CameraTransport transport);
+    [[nodiscard]] CameraDiscovery lastCameraDiscovery() const;
     [[nodiscard]] std::vector<CameraInfo> getCachedCameraList(CameraTransport transport) const;
     bool connectCamera(CameraTransport transport, unsigned int dmaIndex);
     void disconnectCamera(CameraTransport transport, unsigned int dmaIndex);
@@ -349,7 +453,13 @@ private:
     std::size_t _dmaBufferCount = 4;
     std::vector<std::unique_ptr<DmaChannel>> _channels;
     std::vector<CameraEntry> _cxpCameras;
+    std::vector<AppletInfo> _appletCatalog;
+    std::uint64_t _connectionGeneration = 0;
+    OperationError _lastError;
+    CameraDiscovery _lastCameraDiscovery;
+    std::vector<ChannelStatistics> _lastStatistics;
 
+    std::atomic<bool> _controlBusy{false};
     std::atomic<bool> _isRunning{false};
     std::atomic<bool> _startingChannels{false};
     std::atomic<std::uint64_t> _frameSeq{0};
@@ -374,15 +484,27 @@ private:
     static PixelFormat toPixelFormat(int sdkFormat);
     static int bitsPerPixel(PixelFormat pixelFormat);
 
-    bool loadAppletUnlocked(const std::string& path, const std::string& boardName);
+    struct PreviousApplet;
+
+    bool loadAppletUnlocked(const std::string& reference, const std::string& boardName);
     bool openUnlocked(const std::string& boardName);
     bool loadConfigurationUnlocked(const std::string& path);
-    bool openResolvedBoard(const std::string& boardName,
-                           unsigned int boardIndex,
-                           const std::string& appletPath,
-                           const std::string& discoveredAppletVersion,
-                           bool initializeCameraControl);
+    bool refreshAppletCatalogUnlocked(const FramegrabberSystem::BoardInfo& board);
+    [[nodiscard]] AppletInfo catalogEntry(const std::string& appletPath) const;
+    [[nodiscard]] std::string findCatalogApplet(const std::string& reference) const;
+    [[nodiscard]] PreviousApplet capturePreviousApplet() const;
+    void restorePreviousApplet(const PreviousApplet& previous);
+    Fg_Struct* initializeBoard(const FramegrabberSystem::BoardInfo& board,
+                               const std::string& appletPath);
+    bool adoptBoard(Fg_Struct* handle,
+                    const FramegrabberSystem::BoardInfo& board,
+                    const std::string& appletPath,
+                    const std::string& configurationPath);
     bool closeUnlocked(bool notifyConnectionStatus);
+    bool refreshCamerasUnlocked(bool resetDiscovery);
+    void setLastError(int code, std::string message);
+    void setLastSdkError(const std::string& context, int code);
+    void clearLastError();
     void requestStopChannels();
     bool joinStoppedChannels();
     void releaseHandles();

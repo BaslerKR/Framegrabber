@@ -211,6 +211,7 @@ if(FRAMEGRABBER_BUILD_PLAYGROUND_PLUGIN)
         Utility/PlaygroundAdapter/Plugin/FramegrabberPlugin.cpp
         Utility/PlaygroundAdapter/Source/FramegrabberSourceController.h
         Utility/PlaygroundAdapter/Source/FramegrabberSourceController.cpp
+        Utility/PlaygroundAdapter/Source/FramegrabberParameterControl.cpp
     )
     set_target_properties(FramegrabberPlugin PROPERTIES
         PREFIX ""

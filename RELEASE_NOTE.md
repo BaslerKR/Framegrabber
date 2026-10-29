@@ -9,11 +9,22 @@
 - Publish the independently built device package with installed SDK validation.
 
 ## Unreleased
-- Route applet/configuration Load, Save and missing-applet selection through one consumer `FileDialogPresenter`, replacing the missing-applet resolver. The Playground plugin supplies themed pickers; the standalone widget uses Qt's non-native file dialog. Stop the missing-applet flow when shutdown begins while its picker is open.
+- Route missing-applet selection through the consumer `FileDialogPresenter` used by Load and Save, and remove the separate missing-applet resolver. Without a presenter the widget uses Qt's non-native file dialog.
 
 - Declare semantic layout, device-panel and action-density scopes through Qt properties; preserve independent plain-Qt builds without a theme dependency.
 
 - Share the SDK-independent Qt control composition between the runtime widget and isolated presentation consumers.
+
+- Enumerate loadable applets with the documented SDK iterator (`FG_AIS_FILESYSTEM`, `FG_AF_IS_LOADABLE`). The Setup tab can select, refresh, load and release them, and the session starts with the board's active applet.
+- Load applets by unique name or path. Validation failures leave the loaded applet untouched, and SDK error codes and descriptions are reported.
+- Initialize from MCF files with `Fg_InitConfig`. When the MCF applet is already loaded, use `Fg_loadConfig`.
+- Share one process-wide `Fg_InitLibraries` reference, so discovery no longer releases the SDK under an open session.
+- Restart CXP discovery on refresh (`SGC_SP_FLAG_RESET_DISCOVERY_INFOS`), scan all four ports, report applet/camera topology mismatches, and skip cameras without an applet operator index. A missing camera no longer fails configuration loading.
+- Stop the CXP camera before the DMA. End a DMA worker when the driver ends its acquisition, instead of retrying. Count skipped, overwritten and rejected frames, and drop copies whose `ACQ_STANDARD` buffer may have been reused during the copy.
+- Read `FG_NR_OF_DMAS` per applet process, read string parameters without a fixed buffer, and execute write-only applet commands.
+- Declare `device.*` lifecycle tools and `IDeviceParameterControl` applet parameters (`Applet:<dma>`). They share the widget's control gate.
+- Let consumers supply themed file dialogs to the control widget.
+- Require Core 0.6.0, the first Core that provides the tool and parameter interfaces.
 
 ## v0.2.0 (2026-10-08)
 

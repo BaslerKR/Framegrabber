@@ -39,25 +39,21 @@ class QFramegrabberWidget final : public QWidget, protected FramegrabberControlU
 
 public:
     /**
-     * @brief Consumer-replaceable file pickers for applet and configuration files.
+     * @brief Presents an open or save file dialog; returns an empty path when cancelled.
      *
-     * Each callback runs on the GUI thread and returns an empty path when cancelled. An
-     * empty callback uses Qt's non-native file dialog, so the widget needs no theme.
+     * Load, Save and missing-applet selection all use it on the GUI thread. Without a
+     * presenter the widget uses Qt's non-native file dialog and needs no theme.
      */
-    struct FileDialogPresenter
-    {
-        std::function<QString(QWidget* parent, const QString& title,
-                              const QString& directory, const QString& filter)> openFileName;
-        /** Confirms replacement of an existing @p filePath before returning it. */
-        std::function<QString(QWidget* parent, const QString& title,
-                              const QString& filePath, const QString& filter)> saveFileName;
-    };
+    using FileDialogPresenter = std::function<QString(bool save,
+                                                      const QString& title,
+                                                      const QString& directory,
+                                                      const QString& filter)>;
 
     explicit QFramegrabberWidget(QWidget* parent = nullptr, Framegrabber* framegrabber = nullptr);
     ~QFramegrabberWidget() override;
 
     void prepareForShutdown();
-    /** @brief Routes Load, Save and missing-applet selection through the consumer presenter. */
+    /** @brief Replaces the plain Qt file dialog, for example with a consumer-themed one. */
     void setFileDialogPresenter(FileDialogPresenter presenter);
 
 private:
@@ -93,6 +89,10 @@ private:
     QSet<QThread*> _parameterThreads;
     bool _shuttingDown = false;
     bool _operationActive = false;
+    /** @brief Another control surface (for example an API call) holds the lifecycle gate. */
+    bool _externalControl = false;
+    /** @brief Connection generation the device views were last built for. */
+    std::uint64_t _observedGeneration = 0;
     int _pendingParameterWrites = 0;
     bool _grabbing = false;
     bool _updatingDeviceUi = false;
@@ -105,19 +105,32 @@ private:
 
 
     void buildUi();
-    QString openFileName(const QString& title, const QString& directory, const QString& filter);
-    QString saveFileName(const QString& title, const QString& filePath, const QString& filter);
     std::unique_ptr<CameraPage> createCameraPage(
         const Framegrabber::CameraControlCapability& capability);
     void registerCallbacks();
 
+    /**
+     * @brief Runs one lifecycle command on a worker while holding the shared control gate.
+     * @returns false without side effects when another surface owns the gate.
+     */
+    bool startControlOperation(const QString& message,
+                               std::function<bool()> work,
+                               std::function<void(bool)> finished);
+    QString presentFileDialog(bool save,
+                              const QString& title,
+                              const QString& directory,
+                              const QString& filter);
     void startAutomaticAppletLoad();
+    void startAppletCatalogRefresh();
     void startAppletLoad(const QString& path);
+    void startClose();
     void startConfigurationLoad(const QString& configurationPath);
     void startConfigurationLoadWithApplet(const QString& configurationPath,
                                           const QString& appletPath);
     void startConfigurationSave(const QString& configurationPath);
     void startCameraRefresh(Framegrabber::CameraTransport transport);
+    void refreshAppletCatalogSelector();
+    void reportLastError(const QString& fallback);
     void setOperationActive(bool active);
     void applyConnectionState(bool opened);
     void updateGrabState(bool grabbing);

@@ -138,15 +138,12 @@ public:
     {
         if (!_widget) {
             _widget = new QFramegrabberWidget(parent, _framegrabber);
-            // The host installs Resources; plugin pickers use its shell while the widget stays theme-free.
-            QFramegrabberWidget::FileDialogPresenter presenter;
-            presenter.openFileName = [](QWidget* owner, const QString& title, const QString& directory, const QString& filter) {
-                return ThemedFileDialog::getOpenFileName(owner, title, directory, filter);
-            };
-            presenter.saveFileName = [](QWidget* owner, const QString& title, const QString& filePath, const QString& filter) {
-                return ThemedFileDialog::getSaveFileName(owner, title, filePath, filter);
-            };
-            _widget->setFileDialogPresenter(std::move(presenter));
+            // Consumer-owned file dialogs keep the host chrome; the widget has no Resources dependency.
+            _widget->setFileDialogPresenter([parent](bool save, const QString& title,
+                                                     const QString& directory, const QString& filter) {
+                return save ? ThemedFileDialog::getSaveFileName(parent, title, directory, filter)
+                            : ThemedFileDialog::getOpenFileName(parent, title, directory, filter);
+            });
         }
         return {{QStringLiteral("device-controls"), QStringLiteral("Device Controls"),
                  Qt::LeftDockWidgetArea, _widget, true}};
