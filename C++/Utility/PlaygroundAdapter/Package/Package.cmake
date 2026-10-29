@@ -3,7 +3,7 @@
 # Host schema, ABI, and icon names come from DevicePluginPackage.h.
 # Repeat NAME=value to declare multiple environment paths for one variable.
 set(PLAYGROUND_PLUGIN_ID "framegrabber")
-set(PLAYGROUND_PLUGIN_VERSION "0.2.1")
+set(PLAYGROUND_PLUGIN_VERSION "0.2.2")
 # IToolProvider/1.0 and IDeviceParameterControl/1.0 first ship in Core v0.6.0.
 set(PLAYGROUND_PLUGIN_MINIMUM_CORE_VERSION "0.6.0")
 set(PLAYGROUND_PLUGIN_DISPLAY_NAME "Frame Grabber")
