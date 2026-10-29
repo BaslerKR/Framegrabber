@@ -275,9 +275,41 @@ void QFramegrabberWidget::prepareForShutdown()
     _framegrabber = nullptr;
 }
 
-void QFramegrabberWidget::setMissingAppletResolver(MissingAppletResolver resolver)
+void QFramegrabberWidget::setFileDialogPresenter(FileDialogPresenter presenter)
 {
-    _missingAppletResolver = std::move(resolver);
+    _fileDialogPresenter = std::move(presenter);
+}
+
+QString QFramegrabberWidget::openFileName(const QString& title,
+                                          const QString& directory,
+                                          const QString& filter)
+{
+    if (_fileDialogPresenter.openFileName)
+    {
+        return _fileDialogPresenter.openFileName(this, title, directory, filter);
+    }
+    // Standalone plain-Qt fallback: no consumer presenter is installed.
+    QFileDialog dialog(this, title, directory, filter);
+    dialog.setOption(QFileDialog::DontUseNativeDialog, true);
+    dialog.setFileMode(QFileDialog::ExistingFile);
+    dialog.setAcceptMode(QFileDialog::AcceptOpen);
+    return dialog.exec() == QDialog::Accepted ? dialog.selectedFiles().value(0) : QString{};
+}
+
+QString QFramegrabberWidget::saveFileName(const QString& title,
+                                          const QString& filePath,
+                                          const QString& filter)
+{
+    if (_fileDialogPresenter.saveFileName)
+    {
+        return _fileDialogPresenter.saveFileName(this, title, filePath, filter);
+    }
+    // Standalone plain-Qt fallback: no consumer presenter is installed.
+    QFileDialog dialog(this, title, filePath, filter);
+    dialog.setOption(QFileDialog::DontUseNativeDialog, true);
+    dialog.setFileMode(QFileDialog::AnyFile);
+    dialog.setAcceptMode(QFileDialog::AcceptSave);
+    return dialog.exec() == QDialog::Accepted ? dialog.selectedFiles().value(0) : QString{};
 }
 
 void QFramegrabberWidget::buildUi()
@@ -285,8 +317,7 @@ void QFramegrabberWidget::buildUi()
     FramegrabberControlUi::create(this);
     connect(_loadButton, &QToolButton::clicked, this, [this]
     {
-        const QString path = QFileDialog::getOpenFileName(
-            this,
+        const QString path = openFileName(
             tr("Load frame grabber applet or configuration"),
             _appletPathEdit->text(),
             tr("Frame Grabber Configuration (*.mcf);;Frame Grabber Applet (*.hap *.dll *.so);;All Files (*)"));
@@ -318,8 +349,7 @@ void QFramegrabberWidget::buildUi()
                 : QDir::homePath();
             suggestedPath = QDir(directory).filePath(QStringLiteral("configuration.mcf"));
         }
-        QString path = QFileDialog::getSaveFileName(
-            this,
+        QString path = saveFileName(
             tr("Save frame grabber configuration"),
             suggestedPath,
             tr("Frame Grabber Configuration (*.mcf)"));
@@ -666,18 +696,14 @@ void QFramegrabberWidget::startConfigurationLoad(const QString& configurationPat
         }
 
         guard->logMessage(tr("The configured applet is unavailable."), true);
-        QString selectedAppletPath;
-        if (guard->_missingAppletResolver)
+        const QString selectedAppletPath = guard->openFileName(
+            guard->tr("Locate frame grabber applet"),
+            QFileInfo(configurationPath).absolutePath(),
+            guard->tr("Frame Grabber Applet (*.hap *.dll *.so);;All Files (*)"));
+        // The modal picker runs a nested event loop; shutdown may have started meanwhile.
+        if (!guard || guard->_shuttingDown || !guard->_framegrabber)
         {
-            selectedAppletPath = guard->_missingAppletResolver(configurationPath, appletPath);
-        }
-        else
-        {
-            selectedAppletPath = QFileDialog::getOpenFileName(
-                guard,
-                guard->tr("Locate frame grabber applet"),
-                QFileInfo(configurationPath).absolutePath(),
-                guard->tr("Frame Grabber Applet (*.hap *.dll *.so);;All Files (*)"));
+            return;
         }
         if (selectedAppletPath.isEmpty())
         {

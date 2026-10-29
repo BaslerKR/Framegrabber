@@ -9,6 +9,7 @@
 - Publish the independently built device package with installed SDK validation.
 
 ## Unreleased
+- Route applet/configuration Load, Save and missing-applet selection through one consumer `FileDialogPresenter`, replacing the missing-applet resolver. The Playground plugin supplies themed pickers; the standalone widget uses Qt's non-native file dialog. Stop the missing-applet flow when shutdown begins while its picker is open.
 
 - Declare semantic layout, device-panel and action-density scopes through Qt properties; preserve independent plain-Qt builds without a theme dependency.
 

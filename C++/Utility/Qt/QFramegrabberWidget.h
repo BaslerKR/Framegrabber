@@ -38,14 +38,27 @@ class QFramegrabberWidget final : public QWidget, protected FramegrabberControlU
     Q_OBJECT
 
 public:
-    using MissingAppletResolver = std::function<QString(const QString& configurationPath,
-                                                        const QString& configuredAppletPath)>;
+    /**
+     * @brief Consumer-replaceable file pickers for applet and configuration files.
+     *
+     * Each callback runs on the GUI thread and returns an empty path when cancelled. An
+     * empty callback uses Qt's non-native file dialog, so the widget needs no theme.
+     */
+    struct FileDialogPresenter
+    {
+        std::function<QString(QWidget* parent, const QString& title,
+                              const QString& directory, const QString& filter)> openFileName;
+        /** Confirms replacement of an existing @p filePath before returning it. */
+        std::function<QString(QWidget* parent, const QString& title,
+                              const QString& filePath, const QString& filter)> saveFileName;
+    };
 
     explicit QFramegrabberWidget(QWidget* parent = nullptr, Framegrabber* framegrabber = nullptr);
     ~QFramegrabberWidget() override;
 
     void prepareForShutdown();
-    void setMissingAppletResolver(MissingAppletResolver resolver);
+    /** @brief Routes Load, Save and missing-applet selection through the consumer presenter. */
+    void setFileDialogPresenter(FileDialogPresenter presenter);
 
 private:
     enum class TreeSource
@@ -83,7 +96,7 @@ private:
     int _pendingParameterWrites = 0;
     bool _grabbing = false;
     bool _updatingDeviceUi = false;
-    MissingAppletResolver _missingAppletResolver;
+    FileDialogPresenter _fileDialogPresenter;
 
 
 
@@ -92,6 +105,8 @@ private:
 
 
     void buildUi();
+    QString openFileName(const QString& title, const QString& directory, const QString& filter);
+    QString saveFileName(const QString& title, const QString& filePath, const QString& filter);
     std::unique_ptr<CameraPage> createCameraPage(
         const Framegrabber::CameraControlCapability& capability);
     void registerCallbacks();

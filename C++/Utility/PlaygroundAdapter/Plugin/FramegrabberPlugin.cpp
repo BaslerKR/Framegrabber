@@ -6,8 +6,6 @@
 #include "Utility/Qt/QFramegrabberWidget.h"
 #include "Chrome/ThemedFileDialog.h"
 
-#include <QFileDialog>
-#include <QFileInfo>
 #include <QPointer>
 
 #include <memory>
@@ -140,13 +138,15 @@ public:
     {
         if (!_widget) {
             _widget = new QFramegrabberWidget(parent, _framegrabber);
-            _widget->setMissingAppletResolver([parent](const QString& configurationPath, const QString&) {
-                return ThemedFileDialog::getOpenFileName(
-                    parent,
-                    QObject::tr("Locate Frame Grabber Applet"),
-                    QFileInfo(configurationPath).absolutePath(),
-                    QObject::tr("Frame Grabber Applet (*.hap *.dll *.so);;All Files (*)"));
-            });
+            // The host installs Resources; plugin pickers use its shell while the widget stays theme-free.
+            QFramegrabberWidget::FileDialogPresenter presenter;
+            presenter.openFileName = [](QWidget* owner, const QString& title, const QString& directory, const QString& filter) {
+                return ThemedFileDialog::getOpenFileName(owner, title, directory, filter);
+            };
+            presenter.saveFileName = [](QWidget* owner, const QString& title, const QString& filePath, const QString& filter) {
+                return ThemedFileDialog::getSaveFileName(owner, title, filePath, filter);
+            };
+            _widget->setFileDialogPresenter(std::move(presenter));
         }
         return {{QStringLiteral("device-controls"), QStringLiteral("Device Controls"),
                  Qt::LeftDockWidgetArea, _widget, true}};
