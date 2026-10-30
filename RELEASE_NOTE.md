@@ -10,6 +10,8 @@
 
 ## Unreleased
 
+- Take the binary display name from the package definition (`Frame Grabber`).
+
 ## v0.2.2 (2026-10-29)
 
 - Stop the missing-applet flow when shutdown begins while its picker is open.

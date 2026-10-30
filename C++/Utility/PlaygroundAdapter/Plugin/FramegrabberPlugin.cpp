@@ -173,7 +173,7 @@ class FramegrabberPlugin final : public DevicePluginTemplate {
 public:
     DevicePluginDescriptor descriptor() const override
     {
-        return {QStringLiteral("framegrabber"), QStringLiteral("Basler Frame Grabber"), playgroundDevicePluginVersion(), false};
+        return {QStringLiteral("framegrabber"), playgroundDevicePluginDisplayName(), playgroundDevicePluginVersion(), false};
     }
     bool discoverDevices(QVariantMap* discoveryData, QString* errorMessage) override
     {
