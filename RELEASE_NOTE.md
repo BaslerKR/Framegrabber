@@ -10,6 +10,7 @@
 
 ## Unreleased
 
+- Declare what kind of data each automation tool returns, so Playground can limit what connected assistants receive. Requires a Playground release with the updated automation interface; earlier releases do not list this package's automation tools.
 - Take the binary display name from the package definition (`Frame Grabber`).
 
 ## v0.2.2 (2026-10-29)
