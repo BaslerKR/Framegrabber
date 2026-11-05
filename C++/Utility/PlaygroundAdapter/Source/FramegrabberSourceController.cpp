@@ -21,6 +21,9 @@ namespace
 {
 // Single acquisition waits for one frame per DMA; a trigger source may be idle.
 constexpr auto kSingleAcquisitionTimeout = std::chrono::seconds(30);
+// Host-declared lifecycle operations routed through the module's shared control path; not tool names.
+const QLatin1String kDisconnect("lifecycle.disconnect");
+const QLatin1String kSingle("lifecycle.single");
 
 QJsonObject schema(QJsonObject properties, QJsonArray required)
 {
@@ -331,41 +334,35 @@ QList<ToolDescriptor> FramegrabberSourceController::toolDescriptors() const
     const auto connection = schema({{"connectionId", text()}}, {"connectionId"});
     const auto state = stateSchema();
     QList<ToolDescriptor> result{
-        {"device.connection", 1, "Frame grabber state",
+        {"framegrabber.state", 1, "Frame grabber state",
             "Observe the loaded board/applet, connection generation, last SDK error and per-DMA acquisition counters.",
             ToolEffect::Observe, ToolEgress::Metadata, true, {}, empty, state},
-        {"device.boards", 1, "Frame grabber boards", "Copy the boards discovered by the SDK for this session.",
+        {"framegrabber.boards", 1, "Frame grabber boards", "Copy the boards discovered by the SDK for this session.",
             ToolEffect::Observe, ToolEgress::Metadata, true, {}, empty, boardsSchema()},
-        {"device.applets", 1, "Loadable applets",
+        {"framegrabber.applets", 1, "Loadable applets",
             "Copy the applets the SDK enumerated as loadable (FG_AIS_FILESYSTEM, FG_AF_IS_LOADABLE).",
             ToolEffect::Observe, ToolEgress::Metadata, true, {}, empty, appletsSchema()},
-        {"device.applets-refresh", 1, "Enumerate applets",
+        {"framegrabber.applets-refresh", 1, "Enumerate applets",
             "Re-enumerate loadable applets for a board; refused while an applet is loaded.",
             ToolEffect::Observe, ToolEgress::Metadata, true, {}, schema({{"board", text()}}, {}), appletsSchema()},
-        {"device.applet-load", 1, "Load applet",
+        {"framegrabber.applet-load", 1, "Load applet",
             "Initialize the board with an applet path or unique applet name (Fg_Init). Replacing a loaded applet requires its connectionId; acquisition must be stopped.",
             ToolEffect::Device, ToolEgress::Metadata, true, {},
             schema({{"board", text()}, {"applet", text()}, {"connectionId", text()}}, {"board", "applet"}), state},
-        {"device.configuration-load", 1, "Load configuration",
+        {"framegrabber.configuration-load", 1, "Load configuration",
             "Apply an .mcf file: Fg_InitConfig, or Fg_loadConfig when its applet is loaded. An applet argument replaces the MCF applet reference.",
             ToolEffect::Device, ToolEgress::Metadata, true, {},
             schema({{"board", text()}, {"configuration", text()}, {"applet", text()}, {"connectionId", text()}},
                 {"board", "configuration"}), state},
-        {"device.configuration-save", 1, "Save configuration",
+        {"framegrabber.configuration-save", 1, "Save configuration",
             "Write the current applet parameters to an .mcf file (Fg_saveConfig) on the host file system.",
             ToolEffect::Device, ToolEgress::Metadata, true, {},
             schema({{"connectionId", text()}, {"configuration", text()}}, {"connectionId", "configuration"}), state},
-        {"device.disconnect", 1, "Release frame grabber",
-            "Stop acquisition and release the exact connection generation (Fg_FreeGrabber).",
-            ToolEffect::Device, ToolEgress::Metadata, true, {}, connection, state},
-        {"device.cameras", 1, "CoaXPress cameras", "Copy the cameras found by the last CXP discovery.",
+        {"framegrabber.cameras", 1, "CoaXPress cameras", "Copy the cameras found by the last CXP discovery.",
             ToolEffect::Observe, ToolEgress::Metadata, true, {}, empty, camerasSchema()},
-        {"device.cameras-refresh", 1, "Rediscover cameras",
+        {"framegrabber.cameras-refresh", 1, "Rediscover cameras",
             "Restart CXP discovery and reconnect cameras on the exact connection; topology mismatches are reported.",
-            ToolEffect::Device, ToolEgress::Metadata, true, {}, connection, camerasSchema()},
-        {"device.single", 1, "Acquire one frame per DMA",
-            "Acquire one frame on every DMA channel and wait up to 30 s; query the viewer separately for presentation.",
-            ToolEffect::Pipeline, ToolEgress::Metadata, true, {}, connection, state}};
+            ToolEffect::Device, ToolEgress::Metadata, true, {}, connection, camerasSchema()}};
     if (!_framegrabber)
     {
         for (auto& descriptor : result)
@@ -401,14 +398,23 @@ ApiResult<void> FramegrabberSourceController::requestTool(const QString& name,
         if (!arguments.contains(required.toString()))
             return Admission::failure(ApiErrorCode::InvalidArgument, "Exact typed arguments are required.");
 
-    const auto deliver = [completion = std::move(completion)](Result result) noexcept {
+    return admitControl(name, std::move(arguments), [completion = std::move(completion)](Result result) noexcept {
         try { completion(std::move(result)); }
         catch (...) { qWarning() << "[Framegrabber] tool consumer callback threw."; }
-    };
-    if (name == "device.connection") { deliver(Result::success(controlState())); return Admission::success(); }
-    if (name == "device.applets") { deliver(Result::success(appletsJson(*_framegrabber))); return Admission::success(); }
-    if (name == "device.cameras") { deliver(Result::success(camerasJson(*_framegrabber))); return Admission::success(); }
-    if (name == "device.boards") {
+    });
+}
+
+ApiResult<void> FramegrabberSourceController::admitControl(const QString& name, QJsonObject arguments,
+                                                           std::function<void(ApiResult<QJsonValue>)> deliver)
+{
+    Q_ASSERT(QThread::currentThread() == thread());
+    using Result = ApiResult<QJsonValue>;
+    using Admission = ApiResult<void>;
+    if (!_framegrabber) return Admission::failure(ApiErrorCode::Unavailable, "The frame grabber session has ended.");
+    if (name == "framegrabber.state") { deliver(Result::success(controlState())); return Admission::success(); }
+    if (name == "framegrabber.applets") { deliver(Result::success(appletsJson(*_framegrabber))); return Admission::success(); }
+    if (name == "framegrabber.cameras") { deliver(Result::success(camerasJson(*_framegrabber))); return Admission::success(); }
+    if (name == "framegrabber.boards") {
         QJsonArray boards;
         const std::string connected = _framegrabber->isOpened() ? _framegrabber->getConnectedFramegrabberName() : std::string{};
         for (const auto& board : _framegrabber->getCachedBoardInfo())
@@ -426,12 +432,12 @@ ApiResult<void> FramegrabberSourceController::requestTool(const QString& name,
     const bool connected = _framegrabber->isOpened();
     const QString currentConnection = connectionId();
     const QString requestedConnection = arguments.value("connectionId").toString();
-    const bool needsConnection = name == "device.configuration-save" || name == "device.disconnect"
-        || name == "device.cameras-refresh" || name == "device.single";
+    const bool needsConnection = name == "framegrabber.configuration-save" || name == kDisconnect
+        || name == "framegrabber.cameras-refresh" || name == kSingle;
     if (needsConnection) {
         if (!connected) return Admission::failure(ApiErrorCode::Unavailable, "No applet is loaded.");
         if (requestedConnection != currentConnection)
-            return Admission::failure(ApiErrorCode::Conflict, "Connection generation changed.");
+            return Admission::failure(ApiErrorCode::Conflict, "The connection changed; observe it again.");
     }
     std::string boardName;
     if (arguments.contains("board")) {
@@ -441,15 +447,15 @@ ApiResult<void> FramegrabberSourceController::requestTool(const QString& name,
             if (boardMatches(candidate, board)) { found = true; boardName = candidate.displayName(); }
         if (!found) return Admission::failure(ApiErrorCode::NotFound, "Exact declared board was not found.");
     }
-    if (name == "device.applets-refresh" && connected)
+    if (name == "framegrabber.applets-refresh" && connected)
         return Admission::failure(ApiErrorCode::Conflict, "Release the board before enumerating applets.");
     // Applets contain native libraries. Callable requests load only applets the SDK
     // enumerated from its standard locations; arbitrary files remain a GUI choice.
     if (arguments.contains("applet")
         && catalogApplet(*_framegrabber, arguments.value("applet").toString().toStdString()).empty())
         return Admission::failure(ApiErrorCode::PermissionDenied,
-            "Only applets listed by device.applets can be loaded through the API.");
-    if (name == "device.applet-load" || name == "device.configuration-load") {
+            "Only applets listed by framegrabber.applets can be loaded through the API.");
+    if (name == "framegrabber.applet-load" || name == "framegrabber.configuration-load") {
         if (connected && requestedConnection.isEmpty())
             return Admission::failure(ApiErrorCode::Conflict, "Pass the current connectionId to replace the loaded applet.");
         if (connected && requestedConnection != currentConnection)
@@ -457,7 +463,7 @@ ApiResult<void> FramegrabberSourceController::requestTool(const QString& name,
         if (connected && boardName != _framegrabber->getConnectedFramegrabberName())
             return Admission::failure(ApiErrorCode::Conflict, "Release the loaded board before selecting another board.");
     }
-    if (_framegrabber->isGrabbing() && name != "device.disconnect")
+    if (_framegrabber->isGrabbing() && name != kDisconnect)
         return Admission::failure(ApiErrorCode::Busy, "Stop acquisition explicitly first.");
     // The same gate serializes the control panel; it never implicitly stops acquisition.
     if (!_framegrabber->tryBeginControl())
@@ -476,14 +482,14 @@ ApiResult<void> FramegrabberSourceController::requestTool(const QString& name,
                 QJsonObject{{"sdkResult", error.code}});
         };
         try {
-            if (name == "device.applets-refresh") {
+            if (name == "framegrabber.applets-refresh") {
                 if (framegrabber->refreshAppletCatalog(boardName)) payload = Payload::Applets;
                 else failure = Result::failure(ApiErrorCode::Conflict, "Applet enumeration requires a released board.");
-            } else if (name == "device.applet-load") {
+            } else if (name == "framegrabber.applet-load") {
                 if (framegrabber->loadApplet(arguments.value("applet").toString().toStdString(), boardName))
                     payload = Payload::State;
                 else failure = failed("Failed to load the applet.");
-            } else if (name == "device.configuration-load") {
+            } else if (name == "framegrabber.configuration-load") {
                 const std::string configuration = arguments.value("configuration").toString().toStdString();
                 const std::string applet = arguments.value("applet").toString().toStdString();
                 // The MCF names its own applet; apply the same catalog restriction to it.
@@ -491,19 +497,19 @@ ApiResult<void> FramegrabberSourceController::requestTool(const QString& name,
                     ? framegrabber->appletPathFromConfiguration(configuration, boardName) : applet;
                 if (catalogApplet(*framegrabber, configured).empty())
                     failure = Result::failure(ApiErrorCode::PermissionDenied,
-                        "The configuration does not reference an applet listed by device.applets; pass one as applet.");
+                        "The configuration does not reference an applet listed by framegrabber.applets; pass one as applet.");
                 else if (framegrabber->loadAppletConfiguration(applet, configuration, boardName))
                     payload = Payload::State;
                 else failure = failed("Failed to apply the configuration.");
-            } else if (name == "device.configuration-save") {
+            } else if (name == "framegrabber.configuration-save") {
                 if (framegrabber->saveConfiguration(arguments.value("configuration").toString().toStdString()))
                     payload = Payload::State;
                 else failure = failed("Failed to save the configuration.");
-            } else if (name == "device.disconnect") {
+            } else if (name == kDisconnect) {
                 framegrabber->close();
                 if (!framegrabber->isOpened()) payload = Payload::State;
                 else failure = failed("The frame grabber could not be released.");
-            } else if (name == "device.cameras-refresh") {
+            } else if (name == "framegrabber.cameras-refresh") {
                 const bool connected = framegrabber->refreshCameras(Framegrabber::CameraTransport::CoaXPress);
                 const auto discovery = framegrabber->lastCameraDiscovery();
                 if (connected || discovery.topologyMismatch) payload = Payload::Cameras;
@@ -511,7 +517,7 @@ ApiResult<void> FramegrabberSourceController::requestTool(const QString& name,
                     discovery.message.empty() ? QStringLiteral("CXP camera discovery failed.")
                                               : QString::fromStdString(discovery.message),
                     QJsonObject{{"sdkResult", discovery.sdkResult}});
-            } else if (name == "device.single") {
+            } else if (name == kSingle) {
                 framegrabber->grab(1);
                 const auto deadline = std::chrono::steady_clock::now() + kSingleAcquisitionTimeout;
                 while (framegrabber->isGrabbing() && std::chrono::steady_clock::now() < deadline)
@@ -545,4 +551,101 @@ ApiResult<void> FramegrabberSourceController::requestTool(const QString& name,
         }
     });
     return Admission::success();
+}
+
+// --- Standard connection lifecycle ---------------------------------------
+
+namespace {
+DeviceConnectionError lifecycleError(const ApiErrorCode code)
+{
+    switch (code) {
+    case ApiErrorCode::InvalidArgument: return DeviceConnectionError::InvalidArgument;
+    case ApiErrorCode::NotFound: return DeviceConnectionError::NotFound;
+    case ApiErrorCode::Conflict: return DeviceConnectionError::Conflict;
+    case ApiErrorCode::Busy: return DeviceConnectionError::Busy;
+    case ApiErrorCode::Unsupported: return DeviceConnectionError::Unsupported;
+    case ApiErrorCode::Unavailable: return DeviceConnectionError::Unavailable;
+    default: return DeviceConnectionError::BackendFailure;
+    }
+}
+}
+
+DeviceConnectionState FramegrabberSourceController::connectionState() const
+{
+    const bool connected = _framegrabber && _framegrabber->isOpened();
+    if (!connected) return {};
+    const std::string board = _framegrabber->getConnectedFramegrabberName();
+    const std::string applet = _framegrabber->getLoadedAppletName();
+    return {true, _framegrabber->isGrabbing(), connectionId().toStdString(), board,
+            applet.empty() ? board : board + " / " + applet, std::nullopt};
+}
+
+DeviceConnectionCapabilities FramegrabberSourceController::connectionCapabilities() const
+{
+    if (!_framegrabber) {
+        const DeviceConnectionAvailability ended{false, "The frame grabber session has ended."};
+        return {ended, ended, ended, ended, ended, ended};
+    }
+    const DeviceConnectionAvailability yes{true, {}};
+    const DeviceConnectionAvailability applet{false,
+        "A frame grabber connection is made by loading an applet with framegrabber.applet-load or framegrabber.configuration-load."};
+    return {applet, applet, applet, yes, yes, {false, "Live acquisition uses source.start and source.stop."}};
+}
+
+DeviceConnectionResult FramegrabberSourceController::requestConnectionTargets(TargetsCompletion)
+{
+    return {DeviceConnectionError::Unsupported, connectionCapabilities().targets.reason};
+}
+
+DeviceConnectionResult FramegrabberSourceController::requestConnect(std::string, IDeviceConnectionControl::Completion)
+{
+    return {DeviceConnectionError::Unsupported, connectionCapabilities().connect.reason};
+}
+
+DeviceConnectionResult FramegrabberSourceController::requestConnectionState(IDeviceConnectionControl::Completion completion)
+{
+    Q_ASSERT(QThread::currentThread() == thread());
+    if (!completion) return {DeviceConnectionError::InvalidArgument, "Completion is required."};
+    if (!_framegrabber) return {DeviceConnectionError::Unavailable, "The frame grabber session has ended."};
+    try { completion({{}, {}, {}, connectionState()}); }
+    catch (...) { qWarning() << "[Framegrabber] lifecycle consumer callback threw."; }
+    return {};
+}
+
+DeviceConnectionResult FramegrabberSourceController::requestDisconnect(std::string connectionId,
+                                                                       IDeviceConnectionControl::Completion completion)
+{
+    return admitLifecycle(kDisconnect, std::move(connectionId), std::move(completion));
+}
+
+DeviceConnectionResult FramegrabberSourceController::requestSingle(std::string connectionId,
+                                                                   IDeviceConnectionControl::Completion completion)
+{
+    return admitLifecycle(kSingle, std::move(connectionId), std::move(completion));
+}
+
+DeviceConnectionResult FramegrabberSourceController::admitLifecycle(const QString& name, std::string connectionId,
+                                                                    IDeviceConnectionControl::Completion completion)
+{
+    Q_ASSERT(QThread::currentThread() == thread());
+    if (!completion) return {DeviceConnectionError::InvalidArgument, "Completion is required."};
+    if (_framegrabber && !_framegrabber->isOpened())
+        return {DeviceConnectionError::Disconnected, "No applet is loaded."};
+    // The shared control path keeps one gate and one worker for GUI, module tools and lifecycle calls.
+    // The controller drains its worker before destruction, so the completion may read it.
+    const auto admitted = admitControl(name, QJsonObject{{"connectionId", QString::fromStdString(connectionId)}},
+        [this, completion = std::move(completion)](ApiResult<QJsonValue> result) noexcept {
+            DeviceConnectionResult copied;
+            if (result.succeeded()) {
+                copied = {{}, {}, DeviceConnectionEffect::Applied, connectionState()};
+            } else {
+                // Only accepted SDK work fails here, so its effect on the device is uncertain.
+                copied = {lifecycleError(result.error()->code), result.error()->message.toStdString(),
+                          DeviceConnectionEffect::Unknown};
+            }
+            try { completion(std::move(copied)); }
+            catch (...) { qWarning() << "[Framegrabber] lifecycle consumer callback threw."; }
+        });
+    if (admitted.succeeded()) return {};
+    return {lifecycleError(admitted.error()->code), admitted.error()->message.toStdString()};
 }

@@ -146,37 +146,43 @@ On creation the widget loads the board's active applet (or else its power-up app
 
 ## Declared device and parameter contracts
 
-`FramegrabberSourceController` implements `IToolProvider/1.0` and `IDeviceParameterControl/1.0` over the same `Framegrabber` authority as the widget.
+`FramegrabberSourceController` implements `IDeviceConnectionControl/1.0`, `IToolProvider/1.0` and `IDeviceParameterControl/1.0` over the same `Framegrabber` authority as the widget.
 
-Observe tools complete synchronously:
+Playground declares the standard `device.*` lifecycle tools from `IDeviceConnectionControl`:
+
+| Tool | Framegrabber behavior |
+| --- | --- |
+| `device.connection` | Canonical state; `targetId` is the loaded board and `displayName` names board and applet |
+| `device.disconnect` | Stops acquisition and releases the board (`Fg_FreeGrabber`) |
+| `device.single` | Waits up to 30 s for one frame on every DMA |
+| `device.targets`, `device.discover`, `device.connect` | Unavailable: a connection is made by loading an applet |
+| `device.live-start`, `device.live-stop` | Unavailable: Live uses the common `source.*` tools |
+
+The module declares its own board and applet tools. Observe tools complete synchronously:
 
 | Tool | Result |
 | --- | --- |
-| `device.connection` | Board, applet, configuration, DMA count, `connectionId`, last SDK error, camera discovery and per-DMA counters |
-| `device.boards` | Discovered boards |
-| `device.applets` | Catalog with active/power-up/loaded flags |
-| `device.cameras` | CXP cameras from the last discovery |
+| `framegrabber.state` | Board, applet, configuration, DMA count, `connectionId`, last SDK error, camera discovery and per-DMA counters |
+| `framegrabber.boards` | Discovered boards |
+| `framegrabber.applets` | Catalog with active/power-up/loaded flags |
+| `framegrabber.cameras` | CXP cameras from the last discovery |
 
-Other tools run on one worker and hold the control gate:
+Other tools, and the lifecycle disconnect and Single, run on one worker and hold the control gate:
 
 | Tool | Effect |
 | --- | --- |
-| `device.applets-refresh` | Re-enumerates applets; only while released (observe) |
-| `device.applet-load` | Loads `{board, applet}` (device) |
-| `device.configuration-load` | Loads `{board, configuration, applet?}` (device) |
-| `device.configuration-save` | Writes `{connectionId, configuration}` to a host file (device) |
-| `device.disconnect` | Releases the board (device) |
-| `device.cameras-refresh` | Restarts CXP discovery (device) |
-| `device.single` | Waits up to 30 s for one frame on every DMA (pipeline) |
-
-Live start/stop uses the common `source.*` tools.
+| `framegrabber.applets-refresh` | Re-enumerates applets; only while released (observe) |
+| `framegrabber.applet-load` | Loads `{board, applet}` (device) |
+| `framegrabber.configuration-load` | Loads `{board, configuration, applet?}` (device) |
+| `framegrabber.configuration-save` | Writes `{connectionId, configuration}` to a host file (device) |
+| `framegrabber.cameras-refresh` | Restarts CXP discovery (device) |
 
 Admission rules:
 
 - Replacing a loaded applet requires its current `connectionId`.
 - Switching boards requires a release first.
 - Acquisition is never stopped implicitly.
-- A busy gate is reported as `busy`. A connection-generation mismatch is reported as `conflict`.
+- A busy gate is reported as `busy`. A stale `connectionId` is reported as `conflict`.
 
 Applet parameters use the scope `Applet:<dma>` and their SDK access names (for example `FG_WIDTH`). They have no selectors.
 

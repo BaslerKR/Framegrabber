@@ -10,6 +10,7 @@
 
 ## Unreleased
 
+- Report the frame grabber connection, release it and acquire one frame per DMA through Playground's standard device connection tools. Loading an applet still makes the connection, so the standard target and connect tools are shown as unavailable with that reason. The board, applet, configuration and camera tools are renamed from `device.*` to `framegrabber.*`, and the detailed board/applet/counter state moves to `framegrabber.state`. Builds against Plugin SDK 0.2 and requires a Playground release with the standard device connection interface.
 - Declare what kind of data each automation tool returns, so Playground can limit what connected assistants receive. Requires a Playground release with the updated automation interface; earlier releases do not list this package's automation tools.
 - Take the binary display name from the package definition (`Frame Grabber`).
 
