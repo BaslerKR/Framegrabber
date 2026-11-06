@@ -58,6 +58,7 @@ find_package(SisoGenicamLib REQUIRED)
 add_library(Framegrabber STATIC
     Framegrabber.h
     Framegrabber.cpp
+    FramegrabberCameraGeometry.h
     FramegrabberSystem.h
     FramegrabberSystem.cpp
 )
@@ -81,6 +82,20 @@ target_link_libraries(Framegrabber
         ${SisoIoLib_LIBRARIES}
         ${SisoGenicamLib_LIBRARIES}
 )
+
+if(FRAMEGRABBER_BUILD_TESTS)
+    enable_testing()
+    add_executable(framegrabber_camera_geometry_sync_test
+        Tests/CameraGeometrySyncTest.cpp
+    )
+    target_include_directories(framegrabber_camera_geometry_sync_test PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}"
+    )
+    add_test(
+        NAME framegrabber_camera_geometry_sync_test
+        COMMAND framegrabber_camera_geometry_sync_test
+    )
+endif()
 
 if(SISOPLATFORM_DEFINITIONS)
     target_compile_definitions(Framegrabber PRIVATE ${SISOPLATFORM_DEFINITIONS})

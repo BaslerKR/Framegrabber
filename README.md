@@ -96,7 +96,7 @@ All `FramegrabberSystem` instances in a process share one `Fg_InitLibraries(null
   - `saveConfiguration()` writes the `.mcf` with `Fg_saveConfig`; field parameters go to the `.mfs` file with the same stem.
 - **CoaXPress.** Applets tagged `interface=cxp` (except test applets) initialize `Sgc_initBoard`.
   - Discovery scans every physical port reported by the board (four or five CXP ports depending on the model) for 10 s. `refreshCameras()` restarts discovery with `SGC_SP_FLAG_RESET_DISCOVERY_INFOS`.
-  - Opening an applet or loading a configuration aligns each connected CXP camera's `Width`/`Height` with the applet's `FG_WIDTH`/`FG_HEIGHT`. A failed write is logged and leaves the camera unchanged.
+  - Opening an applet, loading a configuration, refreshing cameras, or connecting a newly discovered camera aligns each connected CXP camera's `Width`/`Height` with the applet's `FG_WIDTH`/`FG_HEIGHT`. A failed write or read-back restores the previous pair when possible; an unrestorable or unavailable geometry is reported through the module log and `lastError`. Applets that expose neither geometry parameter are reported as not applicable.
   - `ERR_SGC_TOPOLOGY_MISMATCH` is reported through `lastCameraDiscovery()`: the cameras answer, but the applet layout cannot transfer their images.
   - Cameras without an applet operator index (`CAM_PROP_APPLETOPERATORINDEX`) are not bound to a DMA.
 - **Control gate.** `tryBeginControl()` / `endControl()` serialize lifecycle commands from every control surface. Status callbacks report the gate as `ControlStatus`, and parameter replacement without a reopen as `ConfigurationStatus`.
