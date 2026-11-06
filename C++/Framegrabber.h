@@ -453,6 +453,7 @@ private:
     std::mutex _cameraStartupMutex;
     Fg_Struct* _handle = nullptr;
     SgcBoardHandle* _cxpBoard = nullptr;
+    bool _cameraControlRequired = false;
     std::string _appletPath;
     std::string _loadedAppletName;
     std::string _loadedAppletVersion;

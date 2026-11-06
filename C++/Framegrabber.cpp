@@ -1228,6 +1228,7 @@ bool Framegrabber::adoptBoard(Fg_Struct* handle,
         std::lock_guard<std::mutex> lock(_stateMutex);
         _handle = handle;
         _cxpBoard = cxpBoard;
+        _cameraControlRequired = applet.supportsCameraControl;
         _boardIndex = board.index;
         _connectedBoardName = board.displayName();
         _appletPath = appletPath;
@@ -1471,6 +1472,7 @@ void Framegrabber::releaseHandles()
         Sgc_freeBoard(_cxpBoard);
         _cxpBoard = nullptr;
     }
+    _cameraControlRequired = false;
 
     if (_handle)
     {
@@ -1856,10 +1858,17 @@ void Framegrabber::startChannel(const unsigned int dmaIndex, const std::size_t f
                 }
                 channelPtr->acquisitionStarted.store(true, std::memory_order_release);
 
-                if (startCameraAcquisitionForChannel(dmaIndex))
+                if (!startCameraAcquisitionForChannel(dmaIndex))
                 {
-                    channelPtr->cameraStarted.store(true, std::memory_order_release);
+                    // A CXP channel cannot deliver frames without its camera stream.
+                    // Stop the DMA worker instead of spinning the frame wait loop.
+                    log("DMA(" + std::to_string(dmaIndex)
+                            + ") camera startup failed; stopping the DMA worker.",
+                        true);
+                    finishChannel(*channelPtr);
+                    return;
                 }
+                channelPtr->cameraStarted.store(true, std::memory_order_release);
 
                 frameindex_t lastPicture = 0;
                 std::size_t delivered = 0;
@@ -2149,6 +2158,17 @@ bool Framegrabber::startCameraAcquisitionForChannel(const unsigned int dmaIndex)
         return false;
     }
 
+    bool cameraControlRequired = false;
+    {
+        std::lock_guard<std::mutex> lock(_stateMutex);
+        cameraControlRequired = _cameraControlRequired;
+    }
+    if (!cameraControlRequired)
+    {
+        // Test and non-CXP applets generate DMA frames without a CXP camera.
+        return true;
+    }
+
     SgcCameraHandle* cameraHandle = nullptr;
     if (connectCameraUnlocked(CameraTransport::CoaXPress, dmaIndex))
     {
@@ -2169,18 +2189,20 @@ bool Framegrabber::startCameraAcquisitionForChannel(const unsigned int dmaIndex)
     }
     if (!cameraHandle)
     {
-        log("DMA(" + std::to_string(dmaIndex)
-                + ") camera acquisition cannot start because no connected CXP camera is mapped.",
-            true);
+        setLastError(
+            FG_ERROR,
+            "DMA(" + std::to_string(dmaIndex)
+                + ") camera acquisition cannot start because no connected CXP camera is mapped.");
         return false;
     }
 
     const int result = Sgc_startAcquisition(cameraHandle, 1);
     if (result != SGC_OK)
     {
-        log("DMA(" + std::to_string(dmaIndex) + ") camera acquisition start failed: "
-                + safeString(Sgc_getErrorDescription(result)),
-            true);
+        setLastError(
+            FG_ERROR,
+            "DMA(" + std::to_string(dmaIndex) + ") camera acquisition start failed: "
+                + safeString(Sgc_getErrorDescription(result)));
         return false;
     }
     log("DMA(" + std::to_string(dmaIndex) + ") camera acquisition started.");
@@ -3481,13 +3503,26 @@ void Framegrabber::disconnectCamera(const CameraTransport transport,
         setLastError(FG_ALREADY_STARTED, "A camera cannot be disconnected while acquisition is running.");
         return;
     }
-    std::lock_guard<std::mutex> lock(_stateMutex);
-    CameraEntry* camera = findCamera(transport, dmaIndex);
-    if (camera && camera->handle && camera->info.connected)
+    int result = SGC_OK;
     {
-        Sgc_disconnectCamera(camera->handle);
-        camera->info.connected = false;
-        camera->featureXml.clear();
+        std::lock_guard<std::mutex> lock(_stateMutex);
+        CameraEntry* camera = findCamera(transport, dmaIndex);
+        if (camera && camera->handle && camera->info.connected)
+        {
+            result = Sgc_disconnectCamera(camera->handle);
+            if (result == SGC_OK)
+            {
+                camera->info.connected = false;
+                camera->featureXml.clear();
+            }
+        }
+    }
+    if (result != SGC_OK)
+    {
+        setLastError(
+            FG_ERROR,
+            "Failed to disconnect the CXP camera: "
+                + safeString(Sgc_getErrorDescription(result)));
     }
 }
 
