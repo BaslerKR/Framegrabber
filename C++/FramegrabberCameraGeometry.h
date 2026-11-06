@@ -112,11 +112,37 @@ inline Result synchronize(const Callbacks& callbacks, std::string* error = nullp
         return Result::Applied;
     }
 
+    const auto restore = [&](std::string& rollbackError)
+    {
+        if (!callbacks.writeCamera(previous, rollbackError))
+        {
+            return false;
+        }
+        Size restoredActual;
+        std::string restoredReadError;
+        if (!callbacks.readCamera(restoredActual, restoredReadError))
+        {
+            if (rollbackError.empty())
+            {
+                rollbackError = restoredReadError.empty()
+                    ? std::string("The rollback geometry could not be read.")
+                    : restoredReadError;
+            }
+            return false;
+        }
+        if (restoredActual != previous)
+        {
+            rollbackError = "The rollback write did not produce the previous geometry.";
+            return false;
+        }
+        return true;
+    };
+
     std::string writeError;
     if (!callbacks.writeCamera(target, writeError))
     {
         std::string rollbackError;
-        const bool restored = callbacks.writeCamera(previous, rollbackError);
+        const bool restored = restore(rollbackError);
         if (error)
         {
             *error = (writeError.empty() ? "Camera geometry write failed." : writeError)
@@ -133,7 +159,7 @@ inline Result synchronize(const Callbacks& callbacks, std::string* error = nullp
     if (!callbacks.readCamera(actual, readBackError) || actual != target)
     {
         std::string rollbackError;
-        const bool restored = callbacks.writeCamera(previous, rollbackError);
+        const bool restored = restore(rollbackError);
         if (error)
         {
             *error = (readBackError.empty()

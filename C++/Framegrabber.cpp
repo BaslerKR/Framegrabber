@@ -2141,8 +2141,17 @@ void Framegrabber::finishChannel(DmaChannel& channel)
 bool Framegrabber::startCameraAcquisitionForChannel(const unsigned int dmaIndex)
 {
     SgcCameraHandle* cameraHandle = nullptr;
-    if (connectCamera(CameraTransport::CoaXPress, dmaIndex))
+    if (connectCameraUnlocked(CameraTransport::CoaXPress, dmaIndex))
     {
+        // grab() owns the lifecycle gate here. Synchronize before this DMA starts
+        // so a camera that connected late still matches the applet geometry.
+        if (!synchronizeCameraGeometry(dmaIndex))
+        {
+            log("DMA(" + std::to_string(dmaIndex)
+                    + ") camera acquisition cannot start because its geometry did not match the applet.",
+                true);
+            return false;
+        }
         std::lock_guard<std::mutex> lock(_stateMutex);
         if (CameraEntry* camera = findCamera(CameraTransport::CoaXPress, dmaIndex))
         {
@@ -2616,6 +2625,16 @@ void Framegrabber::refreshAppletFeatureAccess(
     refresh(model);
 }
 
+bool Framegrabber::hasAppletParameter(const std::string& name) const
+{
+    if (name.empty())
+    {
+        return false;
+    }
+    std::lock_guard<std::mutex> lock(_stateMutex);
+    return _handle != nullptr && Fg_getParameterIdByName(_handle, name.c_str()) >= 0;
+}
+
 bool Framegrabber::getAppletParameter(const std::string& name,
                                       const unsigned int dmaIndex,
                                       ParameterValue& value,
@@ -3085,7 +3104,9 @@ bool Framegrabber::refreshCameras(const CameraTransport transport)
     }
     std::lock_guard<std::mutex> lifecycleLock(_lifecycleMutex);
     const bool refreshed = refreshCamerasUnlocked(true);
-    if (refreshed)
+    // Synchronize every camera that connected even when another channel failed.
+    // Acquisition running is already rejected by refreshCamerasUnlocked.
+    if (!_isRunning.load(std::memory_order_acquire))
     {
         synchronizeCameraGeometryToApplet();
     }
@@ -3241,9 +3262,6 @@ bool Framegrabber::refreshCamerasUnlocked(const bool resetDiscovery)
 
 bool Framegrabber::synchronizeCameraGeometryToApplet()
 {
-    // A configuration can describe a different ROI than the camera's current one.
-    // Align camera geometry with the applet before the DMA payload is validated, so
-    // the applet and camera do not disagree about the transfer length.
     std::vector<unsigned int> dmaIndices;
     {
         std::lock_guard<std::mutex> lock(_stateMutex);
@@ -3259,93 +3277,115 @@ bool Framegrabber::synchronizeCameraGeometryToApplet()
     bool allApplied = true;
     for (const unsigned int dmaIndex : dmaIndices)
     {
-        FramegrabberCameraGeometry::Callbacks callbacks;
-        callbacks.readApplet =
-            [this, dmaIndex](FramegrabberCameraGeometry::Size& size, std::string& error)
-            {
-                ParameterValue widthValue;
-                ParameterValue heightValue;
-                const bool hasWidth = getAppletParameter("FG_WIDTH", dmaIndex, widthValue, true);
-                const bool hasHeight = getAppletParameter("FG_HEIGHT", dmaIndex, heightValue, true);
-                if (!hasWidth && !hasHeight)
-                {
-                    return FramegrabberCameraGeometry::ReadStatus::NotApplicable;
-                }
-                if (!hasWidth || !hasHeight)
-                {
-                    error = "The applet exposes only one of FG_WIDTH and FG_HEIGHT.";
-                    return FramegrabberCameraGeometry::ReadStatus::Failed;
-                }
-                const auto width = integerParameter(widthValue);
-                const auto height = integerParameter(heightValue);
-                if (!width || !height)
-                {
-                    error = "The applet geometry is not integral.";
-                    return FramegrabberCameraGeometry::ReadStatus::Failed;
-                }
-                size = {*width, *height};
-                return FramegrabberCameraGeometry::ReadStatus::Available;
-            };
-        callbacks.readCamera =
-            [this, dmaIndex](FramegrabberCameraGeometry::Size& size, std::string& error)
-            {
-                ParameterValue widthValue{std::int64_t{0}};
-                ParameterValue heightValue{std::int64_t{0}};
-                if (!getCameraFeature(CameraTransport::CoaXPress, dmaIndex, "Width", widthValue)
-                    || !getCameraFeature(CameraTransport::CoaXPress, dmaIndex, "Height", heightValue))
-                {
-                    error = "The camera Width/Height could not be read.";
-                    return false;
-                }
-                const auto width = integerParameter(widthValue);
-                const auto height = integerParameter(heightValue);
-                if (!width || !height)
-                {
-                    error = "The camera geometry is not integral.";
-                    return false;
-                }
-                size = {*width, *height};
-                return true;
-            };
-        callbacks.writeCamera =
-            [this, dmaIndex](const FramegrabberCameraGeometry::Size& target, std::string& error)
-            {
-                if (!setCameraFeature(
-                        CameraTransport::CoaXPress, dmaIndex, "Width", target.width))
-                {
-                    error = "The camera Width write failed.";
-                    return false;
-                }
-                if (!setCameraFeature(
-                        CameraTransport::CoaXPress, dmaIndex, "Height", target.height))
-                {
-                    error = "The camera Height write failed.";
-                    return false;
-                }
-                return true;
-            };
-
-        std::string error;
-        const auto result = FramegrabberCameraGeometry::synchronize(callbacks, &error);
-        if (result == FramegrabberCameraGeometry::Result::NotApplicable)
-        {
-            log(
-                "Camera geometry synchronization is not applicable on DMA "
-                    + std::to_string(dmaIndex)
-                    + ": the applet exposes no FG_WIDTH/FG_HEIGHT.",
-                false);
-            continue;
-        }
-        if (result == FramegrabberCameraGeometry::Result::Failed)
-        {
-            allApplied = false;
-            setLastError(
-                FG_ERROR,
-                "Camera geometry synchronization failed on DMA "
-                    + std::to_string(dmaIndex) + ": " + error);
-        }
+        allApplied = synchronizeCameraGeometry(dmaIndex) && allApplied;
     }
     return allApplied;
+}
+
+bool Framegrabber::synchronizeCameraGeometry(const unsigned int dmaIndex)
+{
+    {
+        std::lock_guard<std::mutex> lock(_stateMutex);
+        const CameraEntry* camera = findCamera(CameraTransport::CoaXPress, dmaIndex);
+        if (!camera || !camera->info.connected)
+        {
+            return true;
+        }
+    }
+
+    FramegrabberCameraGeometry::Callbacks callbacks;
+    callbacks.readApplet =
+        [this, dmaIndex](FramegrabberCameraGeometry::Size& size, std::string& error)
+        {
+            const bool hasWidthParameter = hasAppletParameter("FG_WIDTH");
+            const bool hasHeightParameter = hasAppletParameter("FG_HEIGHT");
+            if (!hasWidthParameter && !hasHeightParameter)
+            {
+                return FramegrabberCameraGeometry::ReadStatus::NotApplicable;
+            }
+            if (!hasWidthParameter || !hasHeightParameter)
+            {
+                error = "The applet exposes only one of FG_WIDTH and FG_HEIGHT.";
+                return FramegrabberCameraGeometry::ReadStatus::Failed;
+            }
+
+            ParameterValue widthValue;
+            ParameterValue heightValue;
+            if (!getAppletParameter("FG_WIDTH", dmaIndex, widthValue, true)
+                || !getAppletParameter("FG_HEIGHT", dmaIndex, heightValue, true))
+            {
+                error = "The applet geometry exists but could not be read.";
+                return FramegrabberCameraGeometry::ReadStatus::Failed;
+            }
+            const auto width = integerParameter(widthValue);
+            const auto height = integerParameter(heightValue);
+            if (!width || !height)
+            {
+                error = "The applet geometry is not integral.";
+                return FramegrabberCameraGeometry::ReadStatus::Failed;
+            }
+            size = {*width, *height};
+            return FramegrabberCameraGeometry::ReadStatus::Available;
+        };
+    callbacks.readCamera =
+        [this, dmaIndex](FramegrabberCameraGeometry::Size& size, std::string& error)
+        {
+            ParameterValue widthValue{std::int64_t{0}};
+            ParameterValue heightValue{std::int64_t{0}};
+            if (!getCameraFeature(CameraTransport::CoaXPress, dmaIndex, "Width", widthValue)
+                || !getCameraFeature(CameraTransport::CoaXPress, dmaIndex, "Height", heightValue))
+            {
+                error = "The camera Width/Height could not be read.";
+                return false;
+            }
+            const auto width = integerParameter(widthValue);
+            const auto height = integerParameter(heightValue);
+            if (!width || !height)
+            {
+                error = "The camera geometry is not integral.";
+                return false;
+            }
+            size = {*width, *height};
+            return true;
+        };
+    callbacks.writeCamera =
+        [this, dmaIndex](const FramegrabberCameraGeometry::Size& target, std::string& error)
+        {
+            if (!setCameraFeature(
+                    CameraTransport::CoaXPress, dmaIndex, "Width", target.width))
+            {
+                error = "The camera Width write failed.";
+                return false;
+            }
+            if (!setCameraFeature(
+                    CameraTransport::CoaXPress, dmaIndex, "Height", target.height))
+            {
+                error = "The camera Height write failed.";
+                return false;
+            }
+            return true;
+        };
+
+    std::string error;
+    const auto result = FramegrabberCameraGeometry::synchronize(callbacks, &error);
+    if (result == FramegrabberCameraGeometry::Result::NotApplicable)
+    {
+        log(
+            "Camera geometry synchronization is not applicable on DMA "
+                + std::to_string(dmaIndex)
+                + ": the applet exposes no FG_WIDTH/FG_HEIGHT.",
+            false);
+        return true;
+    }
+    if (result == FramegrabberCameraGeometry::Result::Failed)
+    {
+        setLastError(
+            FG_ERROR,
+            "Camera geometry synchronization failed on DMA "
+                + std::to_string(dmaIndex) + ": " + error);
+        return false;
+    }
+    return true;
 }
 
 std::vector<Framegrabber::CameraInfo>
@@ -3368,33 +3408,44 @@ Framegrabber::getCachedCameraList(const CameraTransport transport) const
 bool Framegrabber::connectCamera(const CameraTransport transport,
                                  const unsigned int dmaIndex)
 {
+    // The lifecycle gate prevents a manual connect from racing grab(), close(),
+    // refreshCameras() or configuration loading.
+    std::lock_guard<std::mutex> lifecycleLock(_lifecycleMutex);
+    if (_isRunning.load(std::memory_order_acquire))
     {
-        std::lock_guard<std::mutex> lock(_stateMutex);
-        CameraEntry* camera = findCamera(transport, dmaIndex);
-        if (!camera || !camera->handle)
-        {
-            return false;
-        }
-        if (camera->info.connected)
-        {
-            return true;
-        }
-        if (Sgc_connectCamera(camera->handle) != SGC_OK)
-        {
-            return false;
-        }
-        camera->info.connected = true;
-        camera->featureXml = readCameraXmlProperty(camera->handle);
-        if (camera->featureXml.empty() && Sgc_loadCameraXml(camera->handle) == SGC_OK)
-        {
-            camera->featureXml = readCameraXmlProperty(camera->handle);
-        }
+        log("A camera cannot be connected while acquisition is running.", true);
+        return false;
     }
-    // A camera that becomes connected after the applet was opened must still match
-    // the applet geometry before the first acquisition.
-    if (!isGrabbing())
+    if (!connectCameraUnlocked(transport, dmaIndex))
     {
-        synchronizeCameraGeometryToApplet();
+        return false;
+    }
+    synchronizeCameraGeometryToApplet();
+    return true;
+}
+
+bool Framegrabber::connectCameraUnlocked(const CameraTransport transport,
+                                         const unsigned int dmaIndex)
+{
+    std::lock_guard<std::mutex> lock(_stateMutex);
+    CameraEntry* camera = findCamera(transport, dmaIndex);
+    if (!camera || !camera->handle)
+    {
+        return false;
+    }
+    if (camera->info.connected)
+    {
+        return true;
+    }
+    if (Sgc_connectCamera(camera->handle) != SGC_OK)
+    {
+        return false;
+    }
+    camera->info.connected = true;
+    camera->featureXml = readCameraXmlProperty(camera->handle);
+    if (camera->featureXml.empty() && Sgc_loadCameraXml(camera->handle) == SGC_OK)
+    {
+        camera->featureXml = readCameraXmlProperty(camera->handle);
     }
     return true;
 }

@@ -509,6 +509,12 @@ private:
                     const std::string& configurationPath);
     bool closeUnlocked(bool notifyConnectionStatus);
     bool refreshCamerasUnlocked(bool resetDiscovery);
+    /** @brief Connects one CXP camera; the caller owns the lifecycle gate. */
+    bool connectCameraUnlocked(CameraTransport transport, unsigned int dmaIndex);
+    /** @brief Returns whether the applet declares the named parameter. */
+    [[nodiscard]] bool hasAppletParameter(const std::string& name) const;
+    /** @brief Aligns one connected CXP camera's Width/Height with the applet. */
+    bool synchronizeCameraGeometry(unsigned int dmaIndex);
     /** @brief Aligns connected CXP camera Width/Height with the applet dimensions. */
     bool synchronizeCameraGeometryToApplet();
     void setLastError(int code, std::string message);
