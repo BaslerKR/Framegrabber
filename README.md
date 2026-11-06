@@ -171,7 +171,7 @@ Other tools, and the lifecycle disconnect and Single, run on one worker and hold
 
 | Tool | Effect |
 | --- | --- |
-| `framegrabber.applets-refresh` | Re-enumerates applets; only while released (observe) |
+| `framegrabber.applets-refresh` | Re-enumerates applets and replaces the cached catalog; only while released (device) |
 | `framegrabber.applet-load` | Loads `{board, applet}` (device) |
 | `framegrabber.configuration-load` | Loads `{board, configuration, applet?}` (device) |
 | `framegrabber.configuration-save` | Writes `{connectionId, configuration}` to a host file (device) |

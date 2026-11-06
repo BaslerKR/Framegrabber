@@ -344,7 +344,7 @@ QList<ToolDescriptor> FramegrabberSourceController::toolDescriptors() const
             ToolEffect::Observe, ToolEgress::Metadata, true, {}, empty, appletsSchema()},
         {"framegrabber.applets-refresh", 1, "Enumerate applets",
             "Re-enumerate loadable applets for a board; refused while an applet is loaded.",
-            ToolEffect::Observe, ToolEgress::Metadata, true, {}, schema({{"board", text()}}, {}), appletsSchema()},
+            ToolEffect::Device, ToolEgress::Metadata, true, {}, schema({{"board", text()}}, {}), appletsSchema()},
         {"framegrabber.applet-load", 1, "Load applet",
             "Initialize the board with an applet path or unique applet name (Fg_Init). Replacing a loaded applet requires its connectionId; acquisition must be stopped.",
             ToolEffect::Device, ToolEgress::Metadata, true, {},
@@ -565,6 +565,7 @@ DeviceConnectionError lifecycleError(const ApiErrorCode code)
     case ApiErrorCode::Busy: return DeviceConnectionError::Busy;
     case ApiErrorCode::Unsupported: return DeviceConnectionError::Unsupported;
     case ApiErrorCode::Unavailable: return DeviceConnectionError::Unavailable;
+    case ApiErrorCode::Timeout: return DeviceConnectionError::Timeout;
     default: return DeviceConnectionError::BackendFailure;
     }
 }
