@@ -2140,11 +2140,20 @@ void Framegrabber::finishChannel(DmaChannel& channel)
 
 bool Framegrabber::startCameraAcquisitionForChannel(const unsigned int dmaIndex)
 {
+    // Startup runs on the DMA worker, not under _lifecycleMutex. Serialize it with
+    // the stop phase so a stop that already cleared _isRunning cannot be followed
+    // by a new camera acquisition start.
+    std::lock_guard<std::mutex> startupLock(_cameraStartupMutex);
+    if (!_isRunning.load(std::memory_order_acquire))
+    {
+        return false;
+    }
+
     SgcCameraHandle* cameraHandle = nullptr;
     if (connectCameraUnlocked(CameraTransport::CoaXPress, dmaIndex))
     {
-        // grab() owns the lifecycle gate here. Synchronize before this DMA starts
-        // so a camera that connected late still matches the applet geometry.
+        // Synchronize before this DMA starts so a camera that connected late still
+        // matches the applet geometry.
         if (!synchronizeCameraGeometry(dmaIndex))
         {
             log("DMA(" + std::to_string(dmaIndex)
@@ -2224,6 +2233,12 @@ void Framegrabber::requestStopChannels()
             }
             channels.push_back(channel.get());
         }
+    }
+
+    // A startup that already passed its liveness check may still be writing camera
+    // geometry or starting the CXP stream. Wait for it before stopping hardware.
+    {
+        std::lock_guard<std::mutex> startupLock(_cameraStartupMutex);
     }
 
     if (!handle)
@@ -3420,8 +3435,10 @@ bool Framegrabber::connectCamera(const CameraTransport transport,
     {
         return false;
     }
-    synchronizeCameraGeometryToApplet();
-    return true;
+    // The caller receives the synchronization result, not only the physical
+    // connection result. A failed geometry write leaves the camera connected but
+    // reports false and retains the diagnostic in lastError.
+    return synchronizeCameraGeometryToApplet();
 }
 
 bool Framegrabber::connectCameraUnlocked(const CameraTransport transport,

@@ -449,6 +449,8 @@ private:
 
     mutable std::mutex _lifecycleMutex;
     mutable std::mutex _stateMutex;
+    // Serializes camera startup with stopping hardware; never held while joining workers.
+    std::mutex _cameraStartupMutex;
     Fg_Struct* _handle = nullptr;
     SgcBoardHandle* _cxpBoard = nullptr;
     std::string _appletPath;
