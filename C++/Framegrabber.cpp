@@ -3426,19 +3426,21 @@ bool Framegrabber::connectCamera(const CameraTransport transport,
     // The lifecycle gate prevents a manual connect from racing grab(), close(),
     // refreshCameras() or configuration loading.
     std::lock_guard<std::mutex> lifecycleLock(_lifecycleMutex);
+    clearLastError();
     if (_isRunning.load(std::memory_order_acquire))
     {
-        log("A camera cannot be connected while acquisition is running.", true);
+        setLastError(FG_ALREADY_STARTED, "A camera cannot be connected while acquisition is running.");
         return false;
     }
     if (!connectCameraUnlocked(transport, dmaIndex))
     {
+        setLastError(FG_ERROR, "The camera could not be connected.");
         return false;
     }
-    // The caller receives the synchronization result, not only the physical
-    // connection result. A failed geometry write leaves the camera connected but
+    // Return this DMA's synchronization result, not the aggregate state of every
+    // connected camera. A failed geometry write leaves the camera connected but
     // reports false and retains the diagnostic in lastError.
-    return synchronizeCameraGeometryToApplet();
+    return synchronizeCameraGeometry(dmaIndex);
 }
 
 bool Framegrabber::connectCameraUnlocked(const CameraTransport transport,
@@ -3470,6 +3472,15 @@ bool Framegrabber::connectCameraUnlocked(const CameraTransport transport,
 void Framegrabber::disconnectCamera(const CameraTransport transport,
                                     const unsigned int dmaIndex)
 {
+    // Serialize a manual disconnect with startup, grab, close and refresh. A live
+    // camera must be stopped explicitly before it can be disconnected.
+    std::lock_guard<std::mutex> lifecycleLock(_lifecycleMutex);
+    clearLastError();
+    if (_isRunning.load(std::memory_order_acquire))
+    {
+        setLastError(FG_ALREADY_STARTED, "A camera cannot be disconnected while acquisition is running.");
+        return;
+    }
     std::lock_guard<std::mutex> lock(_stateMutex);
     CameraEntry* camera = findCamera(transport, dmaIndex);
     if (camera && camera->handle && camera->info.connected)
