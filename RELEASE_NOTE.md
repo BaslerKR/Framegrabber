@@ -10,6 +10,8 @@
 
 ## Unreleased
 
+- Scan every CXP port reported by the board instead of a fixed four-port mask, so Penta boards discover cameras on port 4. After an applet open or configuration load, align each connected CXP camera's `Width`/`Height` with the applet's `FG_WIDTH`/`FG_HEIGHT`; a failed write is logged and leaves the camera unchanged.
+
 - Report the frame grabber connection, release it and acquire one frame per DMA through Playground's standard device connection tools. Loading an applet still makes the connection, so the standard target and connect tools are shown as unavailable with that reason. The board, applet, configuration and camera tools are renamed from `device.*` to `framegrabber.*`, and the detailed board/applet/counter state moves to `framegrabber.state`. Builds against Plugin SDK 0.2 and requires a Playground release with the standard device connection interface.
 - Declare what kind of data each automation tool returns, so Playground can limit what connected assistants receive. Requires a Playground release with the updated automation interface; earlier releases do not list this package's automation tools.
 - Take the binary display name from the package definition (`Frame Grabber`).

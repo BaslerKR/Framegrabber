@@ -509,6 +509,8 @@ private:
                     const std::string& configurationPath);
     bool closeUnlocked(bool notifyConnectionStatus);
     bool refreshCamerasUnlocked(bool resetDiscovery);
+    /** @brief Aligns connected CXP camera Width/Height with the applet dimensions. */
+    bool synchronizeCameraGeometryToApplet();
     void setLastError(int code, std::string message);
     void setLastSdkError(const std::string& context, int code);
     void clearLastError();

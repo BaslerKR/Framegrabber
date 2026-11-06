@@ -11,6 +11,7 @@
 #include <filesystem>
 #include <fstream>
 #include <limits>
+#include <type_traits>
 #include <unordered_set>
 #include <utility>
 
@@ -21,6 +22,21 @@ namespace
 constexpr int kFrameWaitTimeoutSeconds = 1;
 // Time Sgc_scanPortsEx waits for at least one camera, as in the SDK discovery examples.
 constexpr int kCameraDiscoveryTimeoutMilliseconds = 10000;
+
+std::optional<std::int64_t> integerParameter(const Framegrabber::ParameterValue& value)
+{
+    return std::visit(
+        [](const auto& current) -> std::optional<std::int64_t>
+        {
+            using T = std::decay_t<decltype(current)>;
+            if constexpr (std::is_integral_v<T>)
+            {
+                return static_cast<std::int64_t>(current);
+            }
+            return std::nullopt;
+        },
+        value);
+}
 
 template<typename Callback>
 Framegrabber::CallbackId registerCallback(
@@ -956,6 +972,7 @@ bool Framegrabber::loadAppletConfiguration(const std::string& appletPath,
         if (hasCameraControl)
         {
             refreshCamerasUnlocked(true);
+            synchronizeCameraGeometryToApplet();
         }
         return true;
     }
@@ -1226,6 +1243,7 @@ bool Framegrabber::adoptBoard(Fg_Struct* handle,
     {
         // The first scan starts the SDK discovery thread; no reset is needed.
         refreshCamerasUnlocked(false);
+        synchronizeCameraGeometryToApplet();
     }
 
     notifyStatus(ConnectionStatus, true);
@@ -1484,6 +1502,7 @@ bool Framegrabber::loadConfiguration(const std::string& path)
     {
         return false;
     }
+    synchronizeCameraGeometryToApplet();
     notifyStatus(ConfigurationStatus, true);
     return true;
 }
@@ -1921,7 +1940,11 @@ void Framegrabber::startChannel(const unsigned int dmaIndex, const std::size_t f
                         || transferLength % static_cast<std::size_t>(height) != 0U)
                     {
                         log("DMA(" + std::to_string(dmaIndex)
-                                + ") reported an invalid transfer length.",
+                                + ") reported an invalid transfer length: length="
+                                + std::to_string(transferLength) + " frameBytes="
+                                + std::to_string(frameBytes) + " width=" + std::to_string(width)
+                                + " height=" + std::to_string(height) + " result="
+                                + std::to_string(transferResult) + ".",
                             true);
                         channelPtr->rejected.fetch_add(1, std::memory_order_relaxed);
                         ready(dmaIndex);
@@ -3089,11 +3112,28 @@ bool Framegrabber::refreshCamerasUnlocked(const bool resetDiscovery)
         _cxpCameras.clear();
     }
 
-    // A single process scans every physical port (mask 0xf). A repeated Sgc_scanPorts
-    // only synchronizes with the first discovery; a reset restarts it.
+    // A single process scans every physical port. The mask must cover the actual
+    // board port count: a Penta board has five CXP ports, so a fixed 0xf silently
+    // omits port 4 and can hide the camera's control link. A repeated
+    // Sgc_scanPorts only synchronizes with the first discovery; a reset restarts it.
+    unsigned int portCount = 0;
+    if (Sgc_getBoardPropertyWithType(
+            board,
+            BOARD_PROP_NR_OF_PORTS,
+            &portCount,
+            SGC_PROPERTY_TYPE_UINT,
+            nullptr) != SGC_OK
+        || portCount == 0
+        || portCount > 32)
+    {
+        portCount = 4;
+    }
+    const unsigned int portMask = portCount == 32
+        ? 0xffffffffu
+        : ((1u << portCount) - 1u);
     const int scanResult = Sgc_scanPortsEx(
         board,
-        0xf,
+        portMask,
         kCameraDiscoveryTimeoutMilliseconds,
         LINK_SPEED_NONE,
         resetDiscovery ? SGC_SP_FLAG_RESET_DISCOVERY_INFOS : 0u);
@@ -3189,6 +3229,71 @@ bool Framegrabber::refreshCamerasUnlocked(const bool resetDiscovery)
     _cxpCameras = std::move(discovered);
     _lastCameraDiscovery = std::move(discovery);
     return allConnected;
+}
+
+bool Framegrabber::synchronizeCameraGeometryToApplet()
+{
+    // A configuration can describe a different ROI than the camera's current one.
+    // Align camera geometry with the applet before the DMA payload is validated, so
+    // the applet and camera do not disagree about the transfer length.
+    std::vector<unsigned int> dmaIndices;
+    {
+        std::lock_guard<std::mutex> lock(_stateMutex);
+        for (const CameraEntry& camera : _cxpCameras)
+        {
+            if (camera.info.connected)
+            {
+                dmaIndices.push_back(camera.info.dmaIndex);
+            }
+        }
+    }
+
+    bool allApplied = true;
+    for (const unsigned int dmaIndex : dmaIndices)
+    {
+        const auto apply = [&](const char* appletParameter, const char* cameraFeature)
+        {
+            ParameterValue appletValue;
+            if (!getAppletParameter(appletParameter, dmaIndex, appletValue, true))
+            {
+                return true;
+            }
+            const auto target = integerParameter(appletValue);
+            if (!target)
+            {
+                return true;
+            }
+
+            ParameterValue currentValue{std::int64_t{0}};
+            if (getCameraFeature(CameraTransport::CoaXPress, dmaIndex, cameraFeature, currentValue))
+            {
+                const auto current = integerParameter(currentValue);
+                if (current && *current == *target)
+                {
+                    return true;
+                }
+            }
+            if (setCameraFeature(
+                    CameraTransport::CoaXPress,
+                    dmaIndex,
+                    cameraFeature,
+                    *target))
+            {
+                return true;
+            }
+            log(
+                "Failed to synchronize camera " + std::string(cameraFeature)
+                    + " with applet " + appletParameter + " on DMA "
+                    + std::to_string(dmaIndex) + ".",
+                true);
+            return false;
+        };
+
+        const bool width = apply("FG_WIDTH", "Width");
+        const bool height = apply("FG_HEIGHT", "Height");
+        allApplied = width && height && allApplied;
+    }
+    return allApplied;
 }
 
 std::vector<Framegrabber::CameraInfo>
