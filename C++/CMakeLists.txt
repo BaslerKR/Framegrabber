@@ -59,6 +59,7 @@ add_library(Framegrabber STATIC
     Framegrabber.h
     Framegrabber.cpp
     FramegrabberCameraGeometry.h
+    FramegrabberCaptureCounter.h
     FramegrabberOwnedBufferPool.h
     FramegrabberSystem.h
     FramegrabberSystem.cpp
@@ -105,6 +106,18 @@ if(FRAMEGRABBER_BUILD_TESTS)
     add_test(
         NAME framegrabber_owned_buffer_pool_test
         COMMAND framegrabber_owned_buffer_pool_test
+    )
+    add_executable(framegrabber_capture_counter_test
+        Tests/CaptureCounterTest.cpp
+    )
+    target_include_directories(framegrabber_capture_counter_test PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}"
+    )
+    find_package(Threads REQUIRED)
+    target_link_libraries(framegrabber_capture_counter_test PRIVATE Threads::Threads)
+    add_test(
+        NAME framegrabber_capture_counter_test
+        COMMAND framegrabber_capture_counter_test
     )
 endif()
 

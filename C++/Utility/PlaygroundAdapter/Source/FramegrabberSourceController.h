@@ -51,6 +51,17 @@ public:
     [[nodiscard]] std::vector<GraphicsSourceDescriptor> sourceDescriptors() const override;
     bool supports3D() const override { return false; }
 
+    /**
+     * @brief Reports SDK capture identity and the grabbed-image counter.
+     * @note Software trigger is not reported: applet trigger support is not
+     *       detected, so TriggeredAfterFree is rejected for this producer.
+     */
+    SourceProducerCapabilities producerCapabilities(unsigned sourceIndex) const override;
+    /** @brief Reads `NUMBER_OF_GRABBED_IMAGES` of the DMA channel without waiting. */
+    std::optional<SourceCaptureMark> captureCounter(unsigned sourceIndex) const override;
+    /** @brief Sums picture gaps, overwritten copies and owned-pool exhaustion. */
+    std::uint64_t deviceDropCount(unsigned sourceIndex) const override;
+
     /** @brief Declares the board, applet, configuration and CXP camera tools (`framegrabber.*`). */
     QList<ToolDescriptor> toolDescriptors() const override;
     ApiResult<void> requestTool(const QString& name, int version, QJsonObject arguments,

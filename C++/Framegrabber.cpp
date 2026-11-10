@@ -549,6 +549,7 @@ struct Framegrabber::DmaChannel
     std::atomic<std::uint64_t> overwritten{0};
     std::atomic<std::uint64_t> rejected{0};
     std::atomic<std::uint64_t> poolExhausted{0};
+    std::uint64_t captureGeneration = 0;
 };
 
 struct Framegrabber::PreviousApplet
@@ -1546,6 +1547,9 @@ void Framegrabber::grab(const std::size_t frames)
     }
 
     _frameSeq.store(0, std::memory_order_release);
+    // Every acquisition start is a new capture generation: SDK picture numbers
+    // restart, and an applet reload or format change always restarts the grab.
+    _runGeneration.store(_captureCounters.beginRun(), std::memory_order_release);
     _activeChannels.store(0, std::memory_order_release);
     _startingChannels.store(true, std::memory_order_release);
     {
@@ -1749,6 +1753,7 @@ void Framegrabber::startChannel(const unsigned int dmaIndex, const std::size_t f
     channel->index = dmaIndex;
     channel->memory = memory;
     channel->ownedBufferPool = std::move(ownedBufferPool);
+    channel->captureGeneration = _runGeneration.load(std::memory_order_acquire);
     DmaChannel* channelPtr = channel.get();
     std::unique_lock<std::mutex> registrationLock(_stateMutex);
     _channels[dmaIndex] = std::move(channel);
@@ -1784,6 +1789,23 @@ void Framegrabber::startChannel(const unsigned int dmaIndex, const std::size_t f
                     return;
                 }
                 channelPtr->cameraStarted.store(true, std::memory_order_release);
+                {
+                    dma_mem* const counterMemory = channelPtr->memory;
+                    _captureCounters.attach(
+                        dmaIndex,
+                        channelPtr->captureGeneration,
+                        [handle, dmaIndex, counterMemory]() -> std::int64_t
+                        {
+                            // A status query; it does not wait for a transfer.
+                            const frameindex_t grabbed = Fg_getStatusEx(
+                                handle,
+                                NUMBER_OF_GRABBED_IMAGES,
+                                0,
+                                dmaIndex,
+                                counterMemory);
+                            return grabbed < 0 ? -1 : static_cast<std::int64_t>(grabbed);
+                        });
+                }
 
                 frameindex_t lastPicture = 0;
                 std::size_t delivered = 0;
@@ -1943,6 +1965,8 @@ void Framegrabber::startChannel(const unsigned int dmaIndex, const std::size_t f
                     image.bitAlignment = bitAlignment;
                     image.dmaIndex = dmaIndex;
                     image.frameSeq = _frameSeq.fetch_add(1, std::memory_order_acq_rel) + 1;
+                    image.captureGeneration = channelPtr->captureGeneration;
+                    image.picture = static_cast<std::uint64_t>(picture);
 
                     std::vector<GrabCallback> callbacks;
                     {
@@ -1996,6 +2020,9 @@ void Framegrabber::startChannel(const unsigned int dmaIndex, const std::size_t f
 
 void Framegrabber::finishChannel(DmaChannel& channel)
 {
+    // Stop counter reads before the acquisition and its DMA memory go away.
+    _captureCounters.detach(channel.index, channel.captureGeneration);
+
     Fg_Struct* handle = nullptr;
     {
         std::lock_guard<std::mutex> lock(_stateMutex);
@@ -2265,6 +2292,17 @@ int Framegrabber::getDMACount() const
     return count;
 }
 
+std::optional<Framegrabber::CaptureMark> Framegrabber::captureCounter(
+    const unsigned int dmaIndex) const
+{
+    const auto mark = _captureCounters.read(dmaIndex);
+    if (!mark)
+    {
+        return std::nullopt;
+    }
+    return CaptureMark{mark->generation, mark->value};
+}
+
 std::vector<Framegrabber::ChannelStatistics> Framegrabber::acquisitionStatistics() const
 {
     std::lock_guard<std::mutex> lock(_stateMutex);
@@ -2331,8 +2369,8 @@ void Framegrabber::setDMABufferCount(const std::size_t count)
 
 std::size_t Framegrabber::dmaBufferCount() const
 {
-    std::lock_guard<std::mutex> lock(_stateMutex);
-    return _dmaBufferCount;
+    // Lock-free so producer-capability queries never wait on lifecycle work.
+    return _dmaBufferCount.load(std::memory_order_acquire);
 }
 
 std::string Framegrabber::getAppletFeatureXml(const unsigned int dmaIndex) const

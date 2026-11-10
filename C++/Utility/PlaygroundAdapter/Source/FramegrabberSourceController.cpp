@@ -221,6 +221,44 @@ std::vector<GraphicsSourceDescriptor> FramegrabberSourceController::sourceDescri
     return sources;
 }
 
+SourceProducerCapabilities FramegrabberSourceController::producerCapabilities(
+    const unsigned sourceIndex) const
+{
+    static_cast<void>(sourceIndex);
+    SourceProducerCapabilities capabilities;
+    capabilities.captureIdentity = true;
+    capabilities.captureCounter = true;
+    capabilities.trigger = false;
+    capabilities.deviceDropCount = true;
+    if (_framegrabber)
+    {
+        capabilities.poolSize = static_cast<std::uint32_t>(_framegrabber->dmaBufferCount());
+    }
+    return capabilities;
+}
+
+std::optional<SourceCaptureMark> FramegrabberSourceController::captureCounter(
+    const unsigned sourceIndex) const
+{
+    if (!_framegrabber) return std::nullopt;
+    const auto mark = _framegrabber->captureCounter(sourceIndex);
+    if (!mark) return std::nullopt;
+    return SourceCaptureMark{mark->generation, mark->picture};
+}
+
+std::uint64_t FramegrabberSourceController::deviceDropCount(const unsigned sourceIndex) const
+{
+    if (!_framegrabber) return 0;
+    for (const auto& statistics : _framegrabber->acquisitionStatistics())
+    {
+        if (statistics.dmaIndex == sourceIndex)
+        {
+            return statistics.skipped + statistics.overwritten + statistics.poolExhausted;
+        }
+    }
+    return 0;
+}
+
 bool FramegrabberSourceController::isGrabbing() const
 {
     return _isGrabbing.load(std::memory_order_acquire);
@@ -259,12 +297,19 @@ void FramegrabberSourceController::registerCallbacks()
 
     _graphicsStream = std::make_unique<FramegrabberGraphicsFrameStream>(
         _framegrabber,
-        [this](GraphicsFrame&& payload, const unsigned int sourceIndex)
+        [this](GraphicsFrame&& payload,
+               const unsigned int sourceIndex,
+               const FramegrabberFrameCapture& capture)
         {
             if (!_frameConsumer) return;
             SessionFrame frame;
             frame.payload = std::move(payload);
             frame.frameSeq = frame.payload.metadata.frameIndex;
+            // The SDK picture number is the capture evidence; frameIndex stays the
+            // module delivery counter used for display.
+            frame.capture.valid = capture.picture != 0;
+            frame.capture.generation = capture.generation;
+            frame.capture.sequence = capture.picture;
             _frameConsumer(std::move(frame), sourceIndex);
         });
 }

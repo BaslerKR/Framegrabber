@@ -73,6 +73,8 @@ Acquisition uses `Fg_AcquireEx(..., ACQ_STANDARD, ...)` with `setDMABufferCount(
 - `acquisitionStatistics()` reports `delivered`, `skipped`, `overwritten`, `rejected` (invalid pointer or transfer length) and `poolExhausted` for each DMA during and after a run.
 - A wait result other than the short wait timeout (for example `FG_TRANSFER_NOT_ACTIVE` after the driver's `FG_TIMEOUT`) ends that DMA worker.
 
+Capture identity: every delivered `Image` carries `picture`, the SDK picture number (`frameindex_t`) returned by `Fg_getLastPicNumberBlockingEx`, and `captureGeneration`, which increases on every `grab()` start (an applet load, reconnect or format change always restarts acquisition). `frameSeq` remains the module delivery counter for display and is not capture evidence. `captureCounter(dmaIndex)` returns the run generation and `NUMBER_OF_GRABBED_IMAGES` of a running DMA channel, so a picture greater than that value completed after the read. The counter lock guards only reader registration and the SDK status query; the DMA worker never holds it while it waits for or copies a frame, and a channel detaches its reader before its DMA memory is freed.
+
 Stopping follows the SDK order: the CXP camera stream (`Sgc_stopAcquisition`) stops first, then the DMA (`Fg_stopAcquireEx`). After that the buffers are freed (`Fg_FreeMemEx`).
 
 Callbacks run on acquisition workers. Keep them bounded, do not access GUI objects directly, and stop acquisition and join workers before closing the board or destroying callbacks. A callback return is not an admission signal: the worker already moved on to the newest frame and never waits for downstream processing.

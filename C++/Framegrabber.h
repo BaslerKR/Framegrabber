@@ -12,6 +12,7 @@
 #include "basler_fg.h"
 #include "siso_genicam.h"
 
+#include "FramegrabberCaptureCounter.h"
 #include "FramegrabberSystem.h"
 
 #include <atomic>
@@ -173,7 +174,12 @@ public:
         PixelFormat pixelFormat = PixelFormat::Unknown;
         BitAlignment bitAlignment = BitAlignment::Packed;
         unsigned int dmaIndex = 0;
+        /** @brief Module delivery counter for display; not capture evidence. */
         std::uint64_t frameSeq = 0;
+        /** @brief Acquisition run that produced this frame; increases on every grab start. */
+        std::uint64_t captureGeneration = 0;
+        /** @brief SDK picture number (`frameindex_t`) of this frame within its run. */
+        std::uint64_t picture = 0;
 
         [[nodiscard]] const std::uint8_t* data() const noexcept
         {
@@ -354,6 +360,21 @@ public:
     [[nodiscard]] bool isGrabbing() const noexcept;
     [[nodiscard]] int getDMACount() const;
     [[nodiscard]] std::vector<ChannelStatistics> acquisitionStatistics() const;
+
+    /** @brief Acquisition run and SDK grabbed-image count of one DMA channel. */
+    struct CaptureMark
+    {
+        std::uint64_t generation = 0;
+        std::uint64_t picture = 0;
+    };
+    /**
+     * @brief Reads `NUMBER_OF_GRABBED_IMAGES` of a running DMA channel.
+     * @return The run generation and the newest completed picture number, or
+     *         `nullopt` when the channel is not running or the SDK query fails.
+     * @note Non-blocking: it never waits for the acquisition worker, which does
+     *       not hold the counter lock while it waits for or copies a frame.
+     */
+    [[nodiscard]] std::optional<CaptureMark> captureCounter(unsigned int dmaIndex) const;
     [[nodiscard]] std::vector<std::string> getUpdatedFramegrabberList() const;
     [[nodiscard]] std::vector<std::string> getCachedFramegrabberList() const;
     [[nodiscard]] std::vector<FramegrabberSystem::BoardInfo> getCachedBoardInfo() const;
@@ -459,7 +480,7 @@ private:
     std::string _configurationPath;
     std::string _connectedBoardName;
     unsigned int _boardIndex = 0;
-    std::size_t _dmaBufferCount = 6;
+    std::atomic<std::size_t> _dmaBufferCount{6};
     std::vector<std::unique_ptr<DmaChannel>> _channels;
     std::vector<CameraEntry> _cxpCameras;
     std::vector<AppletInfo> _appletCatalog;
@@ -473,6 +494,8 @@ private:
     std::atomic<bool> _startingChannels{false};
     std::atomic<std::uint64_t> _frameSeq{0};
     std::atomic<unsigned int> _activeChannels{0};
+    std::atomic<std::uint64_t> _runGeneration{0};
+    FramegrabberDetail::CaptureCounterRegistry _captureCounters;
 
     mutable std::mutex _statusCallbackMutex;
     CallbackMap<StatusCallback> _statusCallbacks;

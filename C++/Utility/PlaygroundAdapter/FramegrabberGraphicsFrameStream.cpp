@@ -11,7 +11,7 @@
 class FramegrabberGraphicsFrameStream::Impl final
 {
 public:
-    Impl(Framegrabber* framegrabber, GraphicsFrameCallback callback);
+    Impl(Framegrabber* framegrabber, FramegrabberFrameCallback callback);
     ~Impl();
 
     Impl(const Impl&) = delete;
@@ -19,14 +19,14 @@ public:
 
 private:
     Framegrabber* _framegrabber = nullptr;
-    GraphicsFrameCallback _callback;
+    FramegrabberFrameCallback _callback;
     GraphicsFrameCallbackGate _callbackGate;
     Framegrabber::CallbackId _grabCallbackId = 0;
 };
 
 FramegrabberGraphicsFrameStream::Impl::Impl(
     Framegrabber* framegrabber,
-    GraphicsFrameCallback callback)
+    FramegrabberFrameCallback callback)
     : _framegrabber(framegrabber), _callback(std::move(callback))
 {
     if (!_framegrabber || !_callback)
@@ -49,7 +49,10 @@ FramegrabberGraphicsFrameStream::Impl::Impl(
                 frame.addImage("image", std::move(graphicsImage), "Image");
                 frame.metadata.sourceName = "Framegrabber";
                 frame.metadata.frameIndex = sequence;
-                _callback(std::move(frame), image.dmaIndex);
+                _callback(
+                    std::move(frame),
+                    image.dmaIndex,
+                    FramegrabberFrameCapture{image.captureGeneration, image.picture});
             }
             catch (const std::exception& error)
             {
@@ -76,7 +79,7 @@ FramegrabberGraphicsFrameStream::Impl::~Impl()
 
 FramegrabberGraphicsFrameStream::FramegrabberGraphicsFrameStream(
     Framegrabber* framegrabber,
-    GraphicsFrameCallback callback)
+    FramegrabberFrameCallback callback)
     : _impl(std::make_unique<Impl>(framegrabber, std::move(callback)))
 {
 }
