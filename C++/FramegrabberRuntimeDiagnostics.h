@@ -7,16 +7,20 @@ namespace FramegrabberDetail {
 /** @brief Per-DMA telemetry only; no acquisition completion or buffer policy state. */
 class ProducerRuntimeCounters {
 public:
+    /** @brief Selects the existing DMA loop action for one SDK wait result. */
+    enum class WaitOutcome { Frame, Idle, Ended };
     /** @brief Counts one frame only if at least one consumer returned successfully. */
     void noteFrameDelivered(bool consumerSucceeded) noexcept {
         if (consumerSucceeded) _delivered.fetch_add(1, std::memory_order_relaxed);
     }
     /** @brief Counts one callback failure independently of sibling consumer success. */
     void noteFailure() noexcept { _failed.fetch_add(1, std::memory_order_relaxed); }
-    /** @brief Excludes idle polls and intentional shutdown from failed grab results. */
-    void noteWaitResult(std::int64_t result, bool stopping) noexcept {
-        if (result <= 0 && result != FG_NO_PICTURE_AVAILABLE && result != FG_TIMEOUT_ERR && !stopping)
-            noteFailure();
+    /** @brief Classifies every wait result and excludes idle polls/shutdown from failures. */
+    [[nodiscard]] WaitOutcome noteWaitResult(std::int64_t result, bool stopping) noexcept {
+        if (result > 0) return WaitOutcome::Frame;
+        if (result == FG_NO_PICTURE_AVAILABLE || result == FG_TIMEOUT_ERR) return WaitOutcome::Idle;
+        if (!stopping) noteFailure();
+        return WaitOutcome::Ended;
     }
     /** @brief Copies successful consumer deliveries in the current run. */
     [[nodiscard]] std::uint64_t delivered() const noexcept { return _delivered.load(std::memory_order_relaxed); }

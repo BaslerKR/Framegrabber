@@ -16,12 +16,14 @@ int main()
     counters.noteFrameDelivered(true); // A sibling callback can succeed despite another failing.
     if (counters.delivered() != 2 || counters.failed() != 2) return 5;
 
-    counters.noteWaitResult(FG_NO_PICTURE_AVAILABLE, false);
-    counters.noteWaitResult(FG_TIMEOUT_ERR, false);
-    counters.noteWaitResult(42, false);
-    counters.noteWaitResult(-9999, true);
+    using WaitOutcome = FramegrabberDetail::ProducerRuntimeCounters::WaitOutcome;
+    // These are the actions consumed by the real DMA loop, not a separate test classifier.
+    if (counters.noteWaitResult(FG_NO_PICTURE_AVAILABLE, false) != WaitOutcome::Idle) return 12;
+    if (counters.noteWaitResult(FG_TIMEOUT_ERR, false) != WaitOutcome::Idle) return 13;
+    if (counters.noteWaitResult(42, false) != WaitOutcome::Frame) return 14;
+    if (counters.noteWaitResult(-9999, true) != WaitOutcome::Ended) return 15;
     if (counters.failed() != 2) return 6;
-    counters.noteWaitResult(-9999, false);
+    if (counters.noteWaitResult(-9999, false) != WaitOutcome::Ended) return 16;
     if (counters.failed() != 3) return 7;
 
     Framegrabber::ChannelStatistics first;

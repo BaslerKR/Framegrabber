@@ -1800,15 +1800,13 @@ void Framegrabber::startChannel(const unsigned int dmaIndex, const std::size_t f
                         static_cast<int>(dmaIndex),
                         kFrameWaitTimeoutSeconds,
                         channelPtr->memory);
-                    if (picture <= 0)
+                    const bool stopping = channelPtr->stopRequested.load(std::memory_order_acquire);
+                    const auto waitOutcome = channelPtr->diagnostics.noteWaitResult(picture, stopping);
+                    using WaitOutcome = FramegrabberDetail::ProducerRuntimeCounters::WaitOutcome;
+                    // The tested classification owns both loop action and failure accounting.
+                    if (waitOutcome == WaitOutcome::Idle) continue;
+                    if (waitOutcome == WaitOutcome::Ended)
                     {
-                        // The short wait timeout keeps stop responsive; it is not an error.
-                        if (picture == FG_NO_PICTURE_AVAILABLE || picture == FG_TIMEOUT_ERR)
-                        {
-                            continue;
-                        }
-                        const bool stopping = channelPtr->stopRequested.load(std::memory_order_acquire);
-                        channelPtr->diagnostics.noteWaitResult(picture, stopping);
                         if (!stopping)
                         {
                             // FG_TRANSFER_NOT_ACTIVE: the driver ended the acquisition, for

@@ -10,6 +10,8 @@
 
 ## Unreleased
 
+- Use one tested wait-result classification for DMA loop actions and failure accounting, including idle polls and shutdown.
+
 - Keep one warning per adapter failure at the DMA callback boundary and directly test producer counters, idle-poll exclusion and per-DMA aggregation.
 
 - Add per-run producer diagnostics and Live-only FPS/failure bubbles. Exclude idle polls and DMA policy drops; expose the same counters through the source diagnostics query.
