@@ -10,6 +10,8 @@
 
 ## Unreleased
 
+- Add per-run producer diagnostics and Live-only FPS/failure bubbles. Exclude idle polls and DMA policy drops; expose the same counters through the source diagnostics query.
+
 - Remove host-coupled acquisition pacing: the DMA worker no longer waits for a consumer `ready()` credit. The owned buffer pool is non-blocking and a frame whose pool buffer is still retained is dropped before the copy and counted as `poolExhausted`; the ACQ_STANDARD newest-frame and overwrite checks are unchanged. The default DMA buffer count is 6, which raises the per-channel DMA plus owned-pool memory at 127 MP to about 1.53 GB (two 127 MB rings of six buffers).
 
 - Scan every CXP port reported by the board instead of a fixed four-port mask, so Penta boards discover cameras on port 4. After an applet open, configuration load, camera refresh, or newly connected camera, align each connected CXP camera's `Width`/`Height` with the applet's `FG_WIDTH`/`FG_HEIGHT`. Refresh synchronizes every connected camera even on partial discovery. Manual connect and disconnect are refused while acquisition runs, connect returns only its DMA geometry synchronization result, and camera startup is serialized with stop so no camera starts after a stop request. The connect/disconnect commands refresh `lastError` on success. A failed SDK disconnect leaves the cached camera connected and records the error, and a camera-control startup failure stops its DMA worker instead of spinning the frame wait loop; test and non-CXP applets continue without a camera. Missing applet parameters are not applicable; unreadable geometry, write failures and read-back mismatches retain `lastError` and restore the previous pair when the rollback read-back verifies it.

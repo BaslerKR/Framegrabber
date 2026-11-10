@@ -15,6 +15,8 @@ struct FramegrabberControlUi {
     QToolButton* _grabLiveButton = nullptr;
     QTabWidget* _tabs = nullptr;
     QStatusBar* _statusBar = nullptr;
+    QLabel* _failedLabel = nullptr;
+    QLabel* _fpsLabel = nullptr;
     QLabel* _statusLabel = nullptr;
     QComboBox* _appletDmaCombo = nullptr;
     QTreeWidget* _appletTree = nullptr;

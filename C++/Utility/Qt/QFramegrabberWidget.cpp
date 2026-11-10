@@ -19,13 +19,14 @@
 #include <QScrollBar>
 #include <QSignalBlocker>
 #include <QStatusBar>
+#include <QStyle>
+#include <QTimer>
 #include <QDebug>
 #include <QLoggingCategory>
 #include <QJsonDocument>
 #include <QJsonArray>
 #include <QJsonObject>
 Q_LOGGING_CATEGORY(framegrabberDiagnosticLog, "diagnostics.Framegrabber", QtInfoMsg)
-#include <QStyle>
 #include <QTabWidget>
 #include <QThread>
 #include <QToolButton>
@@ -197,6 +198,12 @@ QFramegrabberWidget::QFramegrabberWidget(QWidget* parent, Framegrabber* framegra
       _framegrabber(framegrabber)
 {
     buildUi();
+    auto* diagnosticsTimer = new QTimer(this);
+    diagnosticsTimer->setInterval(1000);
+    connect(diagnosticsTimer, &QTimer::timeout, this, [this] {
+        if (!_shuttingDown && _framegrabber) setRuntimeDiagnostics(_framegrabber->runtimeDiagnostics());
+    });
+    diagnosticsTimer->start();
 
     if (!_framegrabber)
     {
@@ -1074,8 +1081,50 @@ void QFramegrabberWidget::updateGrabState(const bool grabbing)
     setOperationActive(_operationActive);
 }
 
+void QFramegrabberWidget::setRuntimeDiagnostics(const Framegrabber::RuntimeDiagnostics& diagnostics)
+{
+    Q_ASSERT(QThread::currentThread() == thread());
+    if (!diagnostics.grabbing) {
+        _diagnosticActive = false;
+        _failedLabel->hide();
+        _fpsLabel->hide();
+        return;
+    }
+    if (!_diagnosticActive) {
+        _diagnosticClock.start();
+        _diagnosticSampleMs = 0;
+        _diagnosticLogMs = 0;
+        _diagnosticDelivered = diagnostics.delivered;
+        _diagnosticActive = true;
+    }
+    const qint64 elapsed = _diagnosticClock.elapsed();
+    const qint64 interval = elapsed - _diagnosticSampleMs;
+    const double fps = interval > 0 && diagnostics.delivered >= _diagnosticDelivered
+        ? double(diagnostics.delivered - _diagnosticDelivered) * 1000.0 / double(interval) : 0.0;
+    _diagnosticDelivered = diagnostics.delivered;
+    _diagnosticSampleMs = elapsed;
+    _fpsLabel->setText(QStringLiteral("%1 fps").arg(fps, 0, 'f', 1));
+    _fpsLabel->show();
+    _failedLabel->setText(QStringLiteral("%1 failed").arg(qulonglong(diagnostics.failed)));
+    const auto state = diagnostics.failed ? QStringLiteral("warning") : QStringLiteral("normal");
+    if (_failedLabel->property("failedState").toString() != state) {
+        _failedLabel->setProperty("failedState", state);
+        _failedLabel->style()->unpolish(_failedLabel);
+        _failedLabel->style()->polish(_failedLabel);
+    }
+    _failedLabel->setVisible(diagnostics.failed > 0);
+    if (elapsed - _diagnosticLogMs >= 5000) {
+        qInfo().noquote() << QStringLiteral("[Framegrabber UI] diagnostics: delivered=%1 failed=%2 fps=%3")
+            .arg(qulonglong(diagnostics.delivered)).arg(qulonglong(diagnostics.failed)).arg(fps, 0, 'f', 1);
+        _diagnosticLogMs = elapsed;
+    }
+}
+
 void QFramegrabberWidget::updateStatusLabel()
 {
+    auto diagnostics = _framegrabber ? _framegrabber->runtimeDiagnostics() : Framegrabber::RuntimeDiagnostics{};
+    diagnostics.grabbing = _grabbing;
+    setRuntimeDiagnostics(diagnostics);
     const bool opened = _framegrabber && _framegrabber->isOpened();
     _statusLabel->setText(!opened ? QStringLiteral("Idle")
         : _grabbing ? QStringLiteral("Live") : QStringLiteral("Connected"));

@@ -69,6 +69,19 @@ void FramegrabberControlUi::create(QWidget* owner) {
     rootLayout->setProperty("layoutRole", "flush");
     rootLayout->addLayout(topLayout);
     rootLayout->addWidget(_tabs);
+    _failedLabel = new QLabel(owner);
+    _failedLabel->setObjectName(QStringLiteral("FramegrabberFailedLabel"));
+    _failedLabel->setProperty("statusRole", QStringLiteral("deviceFailed"));
+    _failedLabel->setProperty("failedState", QStringLiteral("normal"));
+    _failedLabel->setAlignment(Qt::AlignCenter);
+    _failedLabel->hide();
+    _fpsLabel = new QLabel(owner);
+    _fpsLabel->setObjectName(QStringLiteral("FramegrabberFpsLabel"));
+    _fpsLabel->setProperty("statusRole", QStringLiteral("deviceFps"));
+    _fpsLabel->setAlignment(Qt::AlignCenter);
+    _fpsLabel->hide();
+    _statusBar->addPermanentWidget(_failedLabel);
+    _statusBar->addPermanentWidget(_fpsLabel);
     rootLayout->addWidget(_statusBar);
     owner->setLayout(rootLayout);
 

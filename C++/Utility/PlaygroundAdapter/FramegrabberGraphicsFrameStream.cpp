@@ -4,6 +4,7 @@
 #include "FramegrabberSystem.h"
 
 #include <exception>
+#include <stdexcept>
 #include <memory>
 #include <string>
 #include <utility>
@@ -43,7 +44,7 @@ FramegrabberGraphicsFrameStream::Impl::Impl(
             {
                 GraphicsImage graphicsImage =
                     FramegrabberGraphicsFrameAdapter::wrapImage(image, sequence);
-                if (!graphicsImage.isValid()) return;
+                if (!graphicsImage.isValid()) throw std::runtime_error("Invalid GraphicsImage conversion.");
 
                 GraphicsFrame frame;
                 frame.addImage("image", std::move(graphicsImage), "Image");
@@ -55,11 +56,13 @@ FramegrabberGraphicsFrameStream::Impl::Impl(
             {
                 FramegrabberSystem::syslog(
                     std::string("Framegrabber GraphicsFrame callback failed: ") + error.what(), true);
+                throw;
             }
             catch (...)
             {
                 FramegrabberSystem::syslog(
                     "Framegrabber GraphicsFrame callback failed with an unknown exception.", true);
+                throw;
             }
         });
 }

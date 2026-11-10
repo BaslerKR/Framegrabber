@@ -14,6 +14,7 @@
 #include <QPointer>
 #include <QSet>
 #include <QWidget>
+#include <QElapsedTimer>
 
 #include <functional>
 #include <memory>
@@ -56,7 +57,15 @@ public:
     /** @brief Replaces the plain Qt file dialog, for example with a consumer-themed one. */
     void setFileDialogPresenter(FileDialogPresenter presenter);
 
+    /** @brief Samples producer counters on the GUI thread; stop hides both readouts. */
+    void setRuntimeDiagnostics(const Framegrabber::RuntimeDiagnostics& diagnostics);
+
 private:
+    QElapsedTimer _diagnosticClock;
+    quint64 _diagnosticDelivered = 0;
+    qint64 _diagnosticSampleMs = 0;
+    qint64 _diagnosticLogMs = 0;
+    bool _diagnosticActive = false;
     enum class TreeSource
     {
         Applet,

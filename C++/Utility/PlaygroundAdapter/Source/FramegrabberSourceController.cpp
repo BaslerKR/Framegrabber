@@ -650,3 +650,10 @@ DeviceConnectionResult FramegrabberSourceController::admitLifecycle(const QStrin
     if (admitted.succeeded()) return {};
     return {lifecycleError(admitted.error()->code), admitted.error()->message.toStdString()};
 }
+
+std::optional<SourceRuntimeDiagnostics> FramegrabberSourceController::sourceRuntimeDiagnostics(unsigned sourceIndex) const
+{
+    if (!_framegrabber || sourceIndex >= static_cast<unsigned>(_framegrabber->getDMACount())) return std::nullopt;
+    const auto value = _framegrabber->runtimeDiagnostics(sourceIndex);
+    return SourceRuntimeDiagnostics{value.grabbing, value.delivered, value.failed};
+}

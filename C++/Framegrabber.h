@@ -33,6 +33,14 @@ class Framegrabber
 
 public:
     using CallbackId = std::size_t;
+    /** @brief Per-run producer observations, independent of DMA selection policy. */
+    struct RuntimeDiagnostics {
+        bool grabbing = false;
+        std::uint64_t delivered = 0;
+        std::uint64_t failed = 0;
+    };
+    /** @brief Copies one DMA channel, or aggregates every channel when omitted. */
+    [[nodiscard]] RuntimeDiagnostics runtimeDiagnostics(std::optional<unsigned> dmaIndex = {}) const;
     using AppletInfo = FramegrabberSystem::AppletInfo;
 
     /**
@@ -65,6 +73,8 @@ public:
     {
         unsigned int dmaIndex = 0;
         std::uint64_t delivered = 0;
+        std::uint64_t consumerDelivered = 0; ///< Frames reaching at least one grab consumer.
+        std::uint64_t failed = 0; ///< Acquire failures and callback exceptions; excludes idle polls.
         std::uint64_t skipped = 0;
         std::uint64_t overwritten = 0;
         std::uint64_t rejected = 0;

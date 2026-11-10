@@ -44,6 +44,8 @@ public:
                                            QObject* parent = nullptr);
     ~FramegrabberSourceController() override;
 
+    /** @brief Copies producer diagnostics for the selected DMA channel. */
+    std::optional<SourceRuntimeDiagnostics> sourceRuntimeDiagnostics(unsigned sourceIndex) const override;
     void start() override;
     void stop() override;
     bool isGrabbing() const override;
