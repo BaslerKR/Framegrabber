@@ -10,6 +10,8 @@
 
 ## Unreleased
 
+- Keep one warning per adapter failure at the DMA callback boundary and directly test producer counters, idle-poll exclusion and per-DMA aggregation.
+
 - Add per-run producer diagnostics and Live-only FPS/failure bubbles. Exclude idle polls and DMA policy drops; expose the same counters through the source diagnostics query.
 
 - Remove host-coupled acquisition pacing: the DMA worker no longer waits for a consumer `ready()` credit. The owned buffer pool is non-blocking and a frame whose pool buffer is still retained is dropped before the copy and counted as `poolExhausted`; the ACQ_STANDARD newest-frame and overwrite checks are unchanged. The default DMA buffer count is 6, which raises the per-channel DMA plus owned-pool memory at 127 MP to about 1.53 GB (two 127 MB rings of six buffers).

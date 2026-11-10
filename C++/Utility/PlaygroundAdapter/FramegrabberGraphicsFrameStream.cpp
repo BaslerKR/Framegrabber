@@ -1,12 +1,9 @@
 #include "FramegrabberGraphicsFrameStream.h"
 
 #include "FramegrabberGraphicsFrameAdapter.h"
-#include "FramegrabberSystem.h"
 
-#include <exception>
 #include <stdexcept>
 #include <memory>
-#include <string>
 #include <utility>
 
 class FramegrabberGraphicsFrameStream::Impl final
@@ -40,30 +37,15 @@ FramegrabberGraphicsFrameStream::Impl::Impl(
         [this, callbackToken](const Framegrabber::Image& image, const std::size_t sequence) {
             GraphicsFrameCallbackGate::Lease lease(callbackToken);
             if (!lease) return;
-            try
-            {
-                GraphicsImage graphicsImage =
-                    FramegrabberGraphicsFrameAdapter::wrapImage(image, sequence);
-                if (!graphicsImage.isValid()) throw std::runtime_error("Invalid GraphicsImage conversion.");
+            // The DMA callback boundary counts and logs any conversion/consumer failure once.
+            GraphicsImage graphicsImage = FramegrabberGraphicsFrameAdapter::wrapImage(image, sequence);
+            if (!graphicsImage.isValid()) throw std::runtime_error("Invalid GraphicsImage conversion.");
 
-                GraphicsFrame frame;
-                frame.addImage("image", std::move(graphicsImage), "Image");
-                frame.metadata.sourceName = "Framegrabber";
-                frame.metadata.frameIndex = sequence;
-                _callback(std::move(frame), image.dmaIndex);
-            }
-            catch (const std::exception& error)
-            {
-                FramegrabberSystem::syslog(
-                    std::string("Framegrabber GraphicsFrame callback failed: ") + error.what(), true);
-                throw;
-            }
-            catch (...)
-            {
-                FramegrabberSystem::syslog(
-                    "Framegrabber GraphicsFrame callback failed with an unknown exception.", true);
-                throw;
-            }
+            GraphicsFrame frame;
+            frame.addImage("image", std::move(graphicsImage), "Image");
+            frame.metadata.sourceName = "Framegrabber";
+            frame.metadata.frameIndex = sequence;
+            _callback(std::move(frame), image.dmaIndex);
         });
 }
 

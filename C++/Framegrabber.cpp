@@ -1,4 +1,5 @@
 #include "Framegrabber.h"
+#include "FramegrabberRuntimeDiagnostics.h"
 
 #include "FramegrabberCameraGeometry.h"
 #include "FramegrabberOwnedBufferPool.h"
@@ -545,8 +546,7 @@ struct Framegrabber::DmaChannel
     std::atomic<bool> acquisitionStarted{false};
     std::atomic<bool> cameraStarted{false};
     std::atomic<std::uint64_t> delivered{0};
-    std::atomic<std::uint64_t> consumerDelivered{0};
-    std::atomic<std::uint64_t> failed{0};
+    FramegrabberDetail::ProducerRuntimeCounters diagnostics;
     std::atomic<std::uint64_t> skipped{0};
     std::atomic<std::uint64_t> overwritten{0};
     std::atomic<std::uint64_t> rejected{0};
@@ -1807,9 +1807,10 @@ void Framegrabber::startChannel(const unsigned int dmaIndex, const std::size_t f
                         {
                             continue;
                         }
-                        if (!channelPtr->stopRequested.load(std::memory_order_acquire))
+                        const bool stopping = channelPtr->stopRequested.load(std::memory_order_acquire);
+                        channelPtr->diagnostics.noteWaitResult(picture, stopping);
+                        if (!stopping)
                         {
-                            channelPtr->failed.fetch_add(1, std::memory_order_relaxed);
                             // FG_TRANSFER_NOT_ACTIVE: the driver ended the acquisition, for
                             // example after its FG_TIMEOUT. Waiting again cannot succeed.
                             log("DMA(" + std::to_string(dmaIndex) + ") acquisition ended: "
@@ -1966,17 +1967,17 @@ void Framegrabber::startChannel(const unsigned int dmaIndex, const std::size_t f
                         }
                         catch (const std::exception& exception)
                         {
-                            channelPtr->failed.fetch_add(1, std::memory_order_relaxed);
+                            channelPtr->diagnostics.noteFailure();
                             log(std::string("Grab callback failed: ") + exception.what(), true);
                         }
                         catch (...)
                         {
-                            channelPtr->failed.fetch_add(1, std::memory_order_relaxed);
+                            channelPtr->diagnostics.noteFailure();
                             log("Grab callback failed with an unknown exception.", true);
                         }
                     }
 
-                    if (consumerDelivered) channelPtr->consumerDelivered.fetch_add(1, std::memory_order_relaxed);
+                    channelPtr->diagnostics.noteFrameDelivered(consumerDelivered);
                     ++delivered;
                     channelPtr->delivered.fetch_add(1, std::memory_order_relaxed);
                     if (frames != 0 && delivered >= frames)
@@ -2011,8 +2012,8 @@ void Framegrabber::finishChannel(DmaChannel& channel)
         ChannelStatistics statistics;
         statistics.dmaIndex = channel.index;
         statistics.delivered = channel.delivered.load(std::memory_order_relaxed);
-        statistics.consumerDelivered = channel.consumerDelivered.load(std::memory_order_relaxed);
-        statistics.failed = channel.failed.load(std::memory_order_relaxed);
+        statistics.consumerDelivered = channel.diagnostics.delivered();
+        statistics.failed = channel.diagnostics.failed();
         statistics.skipped = channel.skipped.load(std::memory_order_relaxed);
         statistics.overwritten = channel.overwritten.load(std::memory_order_relaxed);
         statistics.rejected = channel.rejected.load(std::memory_order_relaxed);
@@ -2288,8 +2289,8 @@ std::vector<Framegrabber::ChannelStatistics> Framegrabber::acquisitionStatistics
         ChannelStatistics statistics;
         statistics.dmaIndex = channel->index;
         statistics.delivered = channel->delivered.load(std::memory_order_relaxed);
-        statistics.consumerDelivered = channel->consumerDelivered.load(std::memory_order_relaxed);
-        statistics.failed = channel->failed.load(std::memory_order_relaxed);
+        statistics.consumerDelivered = channel->diagnostics.delivered();
+        statistics.failed = channel->diagnostics.failed();
         statistics.skipped = channel->skipped.load(std::memory_order_relaxed);
         statistics.overwritten = channel->overwritten.load(std::memory_order_relaxed);
         statistics.rejected = channel->rejected.load(std::memory_order_relaxed);
@@ -3969,11 +3970,5 @@ void Framegrabber::log(const std::string& message, const bool warning) const
 
 Framegrabber::RuntimeDiagnostics Framegrabber::runtimeDiagnostics(std::optional<unsigned> dmaIndex) const
 {
-    RuntimeDiagnostics value{isGrabbing(), 0, 0};
-    for (const auto& channel : acquisitionStatistics()) {
-        if (dmaIndex && channel.dmaIndex != *dmaIndex) continue;
-        value.delivered += channel.consumerDelivered;
-        value.failed += channel.failed + channel.rejected;
-    }
-    return value;
+    return FramegrabberDetail::sumRuntimeDiagnostics(isGrabbing(), acquisitionStatistics(), dmaIndex);
 }

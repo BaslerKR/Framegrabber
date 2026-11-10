@@ -86,6 +86,9 @@ target_link_libraries(Framegrabber
 
 if(FRAMEGRABBER_BUILD_TESTS)
     enable_testing()
+    add_executable(framegrabber_producer_runtime_counters_test Tests/ProducerRuntimeCountersTest.cpp)
+    target_link_libraries(framegrabber_producer_runtime_counters_test PRIVATE Framegrabber::Framegrabber)
+    add_test(NAME framegrabber_producer_runtime_counters_test COMMAND framegrabber_producer_runtime_counters_test)
     add_executable(framegrabber_camera_geometry_sync_test
         Tests/CameraGeometrySyncTest.cpp
     )
