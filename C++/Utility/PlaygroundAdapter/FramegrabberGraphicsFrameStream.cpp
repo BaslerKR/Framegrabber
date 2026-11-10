@@ -8,22 +8,6 @@
 #include <string>
 #include <utility>
 
-namespace {
-
-class ReadyGuard final
-{
-public:
-    ReadyGuard(Framegrabber* framegrabber, const unsigned int dmaIndex) noexcept
-        : _framegrabber(framegrabber), _dmaIndex(dmaIndex) {}
-    ~ReadyGuard() { if (_framegrabber) _framegrabber->ready(_dmaIndex); }
-
-private:
-    Framegrabber* _framegrabber;
-    unsigned int _dmaIndex;
-};
-
-} // namespace
-
 class FramegrabberGraphicsFrameStream::Impl final
 {
 public:
@@ -55,7 +39,6 @@ FramegrabberGraphicsFrameStream::Impl::Impl(
         [this, callbackToken](const Framegrabber::Image& image, const std::size_t sequence) {
             GraphicsFrameCallbackGate::Lease lease(callbackToken);
             if (!lease) return;
-            ReadyGuard ready(_framegrabber, image.dmaIndex);
             try
             {
                 GraphicsImage graphicsImage =

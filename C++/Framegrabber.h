@@ -15,7 +15,6 @@
 #include "FramegrabberSystem.h"
 
 #include <atomic>
-#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -69,6 +68,7 @@ public:
         std::uint64_t skipped = 0;
         std::uint64_t overwritten = 0;
         std::uint64_t rejected = 0;
+        std::uint64_t poolExhausted = 0;
     };
 
     /** @brief Reports the outcome of the last CoaXPress discovery. */
@@ -350,7 +350,6 @@ public:
     void grab(std::size_t frames = 0);
     void stop();
     void requestStop();
-    void ready(unsigned int dmaIndex);
 
     [[nodiscard]] bool isGrabbing() const noexcept;
     [[nodiscard]] int getDMACount() const;
@@ -460,7 +459,7 @@ private:
     std::string _configurationPath;
     std::string _connectedBoardName;
     unsigned int _boardIndex = 0;
-    std::size_t _dmaBufferCount = 4;
+    std::size_t _dmaBufferCount = 6;
     std::vector<std::unique_ptr<DmaChannel>> _channels;
     std::vector<CameraEntry> _cxpCameras;
     std::vector<AppletInfo> _appletCatalog;

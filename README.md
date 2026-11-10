@@ -60,22 +60,22 @@ const auto callbackId = board->registerGrabCallback(
         if (image.isValid()) {
             // Consume or retain image.storage as needed.
         }
-        board->ready(image.dmaIndex);
     });
 ```
 
-Each accepted SDK frame is copied once into a leased pool buffer because DMA memory is owned and reused by the SDK. The pool is coordinated with a mutex and condition variable; it is not lock-free. Copying an `Image` retains its `shared_ptr` storage and can keep a pool slot occupied, so bound retention in consumers.
+Each accepted SDK frame is copied once into a leased pool buffer because DMA memory is owned and reused by the SDK. The pool is coordinated with a mutex; it is not lock-free. Copying an `Image` retains its `shared_ptr` storage and can keep a pool slot occupied, so bound retention in consumers. `OwnedBufferPool::acquire()` never waits: when every pool buffer is retained by a consumer the worker drops that frame before the copy and counts it as `poolExhausted`; the acquisition worker never waits for a consumer.
 
-Acquisition uses `Fg_AcquireEx(..., ACQ_STANDARD, ...)` with `setDMABufferCount()` frame buffers (default 4, minimum 2; smaller values are raised to 2) and waits with `Fg_getLastPicNumberBlockingEx`. In this model the driver never blocks a buffer, so the worker delivers the newest completed frame and handles backpressure as follows:
+Acquisition uses `Fg_AcquireEx(..., ACQ_STANDARD, ...)` with `setDMABufferCount()` frame buffers (default 6, minimum 2; smaller values are raised to 2) and waits with `Fg_getLastPicNumberBlockingEx`. In this model the driver never blocks a buffer, so the worker delivers the newest completed frame and handles backpressure as follows:
 
 - Frames that completed while the previous frame was still being processed are counted as `skipped`.
 - After each copy the worker reads `NUMBER_OF_GRABBED_IMAGES`. The buffer of frame `n` is reused by frame `n + bufferCount`. If that transfer may have started (`grabbed - n >= bufferCount - 1`), the copy is dropped and counted as `overwritten`, because it can contain data from the later frame.
-- `acquisitionStatistics()` reports `delivered`, `skipped`, `overwritten` and `rejected` (invalid pointer or transfer length) for each DMA during and after a run.
+- A frame whose owned pool buffer is still retained by a consumer is dropped before the copy and counted as `poolExhausted`.
+- `acquisitionStatistics()` reports `delivered`, `skipped`, `overwritten`, `rejected` (invalid pointer or transfer length) and `poolExhausted` for each DMA during and after a run.
 - A wait result other than the short wait timeout (for example `FG_TRANSFER_NOT_ACTIVE` after the driver's `FG_TIMEOUT`) ends that DMA worker.
 
 Stopping follows the SDK order: the CXP camera stream (`Sgc_stopAcquisition`) stops first, then the DMA (`Fg_stopAcquireEx`). After that the buffers are freed (`Fg_FreeMemEx`).
 
-Callbacks run on acquisition workers. Keep them bounded, do not access GUI objects directly, and return `ready(dmaIndex)` only after the corresponding frame has been accepted by the downstream consumer. Stop acquisition and join workers before closing the board or destroying callbacks.
+Callbacks run on acquisition workers. Keep them bounded, do not access GUI objects directly, and stop acquisition and join workers before closing the board or destroying callbacks. A callback return is not an admission signal: the worker already moved on to the newest frame and never waits for downstream processing.
 
 ## Applet and Configuration Contract
 

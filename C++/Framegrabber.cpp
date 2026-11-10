@@ -1,6 +1,7 @@
 #include "Framegrabber.h"
 
 #include "FramegrabberCameraGeometry.h"
+#include "FramegrabberOwnedBufferPool.h"
 #include "FramegrabberSystem.h"
 
 #include <GenApi/GenApi.h>
@@ -529,92 +530,9 @@ bool buildAppletFeatureNode(
     return true;
 }
 
-class OwnedBufferPool final
-    : public std::enable_shared_from_this<OwnedBufferPool>
-{
-public:
-    using Lease = std::shared_ptr<std::uint8_t>;
-
-    static std::shared_ptr<OwnedBufferPool> create(
-        const std::size_t bufferSize,
-        const std::size_t bufferCount)
-    {
-        auto pool = std::shared_ptr<OwnedBufferPool>(
-            new OwnedBufferPool);
-        pool->_available.reserve(bufferCount);
-        for (std::size_t index = 0; index < bufferCount; ++index)
-        {
-            pool->_available.push_back(
-                std::unique_ptr<std::uint8_t[]>(
-                    new std::uint8_t[bufferSize]));
-        }
-        return pool;
-    }
-
-    Lease acquire(const std::atomic<bool>& stopRequested)
-    {
-        std::unique_lock<std::mutex> lock(_mutex);
-        _condition.wait(lock, [this, &stopRequested]
-        {
-            return !_available.empty()
-                || _stopped
-                || stopRequested.load(std::memory_order_acquire);
-        });
-        if (_stopped
-            || stopRequested.load(std::memory_order_acquire)
-            || _available.empty())
-        {
-            return {};
-        }
-
-        std::uint8_t* data = _available.back().release();
-        _available.pop_back();
-        const std::weak_ptr<OwnedBufferPool> weakPool = shared_from_this();
-        return Lease(data, [weakPool](std::uint8_t* released)
-        {
-            if (const std::shared_ptr<OwnedBufferPool> pool = weakPool.lock())
-            {
-                pool->release(released);
-            }
-            else
-            {
-                delete[] released;
-            }
-        });
-    }
-
-    void stop()
-    {
-        {
-            std::lock_guard<std::mutex> lock(_mutex);
-            _stopped = true;
-        }
-        _condition.notify_all();
-    }
-
-private:
-    OwnedBufferPool() = default;
-
-    void release(std::uint8_t* data)
-    {
-        if (!data)
-        {
-            return;
-        }
-        {
-            std::lock_guard<std::mutex> lock(_mutex);
-            _available.push_back(
-                std::unique_ptr<std::uint8_t[]>(data));
-        }
-        _condition.notify_one();
-    }
-
-    std::mutex _mutex;
-    std::condition_variable _condition;
-    std::vector<std::unique_ptr<std::uint8_t[]>> _available;
-    bool _stopped = false;
-};
 }
+
+using FramegrabberDetail::OwnedBufferPool;
 
 struct Framegrabber::DmaChannel
 {
@@ -622,17 +540,15 @@ struct Framegrabber::DmaChannel
     dma_mem* memory = nullptr;
     std::thread thread;
     std::mutex resourceMutex;
-    std::mutex permitMutex;
-    std::condition_variable permitCondition;
     std::shared_ptr<OwnedBufferPool> ownedBufferPool;
     std::atomic<bool> stopRequested{false};
     std::atomic<bool> acquisitionStarted{false};
     std::atomic<bool> cameraStarted{false};
-    std::atomic<std::size_t> permits{0};
     std::atomic<std::uint64_t> delivered{0};
     std::atomic<std::uint64_t> skipped{0};
     std::atomic<std::uint64_t> overwritten{0};
     std::atomic<std::uint64_t> rejected{0};
+    std::atomic<std::uint64_t> poolExhausted{0};
 };
 
 struct Framegrabber::PreviousApplet
@@ -1833,7 +1749,6 @@ void Framegrabber::startChannel(const unsigned int dmaIndex, const std::size_t f
     channel->index = dmaIndex;
     channel->memory = memory;
     channel->ownedBufferPool = std::move(ownedBufferPool);
-    channel->permits.store(1, std::memory_order_release);
     DmaChannel* channelPtr = channel.get();
     std::unique_lock<std::mutex> registrationLock(_stateMutex);
     _channels[dmaIndex] = std::move(channel);
@@ -1875,22 +1790,6 @@ void Framegrabber::startChannel(const unsigned int dmaIndex, const std::size_t f
                 bool payloadGeometryWarningLogged = false;
                 while (!channelPtr->stopRequested.load(std::memory_order_acquire))
                 {
-                    {
-                        std::unique_lock<std::mutex> lock(channelPtr->permitMutex);
-                        channelPtr->permitCondition.wait(
-                            lock,
-                            [channelPtr]
-                            {
-                                return channelPtr->stopRequested.load(std::memory_order_acquire) ||
-                                       channelPtr->permits.load(std::memory_order_acquire) > 0;
-                            });
-                    }
-                    if (channelPtr->stopRequested.load(std::memory_order_acquire))
-                    {
-                        break;
-                    }
-                    channelPtr->permits.fetch_sub(1, std::memory_order_acq_rel);
-
                     const frameindex_t nextPicture =
                         lastPicture < FRAMEINDEX_MAX ? lastPicture + 1 : 1;
                     const frameindex_t picture = Fg_getLastPicNumberBlockingEx(
@@ -1904,7 +1803,6 @@ void Framegrabber::startChannel(const unsigned int dmaIndex, const std::size_t f
                         // The short wait timeout keeps stop responsive; it is not an error.
                         if (picture == FG_NO_PICTURE_AVAILABLE || picture == FG_TIMEOUT_ERR)
                         {
-                            channelPtr->permits.fetch_add(1, std::memory_order_acq_rel);
                             continue;
                         }
                         if (!channelPtr->stopRequested.load(std::memory_order_acquire))
@@ -1934,7 +1832,6 @@ void Framegrabber::startChannel(const unsigned int dmaIndex, const std::size_t f
                     if (!source)
                     {
                         channelPtr->rejected.fetch_add(1, std::memory_order_relaxed);
-                        ready(dmaIndex);
                         continue;
                     }
 
@@ -1959,7 +1856,6 @@ void Framegrabber::startChannel(const unsigned int dmaIndex, const std::size_t f
                                 + std::to_string(transferResult) + ".",
                             true);
                         channelPtr->rejected.fetch_add(1, std::memory_order_relaxed);
-                        ready(dmaIndex);
                         continue;
                     }
                     const std::size_t payloadBytes = transferLength;
@@ -1969,7 +1865,6 @@ void Framegrabber::startChannel(const unsigned int dmaIndex, const std::size_t f
                         log("DMA(" + std::to_string(dmaIndex)
                                 + ") image stride exceeds the supported range.",
                             true);
-                        ready(dmaIndex);
                         continue;
                     }
 
@@ -1987,7 +1882,6 @@ void Framegrabber::startChannel(const unsigned int dmaIndex, const std::size_t f
                         log("DMA(" + std::to_string(dmaIndex)
                                 + ") transfer row is smaller than one pixel.",
                             true);
-                        ready(dmaIndex);
                         continue;
                     }
                     const int imageWidth = static_cast<int>(std::min<std::size_t>(
@@ -2005,12 +1899,16 @@ void Framegrabber::startChannel(const unsigned int dmaIndex, const std::size_t f
                         payloadGeometryWarningLogged = true;
                     }
 
-                    OwnedBufferPool::Lease ownedBytes =
-                        channelPtr->ownedBufferPool->acquire(
-                            channelPtr->stopRequested);
-                    if (!ownedBytes)
+                    if (channelPtr->stopRequested.load(std::memory_order_acquire))
                     {
                         break;
+                    }
+                    OwnedBufferPool::Lease ownedBytes =
+                        channelPtr->ownedBufferPool->acquire();
+                    if (!ownedBytes)
+                    {
+                        channelPtr->poolExhausted.fetch_add(1, std::memory_order_relaxed);
+                        continue;
                     }
                     std::memcpy(ownedBytes.get(), source, payloadBytes);
 
@@ -2029,7 +1927,6 @@ void Framegrabber::startChannel(const unsigned int dmaIndex, const std::size_t f
                             >= static_cast<frameindex_t>(bufferCount) - 1)
                     {
                         channelPtr->overwritten.fetch_add(1, std::memory_order_relaxed);
-                        ready(dmaIndex);
                         continue;
                     }
 
@@ -2109,15 +2006,18 @@ void Framegrabber::finishChannel(DmaChannel& channel)
         statistics.skipped = channel.skipped.load(std::memory_order_relaxed);
         statistics.overwritten = channel.overwritten.load(std::memory_order_relaxed);
         statistics.rejected = channel.rejected.load(std::memory_order_relaxed);
+        statistics.poolExhausted = channel.poolExhausted.load(std::memory_order_relaxed);
         _lastStatistics.push_back(statistics);
-        if (statistics.skipped != 0 || statistics.overwritten != 0 || statistics.rejected != 0)
+        if (statistics.skipped != 0 || statistics.overwritten != 0 || statistics.rejected != 0
+            || statistics.poolExhausted != 0)
         {
             log("DMA(" + std::to_string(channel.index) + ") run finished: delivered="
                 + std::to_string(statistics.delivered) + ", skipped="
                 + std::to_string(statistics.skipped) + ", overwritten="
                 + std::to_string(statistics.overwritten) + ", rejected="
-                + std::to_string(statistics.rejected) + ".",
-                statistics.overwritten != 0);
+                + std::to_string(statistics.rejected) + ", poolExhausted="
+                + std::to_string(statistics.poolExhausted) + ".",
+                statistics.overwritten != 0 || statistics.poolExhausted != 0);
         }
     }
 
@@ -2248,7 +2148,6 @@ void Framegrabber::requestStopChannels()
                 continue;
             }
             channel->stopRequested.store(true, std::memory_order_release);
-            channel->permitCondition.notify_all();
             if (channel->ownedBufferPool)
             {
                 channel->ownedBufferPool->stop();
@@ -2330,20 +2229,6 @@ bool Framegrabber::joinStoppedChannels()
     return true;
 }
 
-void Framegrabber::ready(const unsigned int dmaIndex)
-{
-    std::lock_guard<std::mutex> lock(_stateMutex);
-    if (dmaIndex >= _channels.size() || !_channels[dmaIndex])
-    {
-        return;
-    }
-    DmaChannel& channel = *_channels[dmaIndex];
-    if (channel.permits.exchange(1, std::memory_order_acq_rel) == 0)
-    {
-        channel.permitCondition.notify_one();
-    }
-}
-
 bool Framegrabber::isGrabbing() const noexcept
 {
     return _isRunning.load(std::memory_order_acquire);
@@ -2396,6 +2281,7 @@ std::vector<Framegrabber::ChannelStatistics> Framegrabber::acquisitionStatistics
         statistics.skipped = channel->skipped.load(std::memory_order_relaxed);
         statistics.overwritten = channel->overwritten.load(std::memory_order_relaxed);
         statistics.rejected = channel->rejected.load(std::memory_order_relaxed);
+        statistics.poolExhausted = channel->poolExhausted.load(std::memory_order_relaxed);
         const auto existing = std::find_if(result.begin(), result.end(),
             [&statistics](const ChannelStatistics& item)
             {
