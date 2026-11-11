@@ -56,6 +56,12 @@ private slots:
         FeatureSpinBox<double> offGridMaximum(0.3, 0.1, 0.95, 0.2);
         offGridMaximum.stepBy(10);
         QVERIFY(std::abs(offGridMaximum.value() - 0.9) < 1e-15);
+        FeatureSpinBox<double> decimalUpper(0.1, 0.1, 0.3, 0.2);
+        QTest::keyClick(&decimalUpper, Qt::Key_Up);
+        QCOMPARE(decimalUpper.value(), 0.3);
+        FeatureSpinBox<double> decimalLower(-0.1, -0.3, 0.3, 0.2);
+        QTest::keyClick(&decimalLower, Qt::Key_Down);
+        QCOMPARE(decimalLower.value(), -0.3);
     }
 
     void signedAndUnsignedBoundaries() {

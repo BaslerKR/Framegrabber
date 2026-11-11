@@ -86,13 +86,7 @@ public:
             next = fromOrdinal(steps > 0 ? position + distance : position - distance);
         } else {
             const long double step = increment_.value_or(1.0);
-            const long double room = steps > 0 ? static_cast<long double>(high) - value_
-                                               : static_cast<long double>(value_) - low;
-            const long double available = room / step;
-            const long double tolerance = std::numeric_limits<T>::epsilon()
-                * (std::max)(1.0L, std::abs(available)) * 8;
-            const long double count = (std::min)(std::abs(static_cast<long double>(steps)),
-                std::floor(available + tolerance));
+            const long double count = floatingStepCount(steps, low, high);
             const long double candidate = static_cast<long double>(value_) + (steps > 0 ? count : -count) * step;
             next = static_cast<T>((std::clamp)(candidate, static_cast<long double>(low), static_cast<long double>(high)));
         }
@@ -112,9 +106,8 @@ public:
             if (ordinal(high) - ordinal(value_) >= step) result |= StepUpEnabled;
             if (ordinal(value_) - ordinal(low) >= step) result |= StepDownEnabled;
         } else {
-            const long double step = increment_.value_or(1.0);
-            if (static_cast<long double>(value_) + step <= high) result |= StepUpEnabled;
-            if (static_cast<long double>(value_) - step >= low) result |= StepDownEnabled;
+            if (floatingStepCount(1, low, high) >= 1) result |= StepUpEnabled;
+            if (floatingStepCount(-1, low, high) >= 1) result |= StepDownEnabled;
         }
         return result;
     }
@@ -134,6 +127,15 @@ protected:
     }
 
 private:
+    long double floatingStepCount(int steps, T low, T high) const {
+        const long double step = increment_.value_or(1.0);
+        const long double room = steps > 0 ? static_cast<long double>(high) - value_
+                                           : static_cast<long double>(value_) - low;
+        const long double available = room / step;
+        const long double tolerance = std::numeric_limits<T>::epsilon()
+            * (std::max)(1.0L, std::abs(available)) * 8;
+        return (std::min)(std::abs(static_cast<long double>(steps)), std::floor(available + tolerance));
+    }
     static bool finite(T value) {
         if constexpr (std::is_floating_point_v<T>) return std::isfinite(value);
         return true;
