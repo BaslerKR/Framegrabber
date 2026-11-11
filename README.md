@@ -63,6 +63,8 @@ const auto callbackId = board->registerGrabCallback(
     });
 ```
 
+`FramegrabberSystem::setResourceClaimCallback()` is optional. A standalone consumer that does not need process-wide exclusivity omits it and opens boards without a claim. A consumer that requires an exclusive board claim installs a callback before `addFramegrabber()`; the core calls it with the board serial immediately before `Fg_Init`/`Fg_InitConfig`, holds the returned handle until the public close completes, and refuses the open when the callback returns no handle. The Playground plugin always installs the host claim and rejects a missing host service at the plugin boundary.
+
 Each accepted SDK frame is copied once into a leased pool buffer because DMA memory is owned and reused by the SDK. The pool is coordinated with a mutex; it is not lock-free. Copying an `Image` retains its `shared_ptr` storage and can keep a pool slot occupied, so bound retention in consumers. `OwnedBufferPool::acquire()` never waits: when every pool buffer is retained by a consumer the worker drops that frame before the copy and counts it as `poolExhausted`; the acquisition worker never waits for a consumer.
 
 Acquisition uses `Fg_AcquireEx(..., ACQ_STANDARD, ...)` with `setDMABufferCount()` frame buffers (default 6, minimum 2; smaller values are raised to 2) and waits with `Fg_getLastPicNumberBlockingEx`. In this model the driver never blocks a buffer, so the worker delivers the newest completed frame and handles backpressure as follows:

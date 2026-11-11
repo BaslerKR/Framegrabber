@@ -606,10 +606,11 @@ bool Framegrabber::ensureResourceClaim(const FramegrabberSystem::BoardInfo& boar
                                        std::string& error)
 {
     error.clear();
+    // Standalone consumers keep their existing open behavior. The Playground
+    // plugin installs a callback and rejects a missing host service itself.
     if (!_resourceClaim)
     {
-        error = "The consumer did not provide a hardware resource claim.";
-        return false;
+        return true;
     }
     if (board.serial.empty())
     {
@@ -1036,7 +1037,14 @@ bool Framegrabber::loadAppletConfiguration(const std::string& appletPath,
             return false;
         }
     }
-    return adoptBoard(handle, board, loadedAppletPath, configurationPath);
+    if (adoptBoard(handle, board, loadedAppletPath, configurationPath))
+    {
+        return true;
+    }
+    Fg_FreeGrabber(handle);
+    releaseResourceClaim();
+    restorePreviousApplet(previous);
+    return false;
 }
 
 bool Framegrabber::loadAppletUnlocked(const std::string& reference, const std::string& boardName)
@@ -1098,6 +1106,10 @@ bool Framegrabber::loadAppletUnlocked(const std::string& reference, const std::s
     {
         return true;
     }
+    if (handle)
+    {
+        Fg_FreeGrabber(handle);
+    }
     restorePreviousApplet(previous);
     return false;
 }
@@ -1128,6 +1140,7 @@ void Framegrabber::restorePreviousApplet(const PreviousApplet& previous)
 {
     if (!previous.opened || previous.appletPath.empty() || !_system)
     {
+        releaseResourceClaim();
         std::lock_guard<std::mutex> lock(_stateMutex);
         _appletPath = previous.appletPath;
         _configurationPath = previous.configurationPath;
@@ -1137,6 +1150,7 @@ void Framegrabber::restorePreviousApplet(const PreviousApplet& previous)
     FramegrabberSystem::BoardInfo board;
     if (!_system->resolveBoard(previous.boardName, board))
     {
+        releaseResourceClaim();
         return;
     }
     log("Restoring the previous frame grabber applet.", true);
@@ -1145,13 +1159,18 @@ void Framegrabber::restorePreviousApplet(const PreviousApplet& previous)
     std::string claimError;
     if (!ensureResourceClaim(board, claimError))
     {
+        releaseResourceClaim();
         log("Could not restore the previous frame grabber applet: " + claimError, true);
         std::lock_guard<std::mutex> lock(_stateMutex);
         _lastError = requestError;
         return;
     }
     Fg_Struct* handle = initializeBoard(board, previous.appletPath);
-    if (handle && !previous.configurationPath.empty())
+    if (!handle)
+    {
+        releaseResourceClaim();
+    }
+    else if (!previous.configurationPath.empty())
     {
         const int result = Fg_loadConfig(handle, previous.configurationPath.c_str());
         if (result != FG_OK)
@@ -1161,9 +1180,10 @@ void Framegrabber::restorePreviousApplet(const PreviousApplet& previous)
                 true);
         }
     }
-    if (handle)
+    if (handle && !adoptBoard(handle, board, previous.appletPath, previous.configurationPath))
     {
-        adoptBoard(handle, board, previous.appletPath, previous.configurationPath);
+        Fg_FreeGrabber(handle);
+        releaseResourceClaim();
     }
     std::lock_guard<std::mutex> lock(_stateMutex);
     _lastError = requestError;

@@ -109,6 +109,16 @@ if(FRAMEGRABBER_BUILD_TESTS)
         NAME framegrabber_owned_buffer_pool_test
         COMMAND framegrabber_owned_buffer_pool_test
     )
+    add_executable(framegrabber_resource_claim_test
+        Tests/ResourceClaimTest.cpp
+    )
+    target_link_libraries(framegrabber_resource_claim_test PRIVATE
+        Framegrabber::Framegrabber
+    )
+    add_test(
+        NAME framegrabber_resource_claim_test
+        COMMAND framegrabber_resource_claim_test
+    )
 endif()
 
 if(SISOPLATFORM_DEFINITIONS)
