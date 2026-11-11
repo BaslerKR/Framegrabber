@@ -2,6 +2,10 @@
 #include "Utility/Qt/QFramegrabberWidget.h"
 #include <QDomDocument>
 #include <QPushButton>
+#include <QTreeWidget>
+#include <QScrollBar>
+#include <QWheelEvent>
+#include <QWindow>
 #include <QtTest>
 #include <atomic>
 
@@ -11,6 +15,49 @@ class FramegrabberFeatureEditorTest : public QObject
 {
     Q_OBJECT
 private slots:
+    void unfocusedWheelScrollsTreeWithoutWrite() {
+        QFramegrabberWidget owner;
+        QTreeWidget tree;
+        tree.setColumnCount(2);
+        tree.resize(400, 180);
+        std::atomic<int> writes{0};
+        auto* row = new QTreeWidgetItem(&tree, {"Width"});
+        auto* editor = dynamic_cast<NumericFeatureEditor*>(owner.createNumericEditor(std::int64_t{10}, {}, true,
+            [&](const Framegrabber::ParameterValue&) { ++writes; return true; }, [] {}));
+        QVERIFY(editor);
+        tree.setItemWidget(row, 1, editor);
+        for (int i = 0; i < 50; ++i) new QTreeWidgetItem(&tree, {QString::number(i)});
+        tree.show(); tree.activateWindow(); tree.setFocus();
+        QTRY_VERIFY(tree.hasFocus());
+        QVERIFY(!editor->hasFocus());
+        const QPoint point = editor->rect().center();
+        QWheelEvent wheel(point, editor->mapToGlobal(point), {}, QPoint(0, -120),
+            Qt::NoButton, Qt::NoModifier, Qt::NoScrollPhase, false);
+        QApplication::sendEvent(editor, &wheel);
+        QVERIFY(!wheel.isAccepted());
+        // sendEvent is targeted delivery; route an ignored event to the scroll viewport
+        // as the window-system wheel dispatcher does for an unfocused child editor.
+        QWheelEvent parentWheel(editor->mapTo(tree.viewport(), point), editor->mapToGlobal(point), {}, QPoint(0, -120),
+            Qt::NoButton, Qt::NoModifier, Qt::NoScrollPhase, false);
+        QApplication::sendEvent(tree.viewport(), &parentWheel);
+        QVERIFY(tree.verticalScrollBar()->value() > 0);
+        QCOMPARE(writes.load(), 0);
+        QCOMPARE(editor->commitText().value(), QStringLiteral("10"));
+        QCOMPARE(editor->focusPolicy(), Qt::StrongFocus);
+    }
+
+    void floatingMultipleStepsStopAtLastCompleteStep() {
+        FeatureSpinBox<double> spin(9999.5, 0.0, 10000.0, 0.5);
+        spin.stepBy(10);
+        QCOMPARE(spin.value(), 10000.0);
+        spin.setValue(0.5);
+        spin.stepBy(-10);
+        QCOMPARE(spin.value(), 0.0);
+        FeatureSpinBox<double> offGridMaximum(0.3, 0.1, 0.95, 0.2);
+        offGridMaximum.stepBy(10);
+        QVERIFY(std::abs(offGridMaximum.value() - 0.9) < 1e-15);
+    }
+
     void signedAndUnsignedBoundaries() {
         FeatureSpinBox<std::int64_t> signedSpin((std::numeric_limits<std::int64_t>::max)());
         signedSpin.stepBy(1);

@@ -10,6 +10,10 @@
 
 ## Unreleased
 
+- Ignore wheel input on unfocused numeric editors so scrolling a feature tree does
+  not write device parameters. Clamp floating-point multi-step input to the last
+  complete step within the SDK range.
+
 - Use numeric spin editors for applet and camera integer/float features, with SDK
   bounds and increments, exact 64-bit integers, floating-point round trips and
   rejected-write restoration. Keep commands as Execute buttons and stop treating

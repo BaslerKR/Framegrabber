@@ -3,6 +3,7 @@
 #include <QAbstractSpinBox>
 #include <QLineEdit>
 #include <QSignalBlocker>
+#include <QWheelEvent>
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -39,6 +40,7 @@ public:
         }
         if (increment_ && (!finite(*increment_) || *increment_ <= 0)) increment_.reset();
         setKeyboardTracking(false);
+        setFocusPolicy(Qt::StrongFocus);
         setAlignment(Qt::AlignRight);
         setValue(value);
     }
@@ -83,9 +85,16 @@ public:
             const auto distance = (std::min)(count, room / increment) * increment;
             next = fromOrdinal(steps > 0 ? position + distance : position - distance);
         } else {
-            const long double candidate = static_cast<long double>(value_)
-                + static_cast<long double>(steps) * increment_.value_or(1.0);
-            if (candidate >= low && candidate <= high) next = static_cast<T>(candidate);
+            const long double step = increment_.value_or(1.0);
+            const long double room = steps > 0 ? static_cast<long double>(high) - value_
+                                               : static_cast<long double>(value_) - low;
+            const long double available = room / step;
+            const long double tolerance = std::numeric_limits<T>::epsilon()
+                * (std::max)(1.0L, std::abs(available)) * 8;
+            const long double count = (std::min)(std::abs(static_cast<long double>(steps)),
+                std::floor(available + tolerance));
+            const long double candidate = static_cast<long double>(value_) + (steps > 0 ? count : -count) * step;
+            next = static_cast<T>((std::clamp)(candidate, static_cast<long double>(low), static_cast<long double>(high)));
         }
         if (next == value_ || !acceptable(next)) return;
         setValue(next);
@@ -117,6 +126,12 @@ public:
         return parsed && acceptable(*parsed) ? QValidator::Acceptable : QValidator::Intermediate;
     }
     void fixup(QString& input) const override { input = text(value_); }
+
+protected:
+    void wheelEvent(QWheelEvent* event) override {
+        if (!hasFocus()) { event->ignore(); return; }
+        QAbstractSpinBox::wheelEvent(event);
+    }
 
 private:
     static bool finite(T value) {
