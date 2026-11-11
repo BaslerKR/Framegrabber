@@ -594,10 +594,66 @@ std::string Framegrabber::CameraInfo::displayName() const
     return result.empty() ? "Camera" : result;
 }
 
-Framegrabber::Framegrabber(FramegrabberSystem* parent, const int allottedNumber)
+Framegrabber::Framegrabber(FramegrabberSystem* parent, const int allottedNumber,
+                           FramegrabberSystem::ResourceClaimFn resourceClaim)
     : _system(parent),
-      _allottedNumber(allottedNumber)
+      _allottedNumber(allottedNumber),
+      _resourceClaim(std::move(resourceClaim))
 {
+}
+
+bool Framegrabber::ensureResourceClaim(const FramegrabberSystem::BoardInfo& board,
+                                       std::string& error)
+{
+    error.clear();
+    if (!_resourceClaim)
+    {
+        error = "The consumer did not provide a hardware resource claim.";
+        return false;
+    }
+    if (board.serial.empty())
+    {
+        error = "The frame grabber board serial is unavailable for an exclusive resource claim.";
+        return false;
+    }
+    if (_heldResourceClaim && _heldResourceSerial == board.serial)
+    {
+        return true;
+    }
+
+    releaseResourceClaim();
+    std::shared_ptr<void> claim;
+    try
+    {
+        claim = _resourceClaim(board.serial, error);
+    }
+    catch (const std::exception& exception)
+    {
+        error = exception.what();
+        return false;
+    }
+    catch (...)
+    {
+        error = "The frame grabber board resource claim failed.";
+        return false;
+    }
+    if (!claim)
+    {
+        if (error.empty())
+        {
+            error = "The frame grabber board resource claim was refused.";
+        }
+        return false;
+    }
+    _heldResourceClaim = std::move(claim);
+    _heldResourceSerial = board.serial;
+    return true;
+}
+
+void Framegrabber::releaseResourceClaim()
+{
+    _heldResourceClaim.reset();
+    _heldResourceSerial.clear();
 }
 
 Framegrabber::~Framegrabber()
@@ -906,6 +962,14 @@ bool Framegrabber::loadAppletConfiguration(const std::string& appletPath,
     }
     refreshAppletCatalogUnlocked(board);
 
+    std::string claimError;
+    if (!ensureResourceClaim(board, claimError))
+    {
+        setLastError(FG_ERROR, claimError);
+        restorePreviousApplet(previous);
+        return false;
+    }
+
     Fg_Struct* handle = nullptr;
     std::string loadedAppletPath = overridePath;
     if (overridePath.empty())
@@ -1021,6 +1085,14 @@ bool Framegrabber::loadAppletUnlocked(const std::string& reference, const std::s
         refreshAppletCatalogUnlocked(board);
     }
 
+    std::string claimError;
+    if (!ensureResourceClaim(board, claimError))
+    {
+        setLastError(FG_ERROR, claimError);
+        restorePreviousApplet(previous);
+        return false;
+    }
+
     Fg_Struct* handle = initializeBoard(board, path);
     if (handle && adoptBoard(handle, board, path, {}))
     {
@@ -1070,6 +1142,14 @@ void Framegrabber::restorePreviousApplet(const PreviousApplet& previous)
     log("Restoring the previous frame grabber applet.", true);
     // Keep the error of the failed request; restoration reports only through the log.
     const OperationError requestError = lastError();
+    std::string claimError;
+    if (!ensureResourceClaim(board, claimError))
+    {
+        log("Could not restore the previous frame grabber applet: " + claimError, true);
+        std::lock_guard<std::mutex> lock(_stateMutex);
+        _lastError = requestError;
+        return;
+    }
     Fg_Struct* handle = initializeBoard(board, previous.appletPath);
     if (handle && !previous.configurationPath.empty())
     {
@@ -1343,7 +1423,10 @@ bool Framegrabber::isOpened() const
 void Framegrabber::close()
 {
     std::lock_guard<std::mutex> lifecycleLock(_lifecycleMutex);
-    closeUnlocked(true);
+    if (closeUnlocked(true))
+    {
+        releaseResourceClaim();
+    }
 }
 
 bool Framegrabber::closeUnlocked(const bool notifyConnectionStatus)

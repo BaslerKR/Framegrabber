@@ -10,6 +10,8 @@
 
 ## Unreleased
 
+- Claim the host-owned `siso-board:<serial>` resource immediately before `Fg_Init`/`Fg_InitConfig` and hold it until the public close completes. A board already owned by another Playground plugin is rejected with that plugin's package id and display name instead of attempting a competing native open. Requires the ABI 7.0 host resource-claim contract.
+
 - Ignore wheel input on unfocused numeric editors so scrolling a feature tree does
   not write device parameters. Clamp floating-point multi-step input to the last
   complete step within the SDK range; use the same tolerance for arrow/key availability.

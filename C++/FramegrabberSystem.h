@@ -7,6 +7,7 @@
  */
 
 #include <cstddef>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -17,6 +18,10 @@ class Framegrabber;
 class FramegrabberSystem
 {
 public:
+    /** @brief Retrieves one consumer-owned resource claim for a board serial. */
+    using ResourceClaimFn = std::function<std::shared_ptr<void>(const std::string& boardSerial,
+                                                                std::string& error)>;
+
     struct BoardInfo
     {
         unsigned int index = 0;
@@ -83,6 +88,8 @@ public:
     [[nodiscard]] std::vector<AppletInfo> getLoadableApplets(
         const std::string& boardName) const;
     [[nodiscard]] bool isInitialized() const noexcept;
+    /** @brief Installs the consumer claim used before every board open. */
+    void setResourceClaimCallback(ResourceClaimFn claim);
 
     Framegrabber* addFramegrabber();
     void removeFramegrabber(Framegrabber* framegrabber);
@@ -98,6 +105,7 @@ private:
     static void releaseLibraries();
 
     bool _initialized = false;
+    ResourceClaimFn _resourceClaim;
     mutable std::mutex _mutex;
     mutable std::mutex _appletDiscoveryMutex;
     std::vector<BoardInfo> _boards;

@@ -8,8 +8,10 @@
 
 #include <QPointer>
 
+#include <atomic>
 #include <memory>
 #include <mutex>
+#include <string>
 
 namespace {
 
@@ -165,15 +167,20 @@ private:
     std::shared_ptr<FramegrabberPluginTitleState> _titleState = std::make_shared<FramegrabberPluginTitleState>();
 };
 
-class FramegrabberPlugin final : public DevicePluginTemplate {
+class FramegrabberPlugin final : public DevicePluginTemplate,
+                                 public IDevicePluginResourceClaimsReceiver {
     Q_OBJECT
     Q_PLUGIN_METADATA(IID PlaygroundDevicePlugin_iid)
-    Q_INTERFACES(IDevicePlugin)
+    Q_INTERFACES(IDevicePlugin IDevicePluginResourceClaimsReceiver)
 
 public:
     DevicePluginDescriptor descriptor() const override
     {
         return {QStringLiteral("framegrabber"), playgroundDevicePluginDisplayName(), playgroundDevicePluginVersion(), false};
+    }
+    void setResourceClaims(IDevicePluginResourceClaims* claims) override
+    {
+        _claims.store(claims, std::memory_order_release);
     }
     bool discoverDevices(QVariantMap* discoveryData, QString* errorMessage) override
     {
@@ -206,6 +213,9 @@ public:
                 if (errorMessage) *errorMessage = QStringLiteral("Frame grabber runtime initialization failed.");
                 return {};
             }
+            system->setResourceClaimCallback([this](const std::string& serial, std::string& error) {
+                return claimBoard(serial, error);
+            });
             system->setCachedBoardInfo(boards);
             Framegrabber* framegrabber = system->addFramegrabber();
             if (!framegrabber) {
@@ -218,6 +228,30 @@ public:
             return {};
         }
     }
+
+private:
+    std::shared_ptr<void> claimBoard(const std::string& serial, std::string& error)
+    {
+        auto* claims = _claims.load(std::memory_order_acquire);
+        if (!claims) {
+            error = "The host did not provide hardware resource claims.";
+            return {};
+        }
+        const QString key = playgroundSisoBoardResourceKey(QString::fromStdString(serial));
+        if (key.isEmpty()) {
+            error = "The frame grabber board serial is unavailable for an exclusive resource claim.";
+            return {};
+        }
+        QString claimError;
+        auto claim = claims->claimResource(key, &claimError);
+        if (!claim) {
+            error = claimError.toStdString();
+            return {};
+        }
+        return claim;
+    }
+
+    std::atomic<IDevicePluginResourceClaims*> _claims{nullptr};
 };
 
 #include "FramegrabberPlugin.moc"

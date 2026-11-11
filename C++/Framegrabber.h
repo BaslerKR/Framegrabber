@@ -270,7 +270,8 @@ public:
         std::vector<AppletFeatureNode> children;
     };
 
-    explicit Framegrabber(FramegrabberSystem* parent, int allottedNumber = 0);
+    explicit Framegrabber(FramegrabberSystem* parent, int allottedNumber = 0,
+                          FramegrabberSystem::ResourceClaimFn resourceClaim = {});
     ~Framegrabber();
 
     Framegrabber(const Framegrabber&) = delete;
@@ -460,8 +461,16 @@ private:
     template<typename Callback>
     using CallbackMap = std::unordered_map<CallbackId, Callback>;
 
+    /** @brief Claims the board serial without reopening an already held key. */
+    bool ensureResourceClaim(const FramegrabberSystem::BoardInfo& board, std::string& error);
+    /** @brief Drops the current consumption-side claim. */
+    void releaseResourceClaim();
+
     FramegrabberSystem* _system = nullptr;
     int _allottedNumber = 0;
+    FramegrabberSystem::ResourceClaimFn _resourceClaim;
+    std::shared_ptr<void> _heldResourceClaim;
+    std::string _heldResourceSerial;
 
     mutable std::mutex _lifecycleMutex;
     mutable std::mutex _stateMutex;

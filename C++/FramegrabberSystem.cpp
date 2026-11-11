@@ -646,12 +646,19 @@ bool FramegrabberSystem::isInitialized() const noexcept
     return _initialized;
 }
 
+void FramegrabberSystem::setResourceClaimCallback(ResourceClaimFn claim)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    _resourceClaim = std::move(claim);
+}
+
 Framegrabber* FramegrabberSystem::addFramegrabber()
 {
     std::lock_guard<std::mutex> lock(_mutex);
     auto framegrabber = std::make_unique<Framegrabber>(
         this,
-        static_cast<int>(_nextFramegrabberNumber++));
+        static_cast<int>(_nextFramegrabberNumber++),
+        _resourceClaim);
     Framegrabber* result = framegrabber.get();
     _framegrabbers.push_back(std::move(framegrabber));
     return result;
