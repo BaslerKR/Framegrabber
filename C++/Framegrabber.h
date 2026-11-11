@@ -531,7 +531,7 @@ private:
     void restorePreviousApplet(const PreviousApplet& previous);
     Fg_Struct* initializeBoard(const FramegrabberSystem::BoardInfo& board,
                                const std::string& appletPath);
-    bool adoptBoard(Fg_Struct* handle,
+    void adoptBoard(Fg_Struct* handle,
                     const FramegrabberSystem::BoardInfo& board,
                     const std::string& appletPath,
                     const std::string& configurationPath);

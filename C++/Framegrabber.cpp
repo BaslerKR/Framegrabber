@@ -1037,14 +1037,8 @@ bool Framegrabber::loadAppletConfiguration(const std::string& appletPath,
             return false;
         }
     }
-    if (adoptBoard(handle, board, loadedAppletPath, configurationPath))
-    {
-        return true;
-    }
-    Fg_FreeGrabber(handle);
-    releaseResourceClaim();
-    restorePreviousApplet(previous);
-    return false;
+    adoptBoard(handle, board, loadedAppletPath, configurationPath);
+    return true;
 }
 
 bool Framegrabber::loadAppletUnlocked(const std::string& reference, const std::string& boardName)
@@ -1102,16 +1096,13 @@ bool Framegrabber::loadAppletUnlocked(const std::string& reference, const std::s
     }
 
     Fg_Struct* handle = initializeBoard(board, path);
-    if (handle && adoptBoard(handle, board, path, {}))
+    if (!handle)
     {
-        return true;
+        restorePreviousApplet(previous);
+        return false;
     }
-    if (handle)
-    {
-        Fg_FreeGrabber(handle);
-    }
-    restorePreviousApplet(previous);
-    return false;
+    adoptBoard(handle, board, path, {});
+    return true;
 }
 
 bool Framegrabber::open(const std::string& boardName)
@@ -1180,10 +1171,9 @@ void Framegrabber::restorePreviousApplet(const PreviousApplet& previous)
                 true);
         }
     }
-    if (handle && !adoptBoard(handle, board, previous.appletPath, previous.configurationPath))
+    if (handle)
     {
-        Fg_FreeGrabber(handle);
-        releaseResourceClaim();
+        adoptBoard(handle, board, previous.appletPath, previous.configurationPath);
     }
     std::lock_guard<std::mutex> lock(_stateMutex);
     _lastError = requestError;
@@ -1202,7 +1192,7 @@ Fg_Struct* Framegrabber::initializeBoard(const FramegrabberSystem::BoardInfo& bo
     return handle;
 }
 
-bool Framegrabber::adoptBoard(Fg_Struct* handle,
+void Framegrabber::adoptBoard(Fg_Struct* handle,
                               const FramegrabberSystem::BoardInfo& board,
                               const std::string& appletPath,
                               const std::string& configurationPath)
@@ -1272,7 +1262,6 @@ bool Framegrabber::adoptBoard(Fg_Struct* handle,
     log("Opened " + board.displayName() + " with "
         + std::filesystem::path(appletPath).filename().string()
         + (configurationPath.empty() ? std::string{} : " and " + configurationPath) + ".");
-    return true;
 }
 
 bool Framegrabber::refreshAppletCatalog(const std::string& boardName)
