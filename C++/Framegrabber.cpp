@@ -2964,6 +2964,18 @@ std::optional<Framegrabber::ParameterValue> Framegrabber::appletParameterPrototy
 }
 
 Framegrabber::AppletParameterLimits Framegrabber::getAppletParameterLimits(
+    const std::string& name, const unsigned int dmaIndex) const
+{
+    int parameterId = -1;
+    {
+        std::lock_guard<std::mutex> lock(_stateMutex);
+        if (!_handle || name.empty()) return {};
+        parameterId = Fg_getParameterIdByName(_handle, name.c_str());
+    }
+    return getAppletParameterLimits(parameterId, dmaIndex);
+}
+
+Framegrabber::AppletParameterLimits Framegrabber::getAppletParameterLimits(
     const std::int64_t parameterId,
     const unsigned int dmaIndex) const
 {
@@ -3512,6 +3524,28 @@ bool Framegrabber::getCameraFeature(const CameraTransport transport,
             }
         },
         value);
+}
+
+Framegrabber::AppletParameterLimits Framegrabber::getCameraFeatureLimits(
+    const CameraTransport transport, const unsigned int dmaIndex,
+    const std::string& name, const bool floatingPoint) const
+{
+    std::lock_guard<std::mutex> lock(_stateMutex);
+    const CameraEntry* camera = findCamera(transport, dmaIndex);
+    if (!camera || !camera->handle || !camera->info.connected) return {};
+    AppletParameterLimits limits;
+    if (floatingPoint) {
+        double minimum = 0, maximum = 0, increment = 0;
+        if (Sgc_getFloatValueLimits(camera->handle, name.c_str(), &minimum, &maximum, &increment) == SGC_OK) {
+            limits.minimum = minimum; limits.maximum = maximum; limits.increment = increment;
+        }
+    } else {
+        std::int64_t minimum = 0, maximum = 0, increment = 0;
+        if (Sgc_getIntegerValueLimits(camera->handle, name.c_str(), &minimum, &maximum, &increment) == SGC_OK) {
+            limits.minimum = minimum; limits.maximum = maximum; limits.increment = increment;
+        }
+    }
+    return limits;
 }
 
 bool Framegrabber::setCameraFeature(const CameraTransport transport,

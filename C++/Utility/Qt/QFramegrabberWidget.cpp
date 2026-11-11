@@ -1,4 +1,5 @@
 #include "QFramegrabberWidget.h"
+#include "FramegrabberNumericFeatureEditor.h"
 
 #ifdef QT_GUI_LIB
 
@@ -74,6 +75,7 @@ QDomElement findFeatureElement(const QDomElement& root, const QString& name)
         QStringLiteral("IntReg"),
         QStringLiteral("MaskedIntReg"),
         QStringLiteral("Float"),
+        QStringLiteral("FloatReg"),
         QStringLiteral("Enumeration"),
         QStringLiteral("Boolean"),
         QStringLiteral("String"),
@@ -122,7 +124,7 @@ QString valueText(const Framegrabber::ParameterValue& value)
             }
             else if constexpr (std::is_same_v<T, double>)
             {
-                return QString::number(current, 'g', 12);
+                return QString::number(current, 'g', 17);
             }
             else if constexpr (std::is_signed_v<T>)
             {
@@ -159,18 +161,22 @@ bool updateValueFromText(Framegrabber::ParameterValue& value, const QString& tex
             else if constexpr (std::is_signed_v<T>)
             {
                 const qlonglong parsed = text.toLongLong(&converted);
-                if (converted)
+                if (converted && parsed >= (std::numeric_limits<T>::lowest)()
+                    && parsed <= (std::numeric_limits<T>::max)())
                 {
                     current = static_cast<T>(parsed);
                 }
+                else converted = false;
             }
             else
             {
                 const qulonglong parsed = text.toULongLong(&converted);
-                if (converted)
+                if (converted && !text.trimmed().startsWith('-')
+                    && parsed <= (std::numeric_limits<T>::max)())
                 {
                     current = static_cast<T>(parsed);
                 }
+                else converted = false;
             }
             return converted;
         },
@@ -1334,6 +1340,53 @@ void QFramegrabberWidget::addAppletFeatureNode(
     }
 }
 
+QWidget* QFramegrabberWidget::createNumericEditor(
+    const Framegrabber::ParameterValue& current,
+    const Framegrabber::AppletParameterLimits& limits, const bool writable,
+    const std::function<bool(const Framegrabber::ParameterValue&)>& write,
+    const std::function<void()>& refresh)
+{
+    using namespace framegrabber::presentation;
+    auto* editor = std::visit([&](const auto& typed) -> NumericFeatureEditor* {
+        using T = std::decay_t<decltype(typed)>;
+        if constexpr (std::is_arithmetic_v<T>) {
+            const auto limit = [&](const std::optional<Framegrabber::ParameterValue>& source) -> std::optional<T> {
+                if (!source) return {};
+                Framegrabber::ParameterValue parsed = T{};
+                if (!updateValueFromText(parsed, valueText(*source))) return {};
+                return std::get<T>(parsed);
+            };
+            return new FeatureSpinBox<T>(typed, limit(limits.minimum), limit(limits.maximum), limit(limits.increment), this);
+        } else return nullptr;
+    }, current);
+    if (!editor) return new QLabel(tr("Unsupported numeric type"), this);
+    editor->setEnabled(writable);
+    const QPointer<NumericFeatureEditor> guard(editor);
+    const auto accepted = std::make_shared<Framegrabber::ParameterValue>(current);
+    const auto busy = std::make_shared<bool>(false);
+    connect(editor, &QAbstractSpinBox::editingFinished, editor, [=] {
+        if (*busy || !guard || !guard->isEnabled()) return;
+        const auto text = guard->commitText();
+        auto updated = *accepted;
+        if (!text || !updateValueFromText(updated, *text) || updated == *accepted) return;
+        *busy = true;
+        guard->setEnabled(false);
+        runAsyncWrite([write, updated] { return write(updated); }, [=](bool success) {
+            *busy = false;
+            if (success) *accepted = updated;
+            if (guard) {
+                if (!success) guard->restoreText(valueText(*accepted));
+                guard->setEnabled(writable);
+            }
+            if (!success) {
+                logMessage(tr("Failed to update parameter."), true);
+                refresh();
+            }
+        });
+    });
+    return editor;
+}
+
 QWidget* QFramegrabberWidget::createAppletFeatureEditor(
     const Framegrabber::AppletFeatureNode& node,
     const unsigned int dmaIndex)
@@ -1368,6 +1421,17 @@ QWidget* QFramegrabberWidget::createAppletFeatureEditor(
             false))
     {
         return new QLabel(tr("Read failed"), this);
+    }
+
+    if (node.kind == Framegrabber::AppletFeatureKind::Integer
+        || node.kind == Framegrabber::AppletFeatureKind::Float)
+    {
+        return createNumericEditor(current, _framegrabber->getAppletParameterLimits(node.parameterId, dmaIndex),
+            node.writable, [=](const Framegrabber::ParameterValue& updated) {
+                const bool success = _framegrabber && _framegrabber->setAppletParameterById(node.parameterId, dmaIndex, updated);
+                logFramegrabberWrite(featureName, dmaIndex, updated, success);
+                return success;
+            }, [=] { rebuildAppletTree(); });
     }
 
     if (node.kind == Framegrabber::AppletFeatureKind::Boolean)
@@ -1484,6 +1548,9 @@ QWidget* QFramegrabberWidget::createAppletFeatureEditor(
         });
         return button;
     }
+
+    if (node.kind != Framegrabber::AppletFeatureKind::String)
+        return new QLabel(tr("Unsupported feature type"), this);
 
     auto* edit = new QLineEdit(valueText(current), this);
     edit->setEnabled(node.writable);
@@ -1659,7 +1726,7 @@ QWidget* QFramegrabberWidget::createFeatureEditor(const QDomElement& node,
 {
     const QString tag = node.tagName();
     Framegrabber::ParameterValue current = std::int64_t{0};
-    if (tag == QStringLiteral("Float"))
+    if (tag == QStringLiteral("Float") || tag == QStringLiteral("FloatReg"))
     {
         current = 0.0;
     }
@@ -1684,6 +1751,20 @@ QWidget* QFramegrabberWidget::createFeatureEditor(const QDomElement& node,
         && tag != QStringLiteral("Command"))
     {
         return new QLabel(tr("Unavailable"), this);
+    }
+
+    if (tag == QStringLiteral("Integer") || tag == QStringLiteral("IntReg")
+        || tag == QStringLiteral("MaskedIntReg") || tag == QStringLiteral("Float")
+        || tag == QStringLiteral("FloatReg"))
+    {
+        const bool floatingPoint = std::holds_alternative<double>(current);
+        const auto limits = source == TreeSource::Applet
+            ? _framegrabber->getAppletParameterLimits(featureName.toStdString(), dmaIndex)
+            : _framegrabber->getCameraFeatureLimits(transport, dmaIndex, featureName.toStdString(), floatingPoint);
+        return createNumericEditor(current, limits, writable,
+            [=](const Framegrabber::ParameterValue& updated) {
+                return writeFeature(source, transport, dmaIndex, featureName, updated, readable);
+            }, [=] { refreshFeatureTree(source, transport, dmaIndex); });
     }
 
     if (tag == QStringLiteral("Boolean"))
@@ -1836,6 +1917,9 @@ QWidget* QFramegrabberWidget::createFeatureEditor(const QDomElement& node,
         });
         return button;
     }
+
+    if (tag != QStringLiteral("String") && tag != QStringLiteral("StringReg"))
+        return new QLabel(tr("Unsupported feature type"), this);
 
     auto* edit = new QLineEdit(valueText(current), this);
     edit->setEnabled(writable);

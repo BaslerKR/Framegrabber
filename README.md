@@ -143,6 +143,18 @@ The Setup tab contains:
 - file-based loading of an applet or `.mcf` file, and configuration saving;
 - the applet feature tree for each DMA.
 
+Applet and camera numeric features use native spin editors that preserve signed
+and unsigned integer widths and floating-point round trips. Applet bounds and
+increments come from `getAppletParameterLimits`; camera bounds come from the live
+`Sgc_getIntegerValueLimits` / `Sgc_getFloatValueLimits` calls through
+`getCameraFeatureLimits`. Missing limits remain unspecified (the scalar type's
+representable range still applies). Positive increments are enforced relative to
+a reported minimum. Invalid or off-grid input restores the previous value without
+a write. Writes run asynchronously, disable the editor while pending, and restore
+the accepted value and refresh the tree on rejection. Read-only editors are
+disabled. Commands use Execute buttons, including write-only commands; only
+string features use free-text editors. Unknown types are shown as unsupported.
+
 On creation the widget loads the board's active applet (or else its power-up applet). Every lifecycle command takes the module control gate. While another surface holds the gate the commands are disabled, but Live can still be stopped. `setFileDialogPresenter()` lets a consumer supply themed file dialogs. Without one, the widget uses plain Qt dialogs.
 
 ## Declared device and parameter contracts

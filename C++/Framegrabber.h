@@ -423,6 +423,9 @@ public:
     [[nodiscard]] AppletParameterLimits getAppletParameterLimits(
         std::int64_t parameterId,
         unsigned int dmaIndex) const;
+    /** @brief Resolves an SDK access name and queries that parameter's numeric limits. */
+    [[nodiscard]] AppletParameterLimits getAppletParameterLimits(
+        const std::string& name, unsigned int dmaIndex) const;
 
     [[nodiscard]] std::vector<CameraControlCapability> cameraControlCapabilities() const;
     /** @brief Restarts CXP discovery (SGC_SP_FLAG_RESET_DISCOVERY_INFOS) and reconnects. */
@@ -437,6 +440,10 @@ public:
                           unsigned int dmaIndex,
                           const std::string& name,
                           ParameterValue& value) const;
+    /** @brief Queries live camera numeric limits; absent properties remain unspecified. */
+    [[nodiscard]] AppletParameterLimits getCameraFeatureLimits(
+        CameraTransport transport, unsigned int dmaIndex, const std::string& name,
+        bool floatingPoint) const;
     bool setCameraFeature(CameraTransport transport,
                           unsigned int dmaIndex,
                           const std::string& name,

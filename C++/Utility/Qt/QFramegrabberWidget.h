@@ -37,6 +37,7 @@ class QTreeWidgetItem;
 class QFramegrabberWidget final : public QWidget, protected FramegrabberControlUi
 {
     Q_OBJECT
+    friend class FramegrabberFeatureEditorTest;
 
 public:
     /**
@@ -163,6 +164,10 @@ private:
     QWidget* createAppletFeatureEditor(
         const Framegrabber::AppletFeatureNode& node,
         unsigned int dmaIndex);
+    QWidget* createNumericEditor(const Framegrabber::ParameterValue& current,
+        const Framegrabber::AppletParameterLimits& limits, bool writable,
+        const std::function<bool(const Framegrabber::ParameterValue&)>& write,
+        const std::function<void()>& refresh);
     void populateFeatureTree(QTreeWidget* tree,
                              const QString& xml,
                              TreeSource source,

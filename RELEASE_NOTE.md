@@ -10,6 +10,11 @@
 
 ## Unreleased
 
+- Use numeric spin editors for applet and camera integer/float features, with SDK
+  bounds and increments, exact 64-bit integers, floating-point round trips and
+  rejected-write restoration. Keep commands as Execute buttons and stop treating
+  unknown feature types as strings. Add hardware-independent editor regressions.
+
 - Use one tested wait-result classification for DMA loop actions and failure accounting, including idle polls and shutdown.
 
 - Keep one warning per adapter failure at the DMA callback boundary and directly test producer counters, idle-poll exclusion and per-DMA aggregation.

@@ -155,6 +155,15 @@ if(FRAMEGRABBER_BUILD_QT_WIDGET)
             Qt${FRAMEGRABBER_QT_VERSION_MAJOR}::Xml
     )
     if(FRAMEGRABBER_BUILD_TESTS)
+        find_package(Qt${FRAMEGRABBER_QT_VERSION_MAJOR} REQUIRED COMPONENTS Test)
+        add_executable(framegrabber_feature_editor_test Tests/FeatureEditorTest.cpp)
+        set_target_properties(framegrabber_feature_editor_test PROPERTIES AUTOMOC ON)
+        target_link_libraries(framegrabber_feature_editor_test PRIVATE
+            Framegrabber::QtWidget Qt${FRAMEGRABBER_QT_VERSION_MAJOR}::Test)
+        add_test(NAME framegrabber_feature_editor_test COMMAND framegrabber_feature_editor_test)
+        set_tests_properties(framegrabber_feature_editor_test PROPERTIES
+            ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
+            ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt${FRAMEGRABBER_QT_VERSION_MAJOR}::Core>")
         add_executable(framegrabber_runtime_diagnostics_test Tests/RuntimeDiagnosticsTest.cpp)
         target_link_libraries(framegrabber_runtime_diagnostics_test PRIVATE Framegrabber::QtWidget)
         add_test(NAME framegrabber_runtime_diagnostics_test COMMAND framegrabber_runtime_diagnostics_test)
