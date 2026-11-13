@@ -1,14 +1,8 @@
-## v0.2.1 (2026-10-20)
-
-- Match applet open/save controls to the shared neutral icons.
-
-- Use the shared neutral network-card artwork for the package icon.
-
-- Use the shared refresh, single-grab, and live glyphs on the device toolbar.
-
-- Publish the independently built device package with installed SDK validation.
-
 ## Unreleased
+
+## v0.3.0 (2026-11-13)
+
+- Require Playground 0.6.6 or later; this package uses the device plugin interface introduced in that release.
 
 - Claim the host-owned `siso-board:<serial>` resource immediately before `Fg_Init`/`Fg_InitConfig` and hold it until the public close completes. Release the claim when an open or previous-applet restore fails without an adopted handle, so a failed open cannot block another plugin. A board already owned by another Playground plugin is rejected with that plugin's package id and display name instead of attempting a competing native open. The core claim callback remains optional for standalone consumers; the Playground plugin rejects a missing host service. Requires the ABI 7.0 host resource-claim contract.
 
@@ -35,12 +29,21 @@
 - Declare what kind of data each automation tool returns, so Playground can limit what connected assistants receive. Requires a Playground release with the updated automation interface; earlier releases do not list this package's automation tools.
 - Take the binary display name from the package definition (`Frame Grabber`).
 
+## v0.2.1 (2026-10-20)
+
+- Match applet open/save controls to the shared neutral icons.
+
+- Use the shared neutral network-card artwork for the package icon.
+
+- Use the shared refresh, single-grab, and live glyphs on the device toolbar.
+
+- Publish the independently built device package with installed SDK validation.
+
 ## v0.2.2 (2026-10-29)
 
 - Stop the missing-applet flow when shutdown begins while its picker is open.
 
 - Show the next Live grab command with cameras/stop artwork in all pointer and focus states, and keep its tooltip and accessible name synchronized with acquisition state.
-
 
 - Raise the DMA buffer count to at least 2; with one buffer every copied frame was discarded as overwritten, so Live delivered nothing and Single timed out.
 - Report the SDK result of rejected applet commands instead of `FG_OK`; `executeAppletCommandById()` returns it through an optional output and reports `FG_INVALID_PARAMETER` for unavailable or non-integral command types.
