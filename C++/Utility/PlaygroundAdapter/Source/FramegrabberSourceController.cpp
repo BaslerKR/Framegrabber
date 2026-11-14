@@ -170,6 +170,24 @@ std::string catalogApplet(const Framegrabber& framegrabber, const std::string& r
 }
 }
 
+void FramegrabberSourceController::setFrameStorageProvider(
+    std::shared_ptr<IFrameStorageProvider> provider)
+{
+    if (_framegrabber == nullptr)
+    {
+        return;
+    }
+    if (!provider)
+    {
+        _framegrabber->setFrameStorage({});
+        return;
+    }
+    _framegrabber->setFrameStorage([provider](const std::size_t bytes)
+    {
+        return provider->acquire(bytes);
+    });
+}
+
 FramegrabberSourceController::FramegrabberSourceController(
     Framegrabber* framegrabber,
     QObject* parent)
