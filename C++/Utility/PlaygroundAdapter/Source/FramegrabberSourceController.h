@@ -3,6 +3,7 @@
 #include "AbstractSourceController.h"
 #include "DeviceConnectionControl.h"
 #include "DeviceParameterControl.h"
+#include "FrameStorage.h"
 #include "Framegrabber.h"
 #include "ToolProvider.h"
 
@@ -33,12 +34,14 @@ class FramegrabberSourceController final
     : public AbstractSourceController,
       public IToolProvider,
       public IDeviceConnectionControl,
-      public IDeviceParameterControl
+      public IDeviceParameterControl,
+      public IFrameStorageClient
 {
     Q_OBJECT
-    Q_INTERFACES(IToolProvider IDeviceConnectionControl IDeviceParameterControl)
+    Q_INTERFACES(IToolProvider IDeviceConnectionControl IDeviceParameterControl IFrameStorageClient)
 
 public:
+    void setFrameStorageProvider(std::shared_ptr<IFrameStorageProvider> provider) override;
     using TargetsCompletion = IDeviceConnectionControl::TargetsCompletion;
     explicit FramegrabberSourceController(Framegrabber* framegrabber,
                                            QObject* parent = nullptr);

@@ -542,6 +542,8 @@ struct Framegrabber::DmaChannel
     std::thread thread;
     std::mutex resourceMutex;
     std::shared_ptr<OwnedBufferPool> ownedBufferPool;
+    // Set instead of the pool when the consumer supplies the storage frames are copied into.
+    Framegrabber::FrameStorage frameStorage;
     std::atomic<bool> stopRequested{false};
     std::atomic<bool> acquisitionStarted{false};
     std::atomic<bool> cameraStarted{false};
@@ -1812,12 +1814,20 @@ void Framegrabber::startChannel(const unsigned int dmaIndex, const std::size_t f
         return;
     }
 
+    FrameStorage frameStorage;
+    {
+        std::lock_guard<std::mutex> lock(_frameStorageMutex);
+        frameStorage = _frameStorage;
+    }
     std::shared_ptr<OwnedBufferPool> ownedBufferPool;
     try
     {
-        ownedBufferPool = OwnedBufferPool::create(
-            frameBytes,
-            bufferCount);
+        if (!frameStorage)
+        {
+            ownedBufferPool = OwnedBufferPool::create(
+                frameBytes,
+                bufferCount);
+        }
     }
     catch (const std::exception& exception)
     {
@@ -1843,6 +1853,7 @@ void Framegrabber::startChannel(const unsigned int dmaIndex, const std::size_t f
     channel->index = dmaIndex;
     channel->memory = memory;
     channel->ownedBufferPool = std::move(ownedBufferPool);
+    channel->frameStorage = std::move(frameStorage);
     DmaChannel* channelPtr = channel.get();
     std::unique_lock<std::mutex> registrationLock(_stateMutex);
     _channels[dmaIndex] = std::move(channel);
@@ -1997,8 +2008,9 @@ void Framegrabber::startChannel(const unsigned int dmaIndex, const std::size_t f
                     {
                         break;
                     }
-                    OwnedBufferPool::Lease ownedBytes =
-                        channelPtr->ownedBufferPool->acquire();
+                    OwnedBufferPool::Lease ownedBytes = channelPtr->frameStorage
+                        ? channelPtr->frameStorage(payloadBytes)
+                        : channelPtr->ownedBufferPool->acquire();
                     if (!ownedBytes)
                     {
                         channelPtr->poolExhausted.fetch_add(1, std::memory_order_relaxed);
@@ -2420,6 +2432,12 @@ std::vector<FramegrabberSystem::BoardInfo> Framegrabber::getCachedBoardInfo() co
 std::string Framegrabber::getBoardAppletPath(const std::string& boardName) const
 {
     return _system ? _system->getBoardAppletPath(boardName) : std::string{};
+}
+
+void Framegrabber::setFrameStorage(FrameStorage storage)
+{
+    std::lock_guard<std::mutex> lock(_frameStorageMutex);
+    _frameStorage = std::move(storage);
 }
 
 void Framegrabber::setDMABufferCount(const std::size_t count)

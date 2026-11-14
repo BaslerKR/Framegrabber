@@ -375,6 +375,20 @@ public:
     void setDMABufferCount(std::size_t count);
     [[nodiscard]] std::size_t dmaBufferCount() const;
 
+    /**
+     * @brief Storage for one delivered frame: returns at least `bytes` writable bytes, or empty.
+     *
+     * Must not wait and is called on acquisition threads. An empty result drops that frame.
+     */
+    using FrameStorage = std::function<std::shared_ptr<std::uint8_t>(std::size_t bytes)>;
+    /**
+     * @brief Sets where delivered frames are copied; empty restores the built-in buffer pool.
+     *
+     * Applies from the next acquisition start. With storage set, the grabber allocates no pool
+     * of its own and the copy out of the DMA buffer goes straight into the given storage.
+     */
+    void setFrameStorage(FrameStorage storage);
+
     [[nodiscard]] std::string getAppletFeatureXml(unsigned int dmaIndex) const;
     [[nodiscard]] std::vector<AppletFeatureNode> getAppletFeatureModel(
         unsigned int dmaIndex) const;
@@ -486,6 +500,8 @@ private:
     std::string _connectedBoardName;
     unsigned int _boardIndex = 0;
     std::size_t _dmaBufferCount = 6;
+    std::mutex _frameStorageMutex;
+    FrameStorage _frameStorage;
     std::vector<std::unique_ptr<DmaChannel>> _channels;
     std::vector<CameraEntry> _cxpCameras;
     std::vector<AppletInfo> _appletCatalog;
