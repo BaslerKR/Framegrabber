@@ -1,6 +1,10 @@
 ## Unreleased
 
-- Add `Framegrabber::setFrameStorage()`: the consumer may supply the storage delivered frames are copied into. With it set, the grabber allocates no buffer pool of its own and the copy out of the DMA buffer goes straight into that storage. The Playground source controller forwards host-provided storage (`IFrameStorageClient`), which needs a Playground release that ships `FrameStorage.h`.
+## v0.4.0 (2026-11-14)
+
+- Require Playground 0.7.0 or later; this package uses the frame storage interface introduced in that release.
+
+- Deliver live frames directly into Playground's shared frame storage, so the frame grabber no longer keeps a separate buffer pool and large frames reach scripts and viewers with one less copy. Standalone consumers keep using the grabber's own storage.
 
 ## v0.3.0 (2026-11-13)
 
