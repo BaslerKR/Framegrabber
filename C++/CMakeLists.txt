@@ -18,7 +18,7 @@ if(FRAMEGRABBER_BUILD_PLAYGROUND_PLUGIN)
 endif()
 if(PROJECT_NAME STREQUAL "Framegrabber" AND PROJECT_IS_TOP_LEVEL AND
    (FRAMEGRABBER_BUILD_PLAYGROUND_ADAPTER OR FRAMEGRABBER_BUILD_PLAYGROUND_PLUGIN))
-    find_package(PlaygroundPluginSDK 0.2 CONFIG REQUIRED)
+    find_package(PlaygroundPluginSDK 0.3 CONFIG REQUIRED)
     set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 endif()
 
@@ -232,6 +232,10 @@ if(FRAMEGRABBER_BUILD_PLAYGROUND_ADAPTER)
 endif()
 
 if(FRAMEGRABBER_BUILD_PLAYGROUND_PLUGIN)
+    # U2-gated widget libraries resolve the SDK's temporary Resources package
+    # themselves; the runtime contract target does not depend on it.
+    find_package(ResourcesWidgets CONFIG REQUIRED
+        HINTS "${PlaygroundPluginSDK_PREFIX}/lib/cmake/ResourcesWidgets")
     if(NOT FRAMEGRABBER_BUILD_PLAYGROUND_ADAPTER)
         message(FATAL_ERROR
             "[Framegrabber] FRAMEGRABBER_BUILD_PLAYGROUND_PLUGIN=ON requires "
@@ -244,10 +248,10 @@ if(FRAMEGRABBER_BUILD_PLAYGROUND_PLUGIN)
             "FRAMEGRABBER_BUILD_QT_WIDGET."
         )
     endif()
-    if(NOT TARGET Playground::DevicePlugin)
+    if(NOT TARGET Playground::DeviceRuntimeContract)
         message(FATAL_ERROR
             "[Framegrabber] FRAMEGRABBER_BUILD_PLAYGROUND_PLUGIN=ON requires "
-            "Playground::DevicePlugin."
+            "Playground::DeviceRuntimeContract."
         )
     endif()
     if(NOT TARGET Resources::Dialogs)
@@ -264,6 +268,7 @@ if(FRAMEGRABBER_BUILD_PLAYGROUND_PLUGIN)
     find_package(Qt6 REQUIRED COMPONENTS Widgets OpenGL OpenGLWidgets Concurrent)
 
     add_library(FramegrabberPlugin MODULE
+        "${PlaygroundPluginSDK_PREFIX}/include/Playground/DeviceRuntime/Contract/AbstractSourceController.h"
         Utility/PlaygroundAdapter/Plugin/FramegrabberPlugin.cpp
         Utility/PlaygroundAdapter/Source/FramegrabberSourceController.h
         Utility/PlaygroundAdapter/Source/FramegrabberSourceController.cpp
@@ -281,9 +286,10 @@ if(FRAMEGRABBER_BUILD_PLAYGROUND_PLUGIN)
         "${CMAKE_CURRENT_SOURCE_DIR}"
         "${CMAKE_CURRENT_SOURCE_DIR}/Utility/PlaygroundAdapter/Source"
         "${CMAKE_CURRENT_SOURCE_DIR}/Utility/PlaygroundAdapter/Plugin"
+        "${PlaygroundPluginSDK_WIDGET_INCLUDE_DIR}"
     )
     target_link_libraries(FramegrabberPlugin PRIVATE
-        Playground::DevicePlugin
+        Playground::DeviceRuntimeContract
         Framegrabber::QtWidget
         Framegrabber::PlaygroundAdapter
         Resources::Dialogs
