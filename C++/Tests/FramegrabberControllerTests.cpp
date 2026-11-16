@@ -22,6 +22,7 @@ private slots:
     void connectLoadsOpeningAppletAndOwnsDmaSources();
     void declaredActionsCarryPresentationAndPromptKinds();
     void typedArgumentRequiredPrompts();
+    void boardlessLoadsUseTheSessionBoard();
     void parameterTreeCoversAppletAndCameraScopes();
     void parameterChangesDeliverSnapshotAndDelta();
     void parameterAdmissionsStayAvailableDuringObservation();
@@ -252,6 +253,9 @@ void FramegrabberControllerTests::declaredActionsCarryPresentationAndPromptKinds
 
     const auto* load = findDescriptor(descriptors, "framegrabber.applet-load");
     QVERIFY(load != nullptr);
+    QCOMPARE(load->inputSchema.value("required").toArray(), QJsonArray{QStringLiteral("applet")});
+    QVERIFY(load->inputSchema.value("properties").toObject().contains(QStringLiteral("board")));
+    QVERIFY(load->description.contains(QStringLiteral("connected board")));
     const auto applet = load->inputSchema.value("properties").toObject().value("applet").toObject();
     QCOMPARE(applet.value("format").toString(), QStringLiteral("enum"));
     const auto values = applet.value("enum").toArray();
@@ -263,6 +267,10 @@ void FramegrabberControllerTests::declaredActionsCarryPresentationAndPromptKinds
 
     const auto* configuration = findDescriptor(descriptors, "framegrabber.configuration-load");
     QVERIFY(configuration != nullptr);
+    QCOMPARE(configuration->inputSchema.value("required").toArray(),
+        QJsonArray{QStringLiteral("configuration")});
+    QVERIFY(configuration->inputSchema.value("properties").toObject().contains(QStringLiteral("board")));
+    QVERIFY(configuration->description.contains(QStringLiteral("connected board")));
     const auto configurationProperty = configuration->inputSchema.value("properties").toObject()
         .value("configuration").toObject();
     QCOMPARE(configurationProperty.value("format").toString(), QStringLiteral("file-open"));
@@ -296,6 +304,23 @@ void FramegrabberControllerTests::typedArgumentRequiredPrompts()
         if (run.admission->succeeded() && sink.wait()) run.result = sink.take();
         return run;
     };
+
+    // The board is never the requested argument, with or without an explicit board.
+    auto boardless = invoke("framegrabber.applet-load", QJsonObject{});
+    QVERIFY(boardless.admission->succeeded());
+    QVERIFY(boardless.result.has_value());
+    QVERIFY(!boardless.result->succeeded());
+    QCOMPARE(boardless.result->error()->code, ApiErrorCode::ArgumentRequired);
+    QCOMPARE(boardless.result->error()->details.value("argumentRequired").toObject()
+        .value("argument").toString(), QStringLiteral("applet"));
+
+    auto boardlessFile = invoke("framegrabber.configuration-load", QJsonObject{});
+    QVERIFY(boardlessFile.admission->succeeded());
+    QVERIFY(boardlessFile.result.has_value());
+    QVERIFY(!boardlessFile.result->succeeded());
+    QCOMPARE(boardlessFile.result->error()->code, ApiErrorCode::ArgumentRequired);
+    QCOMPARE(boardlessFile.result->error()->details.value("argumentRequired").toObject()
+        .value("argument").toString(), QStringLiteral("configuration"));
 
     auto run = invoke("framegrabber.applet-load",
         QJsonObject{{"board", "Test Board (SN1)"}});
@@ -346,6 +371,114 @@ void FramegrabberControllerTests::typedArgumentRequiredPrompts()
         std::lock_guard<std::mutex> lock(fake.state.mutex);
         QVERIFY(fake.state.opened);
         QCOMPARE(fake.state.appletName, std::string("Acquisition"));
+    }
+}
+
+void FramegrabberControllerTests::boardlessLoadsUseTheSessionBoard()
+{
+    FramegrabberTestBackend fake;
+    FramegrabberSourceController controller(nullptr);
+    FramegrabberControllerTestAccess::install(controller, fake);
+
+    struct ToolRun
+    {
+        std::optional<ApiResult<void>> admission;
+        std::optional<ApiResult<QJsonValue>> result;
+    };
+    const auto invoke = [&controller](const char* name, QJsonObject arguments) {
+        ToolRun run;
+        Sink<ApiResult<QJsonValue>> sink;
+        run.admission = controller.requestTool(QLatin1String(name), 1, std::move(arguments),
+            sink.completion());
+        if (run.admission->succeeded() && sink.wait()) run.result = sink.take();
+        return run;
+    };
+    const auto expectNoEffect = [&fake] {
+        std::lock_guard<std::mutex> lock(fake.state.mutex);
+        QVERIFY(!fake.state.opened);
+        QVERIFY(fake.state.loadedBoard.empty());
+    };
+
+    // An omitted board with no session connection refuses before any device effect.
+    auto refused = invoke("framegrabber.applet-load",
+        QJsonObject{{"applet", "Acquisition"}});
+    QVERIFY(refused.admission->succeeded());
+    QVERIFY(refused.result.has_value());
+    QVERIFY(!refused.result->succeeded());
+    QCOMPARE(refused.result->error()->code, ApiErrorCode::Unavailable);
+    QVERIFY(refused.result->error()->message.contains(QStringLiteral("No board is connected")));
+    expectNoEffect();
+
+    auto refusedConfiguration = invoke("framegrabber.configuration-load",
+        QJsonObject{{"configuration", "installed.mcf"}});
+    QVERIFY(refusedConfiguration.admission->succeeded());
+    QVERIFY(refusedConfiguration.result.has_value());
+    QVERIFY(!refusedConfiguration.result->succeeded());
+    QCOMPARE(refusedConfiguration.result->error()->code, ApiErrorCode::Unavailable);
+    QVERIFY(refusedConfiguration.result->error()->message.contains(
+        QStringLiteral("No board is connected")));
+    expectNoEffect();
+
+    // A connected session supplies the board for both loads.
+    const auto outcome = connectBoard(controller);
+    QVERIFY2(outcome.error.isEmpty(), qPrintable(outcome.error));
+    QString connection = QString::fromStdString(outcome.result.state->connectionId);
+    QVERIFY(!connection.isEmpty());
+
+    auto load = invoke("framegrabber.applet-load",
+        QJsonObject{{"applet", "Acquisition"}, {"connectionId", connection}});
+    QVERIFY2(load.admission->succeeded(),
+        load.admission->error() ? qPrintable(load.admission->error()->message) : "");
+    QVERIFY(load.result.has_value());
+    QVERIFY2(load.result->succeeded(),
+        load.result->error() ? qPrintable(load.result->error()->message) : "");
+    QCOMPARE(load.result->value().toObject().value("board").toString(),
+        QStringLiteral("Test Board (SN1)"));
+    {
+        std::lock_guard<std::mutex> lock(fake.state.mutex);
+        QVERIFY(fake.state.opened);
+        QCOMPARE(fake.state.appletName, std::string("Acquisition"));
+        QCOMPARE(fake.state.loadedBoard, std::string("Test Board (SN1)"));
+    }
+    connection = load.result->value().toObject().value("connectionId").toString();
+    QVERIFY(!connection.isEmpty());
+
+    auto configuration = invoke("framegrabber.configuration-load",
+        QJsonObject{{"configuration", "installed.mcf"}, {"connectionId", connection}});
+    QVERIFY2(configuration.admission->succeeded(),
+        configuration.admission->error() ? qPrintable(configuration.admission->error()->message) : "");
+    QVERIFY(configuration.result.has_value());
+    QVERIFY2(configuration.result->succeeded(),
+        configuration.result->error() ? qPrintable(configuration.result->error()->message) : "");
+    {
+        std::lock_guard<std::mutex> lock(fake.state.mutex);
+        QVERIFY(fake.state.opened);
+        QCOMPARE(fake.state.appletName, std::string("Configured"));
+        QCOMPARE(fake.state.loadedBoard, std::string("Test Board (SN1)"));
+        QCOMPARE(fake.state.configuration, std::string("installed.mcf"));
+    }
+    connection = configuration.result->value().toObject().value("connectionId").toString();
+    QVERIFY(!connection.isEmpty());
+
+    // An explicit board that is not the session's board keeps the current refusal.
+    {
+        std::lock_guard<std::mutex> lock(fake.state.mutex);
+        FramegrabberSystem::BoardInfo second;
+        second.index = 1;
+        second.name = "Second Board";
+        second.serial = "SN2";
+        fake.state.boards.push_back(second);
+    }
+    auto other = invoke("framegrabber.applet-load",
+        QJsonObject{{"board", "Second Board (SN2)"}, {"applet", "Acquisition"},
+                    {"connectionId", connection}});
+    QVERIFY(other.admission->succeeded());
+    QVERIFY(other.result.has_value());
+    QVERIFY(!other.result->succeeded());
+    QCOMPARE(other.result->error()->code, ApiErrorCode::Conflict);
+    {
+        std::lock_guard<std::mutex> lock(fake.state.mutex);
+        QCOMPARE(fake.state.loadedBoard, std::string("Test Board (SN1)"));
     }
 }
 

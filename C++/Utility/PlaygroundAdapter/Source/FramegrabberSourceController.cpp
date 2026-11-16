@@ -596,15 +596,15 @@ QList<ToolDescriptor> FramegrabberSourceController::toolDescriptors() const
             "Re-enumerate loadable applets for a board; refused while an applet is loaded.",
             ToolEffect::Device, ToolEgress::Metadata, true, {}, schema({{"board", text()}}, {}), appletsSchema()},
         {"framegrabber.applet-load", 1, "Load applet",
-            "Initialize the board with an installed applet selected by an enumerated unique name or path (Fg_Init). Replacing a loaded applet requires its connectionId; acquisition must be stopped.",
+            "Initialize the board with an installed applet selected by an enumerated unique name or path (Fg_Init). An omitted board uses the session's connected board. Replacing a loaded applet requires its connectionId; acquisition must be stopped.",
             ToolEffect::Device, ToolEgress::Metadata, true, {},
-            schema({{"board", text()}, {"applet", applet}, {"connectionId", text()}}, {"board", "applet"}), state},
+            schema({{"board", text()}, {"applet", applet}, {"connectionId", text()}}, {"applet"}), state},
         {"framegrabber.configuration-load", 1, "Load configuration",
-            "Apply an .mcf file: Fg_InitConfig, or Fg_loadConfig when its applet is loaded. An applet argument selects an installed applet that replaces the MCF applet reference.",
+            "Apply an .mcf file: Fg_InitConfig, or Fg_loadConfig when its applet is loaded. An omitted board uses the session's connected board. An applet argument selects an installed applet that replaces the MCF applet reference.",
             ToolEffect::Device, ToolEgress::Metadata, true, {},
             schema({{"board", text()}, {"configuration", promptText("file-open")},
                     {"applet", applet}, {"connectionId", text()}},
-                {"board", "configuration"}), state},
+                {"configuration"}), state},
         {"framegrabber.configuration-save", 1, "Save configuration",
             "Write the current applet parameters to an .mcf file (Fg_saveConfig) on the host file system.",
             ToolEffect::Device, ToolEgress::Metadata, true, {},
@@ -741,6 +741,19 @@ ApiResult<void> FramegrabberSourceController::requestToolInternal(
         return Admission::failure(ApiErrorCode::InvalidArgument, "Exact typed arguments are required.");
     }
 
+    // An omitted board means the session's connected board, so the host panel never needs a
+    // field-name rule for these two actions.
+    std::string loadBoardName;
+    const bool loadAction = name == QLatin1String("framegrabber.applet-load")
+        || name == QLatin1String("framegrabber.configuration-load");
+    if (loadAction && !arguments.contains("board"))
+    {
+        if (_backend.connectedBoard) loadBoardName = _backend.connectedBoard();
+        if (loadBoardName.empty())
+            return Admission::failure(ApiErrorCode::Unavailable,
+                "No board is connected; pass board explicitly or connect the session board first.");
+    }
+
     // Q3: the callable route loads only applets inside the installed catalog. The caller is
     // prompted with that catalog instead of receiving a native-library path permission.
     if (arguments.contains("applet"))
@@ -760,7 +773,7 @@ ApiResult<void> FramegrabberSourceController::requestToolInternal(
     if (name == QLatin1String("framegrabber.configuration-load") && !arguments.contains("applet"))
     {
         const std::string configuration = arguments.value("configuration").toString().toStdString();
-        std::string boardName;
+        std::string boardName = loadBoardName;
         if (arguments.contains("board"))
         {
             const QString board = arguments.value("board").toString();
@@ -847,6 +860,12 @@ ApiResult<void> FramegrabberSourceController::admitControl(
                 if (boardMatches(candidate, board)) { found = true; boardName = candidate.displayName(); }
         }
         if (!found) return Admission::failure(ApiErrorCode::NotFound, "Exact declared board was not found.");
+    } else if (name == QLatin1String("framegrabber.applet-load")
+               || name == QLatin1String("framegrabber.configuration-load")) {
+        if (_backend.connectedBoard) boardName = _backend.connectedBoard();
+        if (boardName.empty())
+            return Admission::failure(ApiErrorCode::Unavailable,
+                "No board is connected; pass board explicitly or connect the session board first.");
     }
     if (name == "framegrabber.applets-refresh" && connected)
         return Admission::failure(ApiErrorCode::Conflict, "Release the board before enumerating applets.");
