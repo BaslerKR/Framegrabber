@@ -1,6 +1,6 @@
 # Device-owned Playground plugin identity.
 # Allowed commands are quoted `set(PLAYGROUND_PLUGIN_* ...)` assignments.
-# Host schema, ABI, and icon names come from DevicePluginPackage.h.
+# Host schema, ABI, and icon names come from DeviceRuntime.h.
 # Repeat NAME=value to declare multiple environment paths for one variable.
 set(PLAYGROUND_PLUGIN_ID "framegrabber")
 set(PLAYGROUND_PLUGIN_VERSION "0.4.0")

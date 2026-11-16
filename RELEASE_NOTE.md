@@ -1,5 +1,7 @@
 ## Unreleased
 
+- Build against the widget-free device runtime SDK: the contract target is `Playground::DeviceRuntimeContract`, headers live under `DeviceRuntime/Contract`, and the interface is `IDeviceRuntime`. The temporary widget library resolves Qt Widgets and Resources itself until U2 removes it.
+
 ## v0.4.0 (2026-11-14)
 
 - Require Playground 0.7.0 or later; this package uses the frame storage interface introduced in that release.
@@ -94,8 +96,8 @@
 
 - Require ABI / Qt IID 5.0 and recompilation; older packages are rejected. Publish source descriptors through the neutral controller contract.
 
-- Link `Playground::DevicePlugin` for the `IDevicePlugin` MODULE.
-- Own package identity in `Utility/PlaygroundAdapter/Package/Package.cmake`; the host emits `plugin.json` from `DevicePluginPackage.h`.
+- Link `Playground::DeviceRuntimeContract` for the `IDeviceRuntime` MODULE.
+- Own package identity in `Utility/PlaygroundAdapter/Package/Package.cmake`; the host emits `plugin.json` from `DeviceRuntime.h`.
 - Keep the session source controller in `Utility/PlaygroundAdapter/Source` as `FramegrabberSourceController`.
 - Declare the Playground plugin runtime payload from this module; the host copies it into the package.
 - Move the GraphicsFrame stream/adapter into `Utility/PlaygroundAdapter` as `Framegrabber::PlaygroundAdapter`, and rename the stream/converter to the GraphicsFrame contract.
