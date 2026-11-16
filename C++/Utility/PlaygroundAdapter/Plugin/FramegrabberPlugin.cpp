@@ -6,6 +6,7 @@
 #include "Utility/Qt/QFramegrabberWidget.h"
 #include "Chrome/ThemedFileDialog.h"
 
+#include <QDebug>
 #include <QPointer>
 
 #include <atomic>
@@ -221,6 +222,14 @@ public:
             if (!framegrabber) {
                 if (errorMessage) *errorMessage = QStringLiteral("Failed to create a frame grabber session.");
                 return {};
+            }
+            // Populate the installed-applet catalog once so declared actions and the panel can
+            // present the installed choices before any load. Enumeration has no device effect.
+            try { framegrabber->refreshAppletCatalog(); }
+            catch (const std::exception& error) {
+                qWarning() << "[Framegrabber] Applet enumeration failed:" << error.what();
+            } catch (...) {
+                qWarning() << "[Framegrabber] Applet enumeration failed.";
             }
             return std::make_unique<FramegrabberPluginSession>(std::move(system), framegrabber);
         } catch (const std::exception& error) {

@@ -11,6 +11,12 @@ option(FRAMEGRABBER_BUILD_PLAYGROUND_PLUGIN
     OFF
 )
 option(FRAMEGRABBER_BUILD_TESTS "Build focused Framegrabber adapter tests." OFF)
+option(FRAMEGRABBER_BUILD_PLAYGROUND_LOOPBACK_TESTS
+    "Build the Playground parameter loopback test for the Framegrabber controller."
+    OFF
+)
+set(FRAMEGRABBER_PLAYGROUND_SOURCE_DIR "" CACHE PATH
+    "Playground checkout used only by the opt-in loopback test.")
 
 if(FRAMEGRABBER_BUILD_PLAYGROUND_PLUGIN)
     set(FRAMEGRABBER_BUILD_PLAYGROUND_ADAPTER ON)
@@ -272,6 +278,8 @@ if(FRAMEGRABBER_BUILD_PLAYGROUND_PLUGIN)
         Utility/PlaygroundAdapter/Source/FramegrabberSourceController.h
         Utility/PlaygroundAdapter/Source/FramegrabberSourceController.cpp
         Utility/PlaygroundAdapter/Source/FramegrabberParameterControl.cpp
+        Utility/PlaygroundAdapter/Source/FramegrabberParameterNotifications.h
+        Utility/PlaygroundAdapter/Source/FramegrabberParameterNotifications.cpp
     )
     playground_sdk_add_runtime_contract(FramegrabberPlugin)
     set_target_properties(FramegrabberPlugin PROPERTIES
@@ -297,6 +305,7 @@ if(FRAMEGRABBER_BUILD_PLAYGROUND_PLUGIN)
         Qt6::OpenGL
         Qt6::OpenGLWidgets
         Qt6::Concurrent
+        Qt6::Xml
     )
     include("${CMAKE_CURRENT_SOURCE_DIR}/Utility/PlaygroundAdapter/Package/RuntimeStaging.cmake")
     framegrabber_prepare_playground_plugin_runtime(FramegrabberPlugin)
@@ -313,6 +322,77 @@ if(FRAMEGRABBER_BUILD_PLAYGROUND_PLUGIN)
             ICON "${PlaygroundPluginSDK_ICON_DIR}/network-card-48.png")
     endif()
     message(STATUS "[Framegrabber] FramegrabberPlugin enabled.")
+    if(FRAMEGRABBER_BUILD_TESTS)
+        find_package(Qt6 REQUIRED COMPONENTS Test Network)
+        add_executable(FramegrabberControllerTests
+            Tests/FramegrabberControllerTests.cpp
+            Utility/PlaygroundAdapter/Source/FramegrabberSourceController.cpp
+            Utility/PlaygroundAdapter/Source/FramegrabberSourceController.h
+            Utility/PlaygroundAdapter/Source/FramegrabberParameterControl.cpp
+            Utility/PlaygroundAdapter/Source/FramegrabberParameterNotifications.cpp
+            Utility/PlaygroundAdapter/Source/FramegrabberParameterNotifications.h
+        )
+        set_target_properties(FramegrabberControllerTests PROPERTIES AUTOMOC ON)
+        playground_sdk_add_runtime_contract(FramegrabberControllerTests)
+        target_include_directories(FramegrabberControllerTests PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/Utility/PlaygroundAdapter"
+            "${CMAKE_CURRENT_SOURCE_DIR}/Utility/PlaygroundAdapter/Source"
+        )
+        target_link_libraries(FramegrabberControllerTests PRIVATE
+            Playground::DeviceRuntimeContract
+            Framegrabber::QtWidget
+            Framegrabber::PlaygroundAdapter
+            Qt6::Test
+            Qt6::Concurrent
+            Qt6::Xml
+        )
+        add_test(NAME FramegrabberControllerTests COMMAND FramegrabberControllerTests)
+        set_tests_properties(FramegrabberControllerTests PROPERTIES
+            ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+        if(FRAMEGRABBER_BUILD_PLAYGROUND_LOOPBACK_TESTS)
+            if(NOT FRAMEGRABBER_PLAYGROUND_SOURCE_DIR OR NOT EXISTS
+               "${FRAMEGRABBER_PLAYGROUND_SOURCE_DIR}/src/DeviceRuntime/Protocol/DeviceParameterLoopback.cpp")
+                message(FATAL_ERROR
+                    "[Framegrabber] FRAMEGRABBER_BUILD_PLAYGROUND_LOOPBACK_TESTS=ON requires "
+                    "FRAMEGRABBER_PLAYGROUND_SOURCE_DIR to name a Playground checkout."
+                )
+            endif()
+            add_executable(FramegrabberParameterLoopbackTests
+                Tests/FramegrabberParameterLoopbackTests.cpp
+                Utility/PlaygroundAdapter/Source/FramegrabberSourceController.cpp
+                Utility/PlaygroundAdapter/Source/FramegrabberSourceController.h
+                Utility/PlaygroundAdapter/Source/FramegrabberParameterControl.cpp
+                Utility/PlaygroundAdapter/Source/FramegrabberParameterNotifications.cpp
+                Utility/PlaygroundAdapter/Source/FramegrabberParameterNotifications.h
+                "${FRAMEGRABBER_PLAYGROUND_SOURCE_DIR}/src/DeviceRuntime/Protocol/DeviceParameterLoopback.cpp"
+                "${FRAMEGRABBER_PLAYGROUND_SOURCE_DIR}/src/DeviceRuntime/Protocol/DeviceParameterService.cpp"
+                "${FRAMEGRABBER_PLAYGROUND_SOURCE_DIR}/src/DeviceRuntime/Protocol/DeviceRuntimeProtocol.cpp"
+                "${FRAMEGRABBER_PLAYGROUND_SOURCE_DIR}/src/DeviceRuntime/Contract/AbstractSourceController.h"
+            )
+            set_target_properties(FramegrabberParameterLoopbackTests PROPERTIES AUTOMOC ON)
+            target_include_directories(FramegrabberParameterLoopbackTests PRIVATE
+                "${CMAKE_CURRENT_SOURCE_DIR}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/Utility/PlaygroundAdapter"
+                "${CMAKE_CURRENT_SOURCE_DIR}/Utility/PlaygroundAdapter/Source"
+                "${FRAMEGRABBER_PLAYGROUND_SOURCE_DIR}/src/Tools"
+                "${FRAMEGRABBER_PLAYGROUND_SOURCE_DIR}/src/Api"
+                "${FRAMEGRABBER_PLAYGROUND_SOURCE_DIR}/src"
+            )
+            target_link_libraries(FramegrabberParameterLoopbackTests PRIVATE
+                Framegrabber::QtWidget
+                Framegrabber::PlaygroundAdapter
+                Qt6::Test
+                Qt6::Concurrent
+                Qt6::Xml
+                Qt6::Network
+            )
+            add_test(NAME FramegrabberParameterLoopbackTests COMMAND FramegrabberParameterLoopbackTests)
+            set_tests_properties(FramegrabberParameterLoopbackTests PROPERTIES
+                ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+        endif()
+    endif()
 endif()
 
 message(STATUS "[Framegrabber] Basler Frame Grabber SDK root: ${BASLER_FG_SDK_DIR}")

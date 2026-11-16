@@ -45,6 +45,44 @@ The optional Playground adapter is disabled by default. Enable `FRAMEGRABBER_BUI
 
 The optional Playground device plugin is a separate MODULE. Enable `FRAMEGRABBER_BUILD_PLAYGROUND_PLUGIN` only when `Playground::DeviceRuntimeContract`, the adapter, `Framegrabber::QtWidget`, and `Resources::Dialogs` are available. The plugin passes `ThemedFileDialog` through `QFramegrabberWidget::setFileDialogPresenter()` for Load, Save and missing-applet selection; without a presenter the widget uses Qt's non-native file dialog and needs no theme. Package identity lives in `Utility/PlaygroundAdapter/Package/Package.cmake` as quoted `set(PLAYGROUND_PLUGIN_* ...)` assignments; the MODULE must set `PLAYGROUND_PLUGIN_PACKAGE` and include `DeviceRuntime/Contract/DeviceRuntime.h`. The host emits `plugin.json` from that identity plus `DeviceRuntime.h`.
 
+### Playground session contract
+
+- **Connection model.** One exclusive board connection owns the DMA-channel
+  sources (`DeviceConnectionModel::Hierarchical`). `device.targets` copies the
+  cached boards as Interfaces, and `device.connect` runs the module's opening
+  action: re-enumerate the catalog, then load the applet the SDK reports as
+  active, else the power-up applet. The connected state carries the stable
+  `dma.<index>` source ids. Board discovery remains a session-creation step, and
+  Live stays on `source.start`/`source.stop`.
+- **Declared actions.** `framegrabber.applets-refresh`,
+  `framegrabber.applet-load`, `framegrabber.configuration-load`,
+  `framegrabber.configuration-save` and `framegrabber.cameras-refresh` publish
+  semantic action and icon ids from the shared Resources set. Applet load
+  declares an enum prompt over the installed catalog; duplicated applet names
+  fall back to their exact catalog paths so every option loads. A missing or
+  non-catalog applet returns the typed `argument_required` prompt without
+  effects. The callable route never loads a native library from an arbitrary
+  path, which stays a GUI choice. Configuration load declares a file-open prompt and offers
+  only installed applets when the MCF reference is outside the catalog;
+  configuration save declares a file-save prompt. Load actions report bounded
+  progress and answer cancellation with an explicit unsupported reason because
+  `Fg_Init`/`Fg_InitConfig` cannot be cancelled.
+- **Parameter scopes.** `Applet:<dma>` exposes the applet access names and
+  `Camera:<transport>:<dma>` exposes CoaXPress GenICam features. Descriptors
+  carry category paths, display text, units, visibility, representation,
+  numeric limits, enum entries and exact revisions. Camera writability is the
+  access mode observed now, gated by the current acquisition state plus the
+  device's `pIsLocked`/`pIsAvailable` gates, and re-observed after every
+  transition. `requestParameterChanges` delivers an
+  initial snapshot, revision-stamped deltas after writes/executes and
+  acquisition transitions measured against the last published inventory, and
+  one resync snapshot when the bounded queue overflows; release waits for
+  in-flight delivery. Observation runs on a module thread with its own pass
+  serialization, waits for accepted control work to settle without holding the
+  shared gate, and caches camera feature XML only while its content is
+  unchanged so a refresh or camera reconnect replaces the tree.
+
+
 ## Acquisition Contract
 
 ```cpp
@@ -129,6 +167,16 @@ It includes the manifest, icon and SDK identity. Staging reconciles only this
 generated package. Use a fresh build directory or explicitly update
 `PlaygroundPluginSDK_DIR` when selecting another SDK. This Release software
 gate does not establish physical-device, Debug or cross-platform acceptance.
+
+The adapter tests include the hardware-free `FramegrabberControllerTests`. The
+opt-in loopback target runs the Playground `DeviceParameterLoopback` codec
+against the controller and requires a Playground checkout:
+
+```sh
+cmake -S C++ -B build/loopback -DCMAKE_PREFIX_PATH="<PluginSDK>;<Qt-prefix>" -DCMAKE_CONFIGURATION_TYPES=Release -DCMAKE_BUILD_TYPE=Release -DFRAMEGRABBER_BUILD_PLAYGROUND_PLUGIN=ON -DFRAMEGRABBER_BUILD_TESTS=ON -DFRAMEGRABBER_BUILD_PLAYGROUND_LOOPBACK_TESTS=ON -DFRAMEGRABBER_PLAYGROUND_SOURCE_DIR=<Playground-root>
+cmake --build build/loopback --config Release --target FramegrabberParameterLoopbackTests
+```
+
 Set `CMAKE_BUILD_TYPE=Release` for a single-configuration generator.
 
 ## Qt presentation
