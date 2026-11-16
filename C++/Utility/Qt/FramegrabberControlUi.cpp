@@ -77,7 +77,7 @@ void FramegrabberControlUi::create(QWidget* owner) {
     _failedLabel->hide();
     _fpsLabel = new QLabel(owner);
     _fpsLabel->setObjectName(QStringLiteral("FramegrabberFpsLabel"));
-    _fpsLabel->setProperty("statusRole", QStringLiteral("deviceFps"));
+    _fpsLabel->setProperty("statusRole", QStringLiteral("deviceCounter"));
     _fpsLabel->setAlignment(Qt::AlignCenter);
     _fpsLabel->hide();
     _statusBar->addPermanentWidget(_failedLabel);
