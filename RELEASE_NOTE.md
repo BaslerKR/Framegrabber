@@ -1,5 +1,10 @@
 ## Unreleased
 
+- Declare a hierarchical Playground session: one exclusive board connection owns its DMA-channel sources, `device.targets` lists the cached boards and `device.connect` loads the board's active, else power-up, applet as the opening action. Board discovery stays a session-creation step and Live stays on `source.start`/`source.stop`.
+- Publish semantic action presentation and prompt kinds for the module actions. Applet load offers the installed catalog through an enum prompt and a missing or non-catalog applet returns the typed `argument_required` prompt without effects; configuration load offers a file-open prompt plus only installed applets, and configuration save offers a file-save prompt. Arbitrary native-library paths remain a GUI choice. Load actions report bounded progress and answer cancellation with an explicit unsupported reason because the SDK cannot cancel `Fg_Init`/`Fg_InitConfig`.
+- Expose the `Camera:<transport>:<dma>` parameter scope beside `Applet:<dma>`, with category paths, visibility, representation, units, limits and enum entries. Camera writability is re-observed after acquisition transitions. Parameter change subscriptions deliver a snapshot, revision-stamped deltas and a bounded-queue resync snapshot, and release waits for in-flight delivery.
+- Add hardware-free controller tests and the opt-in Playground parameter loopback test.
+
 ## v0.4.0 (2026-11-14)
 
 - Require Playground 0.7.0 or later; this package uses the frame storage interface introduced in that release.

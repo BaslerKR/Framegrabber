@@ -24,6 +24,10 @@ constexpr auto kSingleAcquisitionTimeout = std::chrono::seconds(30);
 // Host-declared lifecycle operations routed through the module's shared control path; not tool names.
 const QLatin1String kDisconnect("lifecycle.disconnect");
 const QLatin1String kSingle("lifecycle.single");
+// Interface label copied into the target/state record; it is not an admission rule.
+const char* const kInterfaceType = "FrameGrabber";
+const char* const kInterfaceReason =
+    "A Basler frame grabber board is one exclusive resource; one connection owns its DMA sources.";
 
 QJsonObject schema(QJsonObject properties, QJsonArray required)
 {
@@ -41,6 +45,23 @@ const QJsonObject& anyText()
 {
     static const QJsonObject value{{"type", "string"}};
     return value;
+}
+
+QJsonObject promptText(const char* format)
+{
+    return {{"type", "string"}, {"minLength", 1}, {"maxLength", 4096}, {"format", format}};
+}
+
+QJsonObject enumText(const QStringList& values)
+{
+    QJsonArray allowed;
+    for (const auto& value : values)
+    {
+        if (allowed.size() == 64) break;
+        allowed.append(value.left(4096));
+    }
+    return {{"type", "string"}, {"minLength", 1}, {"maxLength", 4096},
+            {"format", "enum"}, {"enum", allowed}};
 }
 
 const QJsonObject& flag()
@@ -111,36 +132,47 @@ QJsonObject discoveryJson(const Framegrabber::CameraDiscovery& discovery)
             {"topologyMismatch", discovery.topologyMismatch}};
 }
 
-QJsonObject appletsJson(const Framegrabber& framegrabber)
+template<class Backend>
+QJsonObject appletsJson(const Backend& backend)
 {
-    const std::string loaded = framegrabber.isOpened() ? framegrabber.appletPath() : std::string{};
+    const std::string loaded = backend.isOpened ? (backend.isOpened() ? backend.appletPath() : std::string{})
+                                                : std::string{};
     QJsonArray applets;
-    for (const Framegrabber::AppletInfo& applet : framegrabber.appletCatalog())
+    if (backend.appletCatalog)
     {
-        applets.append(QJsonObject{{"path", QString::fromStdString(applet.path)},
-            {"name", QString::fromStdString(applet.name)}, {"file", QString::fromStdString(applet.file)},
-            {"version", QString::fromStdString(applet.version)},
-            {"description", QString::fromStdString(applet.description)},
-            {"dmaCount", applet.dmaCount}, {"cameraCount", applet.cameraCount},
-            {"active", applet.active}, {"powerUp", applet.powerUp},
-            {"cameraControl", applet.supportsCameraControl},
-            {"loaded", !loaded.empty() && loaded == applet.path}});
+        for (const Framegrabber::AppletInfo& applet : backend.appletCatalog())
+        {
+            applets.append(QJsonObject{{"path", QString::fromStdString(applet.path)},
+                {"name", QString::fromStdString(applet.name)}, {"file", QString::fromStdString(applet.file)},
+                {"version", QString::fromStdString(applet.version)},
+                {"description", QString::fromStdString(applet.description)},
+                {"dmaCount", applet.dmaCount}, {"cameraCount", applet.cameraCount},
+                {"active", applet.active}, {"powerUp", applet.powerUp},
+                {"cameraControl", applet.supportsCameraControl},
+                {"loaded", !loaded.empty() && loaded == applet.path}});
+        }
     }
     return {{"applets", applets}};
 }
 
-QJsonObject camerasJson(const Framegrabber& framegrabber)
+template<class Backend>
+QJsonObject camerasJson(const Backend& backend)
 {
     QJsonArray cameras;
-    for (const Framegrabber::CameraInfo& camera :
-         framegrabber.getCachedCameraList(Framegrabber::CameraTransport::CoaXPress))
+    if (backend.cachedCameras)
     {
-        cameras.append(QJsonObject{{"dma", static_cast<int>(camera.dmaIndex)},
-            {"vendor", QString::fromStdString(camera.vendor)},
-            {"model", QString::fromStdString(camera.model)},
-            {"serial", QString::fromStdString(camera.serial)}, {"connected", camera.connected}});
+        for (const Framegrabber::CameraInfo& camera :
+             backend.cachedCameras(Framegrabber::CameraTransport::CoaXPress))
+        {
+            cameras.append(QJsonObject{{"dma", static_cast<int>(camera.dmaIndex)},
+                {"vendor", QString::fromStdString(camera.vendor)},
+                {"model", QString::fromStdString(camera.model)},
+                {"serial", QString::fromStdString(camera.serial)}, {"connected", camera.connected}});
+        }
     }
-    return {{"cameras", cameras}, {"discovery", discoveryJson(framegrabber.lastCameraDiscovery())}};
+    const auto discovery = backend.cameraDiscovery ? backend.cameraDiscovery()
+                                                   : Framegrabber::CameraDiscovery{};
+    return {{"cameras", cameras}, {"discovery", discoveryJson(discovery)}};
 }
 
 bool boardMatches(const FramegrabberSystem::BoardInfo& board, const QString& reference)
@@ -150,14 +182,16 @@ bool boardMatches(const FramegrabberSystem::BoardInfo& board, const QString& ref
 }
 
 /** @brief Returns the catalog path a reference resolves to, or empty outside the catalog. */
-std::string catalogApplet(const Framegrabber& framegrabber, const std::string& reference)
+template<class Backend>
+std::string catalogApplet(const Backend& backend, const std::string& reference)
 {
-    const std::string resolved = framegrabber.resolveAppletReference(reference);
+    if (!backend.resolveApplet || !backend.appletCatalog) return {};
+    const std::string resolved = backend.resolveApplet(reference);
     if (resolved.empty())
     {
         return {};
     }
-    for (const auto& applet : framegrabber.appletCatalog())
+    for (const auto& applet : backend.appletCatalog())
     {
         std::error_code error;
         if (applet.path == resolved
@@ -167,6 +201,50 @@ std::string catalogApplet(const Framegrabber& framegrabber, const std::string& r
         }
     }
     return {};
+}
+
+/** @brief Copies the bounded enum options the installed catalog offers. */
+template<class Backend>
+QStringList appletOptions(const Backend& backend)
+{
+    QStringList options;
+    if (!backend.appletCatalog) return options;
+    for (const auto& applet : backend.appletCatalog())
+    {
+        if (options.size() == 64) break;
+        const QString name = QString::fromStdString(applet.name);
+        const QString file = QString::fromStdString(applet.file);
+        const QString option = name.isEmpty() ? file : name;
+        if (!option.isEmpty() && !options.contains(option)) options.append(option);
+    }
+    return options;
+}
+
+QString actionGroup()
+{
+    return QStringLiteral("framegrabber");
+}
+
+bool isActionName(const QString& name)
+{
+    return name == QLatin1String("framegrabber.applets-refresh")
+        || name == QLatin1String("framegrabber.applet-load")
+        || name == QLatin1String("framegrabber.configuration-load")
+        || name == QLatin1String("framegrabber.configuration-save")
+        || name == QLatin1String("framegrabber.cameras-refresh");
+}
+
+QString loadPhase(const QString& name)
+{
+    return name == QLatin1String("framegrabber.configuration-load")
+        ? QStringLiteral("configuration-load") : QStringLiteral("applet-load");
+}
+
+QString loadMessage(const QString& name, const QString& argument)
+{
+    return name == QLatin1String("framegrabber.configuration-load")
+        ? QStringLiteral("Applying configuration '%1'.").arg(argument)
+        : QStringLiteral("Loading applet '%1'.").arg(argument);
 }
 }
 
@@ -193,41 +271,156 @@ FramegrabberSourceController::FramegrabberSourceController(
     QObject* parent)
     : AbstractSourceController(parent),
       _framegrabber(framegrabber),
+      _notifications([this](const std::string& connectionId, const std::string& subscriptionId) {
+          return snapshotChange(connectionId, subscriptionId);
+      }),
       _instanceId(QUuid::createUuid().toString(QUuid::WithoutBraces))
 {
+    bindBackend();
+    _sessionAvailable.store(_framegrabber != nullptr, std::memory_order_release);
+    startObservationThread();
     registerCallbacks();
 }
 
 FramegrabberSourceController::~FramegrabberSourceController()
 {
-    // Accepted tool and parameter work completes before the Framegrabber is released.
+    // The observation thread and accepted tool/parameter work complete before the
+    // Framegrabber is released; subscribing listeners never outlive this controller.
+    stopObservationThread();
+    _notifications.close();
     _work.waitForFinished();
     stop();
     deregisterCallbacks();
 }
 
+void FramegrabberSourceController::bindBackend()
+{
+    Framegrabber* const framegrabber = _framegrabber;
+    if (!framegrabber) return;
+    _backend.boards = [framegrabber] { return framegrabber->getCachedBoardInfo(); };
+    _backend.isOpened = [framegrabber] { return framegrabber->isOpened(); };
+    _backend.connectedBoard = [framegrabber] { return framegrabber->getConnectedFramegrabberName(); };
+    _backend.loadedAppletName = [framegrabber] { return framegrabber->getLoadedAppletName(); };
+    _backend.loadedAppletVersion = [framegrabber] { return framegrabber->getLoadedAppletVersion(); };
+    _backend.appletPath = [framegrabber] { return framegrabber->appletPath(); };
+    _backend.configurationPath = [framegrabber] { return framegrabber->configurationPath(); };
+    _backend.connectionGeneration = [framegrabber] { return framegrabber->connectionGeneration(); };
+    _backend.refreshAppletCatalog = [framegrabber](const std::string& board) {
+        return framegrabber->refreshAppletCatalog(board);
+    };
+    _backend.appletCatalog = [framegrabber] { return framegrabber->appletCatalog(); };
+    _backend.resolveApplet = [framegrabber](const std::string& reference) {
+        return framegrabber->resolveAppletReference(reference);
+    };
+    _backend.loadApplet = [framegrabber](const std::string& reference, const std::string& board) {
+        return framegrabber->loadApplet(reference, board);
+    };
+    _backend.appletPathFromConfiguration =
+        [framegrabber](const std::string& configuration, const std::string& board) {
+            return framegrabber->appletPathFromConfiguration(configuration, board);
+        };
+    _backend.loadAppletConfiguration =
+        [framegrabber](const std::string& applet, const std::string& configuration,
+                       const std::string& board) {
+            return framegrabber->loadAppletConfiguration(applet, configuration, board);
+        };
+    _backend.saveConfiguration = [framegrabber](const std::string& configuration) {
+        return framegrabber->saveConfiguration(configuration);
+    };
+    _backend.close = [framegrabber] { framegrabber->close(); };
+    _backend.isGrabbing = [framegrabber] { return framegrabber->isGrabbing(); };
+    _backend.dmaCount = [framegrabber] { return framegrabber->getDMACount(); };
+    _backend.tryBeginControl = [framegrabber] { return framegrabber->tryBeginControl(); };
+    _backend.endControl = [framegrabber] { framegrabber->endControl(); };
+    _backend.controlBusy = [framegrabber] { return framegrabber->controlBusy(); };
+    _backend.lastError = [framegrabber] { return framegrabber->lastError(); };
+    _backend.acquisitionStatistics = [framegrabber] { return framegrabber->acquisitionStatistics(); };
+    _backend.cameraDiscovery = [framegrabber] { return framegrabber->lastCameraDiscovery(); };
+    _backend.refreshCameras = [framegrabber](const Framegrabber::CameraTransport transport) {
+        return framegrabber->refreshCameras(transport);
+    };
+    _backend.cachedCameras = [framegrabber](const Framegrabber::CameraTransport transport) {
+        return framegrabber->getCachedCameraList(transport);
+    };
+    _backend.runtimeDiagnostics = [framegrabber](const std::optional<unsigned> dma) {
+        return framegrabber->runtimeDiagnostics(dma);
+    };
+    _backend.grab = [framegrabber](const std::size_t frames) { framegrabber->grab(frames); };
+    _backend.stop = [framegrabber] { framegrabber->stop(); };
+    _backend.appletFeatureModel = [framegrabber](const unsigned dma) {
+        return framegrabber->getAppletFeatureModel(dma);
+    };
+    _backend.appletParameterLimits =
+        [framegrabber](const std::int64_t id, const unsigned dma) {
+            return framegrabber->getAppletParameterLimits(id, dma);
+        };
+    _backend.getAppletParameter =
+        [framegrabber](const std::int64_t id, const unsigned dma,
+                       Framegrabber::ParameterValue& value, const bool useCache) {
+            return framegrabber->getAppletParameterById(id, dma, value, useCache);
+        };
+    _backend.appletParameterPrototype = [framegrabber](const std::int64_t id, const unsigned dma) {
+        return framegrabber->appletParameterPrototype(id, dma);
+    };
+    _backend.setAppletParameter =
+        [framegrabber](const std::int64_t id, const unsigned dma,
+                       const Framegrabber::ParameterValue& value, const bool verify,
+                       const bool invalidate, int* result) {
+            return framegrabber->setAppletParameterById(id, dma, value, verify, invalidate, result);
+        };
+    _backend.executeAppletCommand = [framegrabber](const unsigned dma, const std::int64_t id,
+                                                   int* result) {
+        return framegrabber->executeAppletCommandById(dma, id, result);
+    };
+    _backend.cameraCapabilities = [framegrabber] { return framegrabber->cameraControlCapabilities(); };
+    _backend.cameraFeatureXml = [framegrabber](const Framegrabber::CameraTransport transport,
+                                               const unsigned dma) {
+        return framegrabber->getCameraFeatureXml(transport, dma);
+    };
+    _backend.getCameraFeature = [framegrabber](const Framegrabber::CameraTransport transport,
+                                               const unsigned dma, const std::string& name,
+                                               Framegrabber::ParameterValue& value) {
+        return framegrabber->getCameraFeature(transport, dma, name, value);
+    };
+    _backend.cameraFeatureLimits =
+        [framegrabber](const Framegrabber::CameraTransport transport, const unsigned dma,
+                       const std::string& name, const bool floatingPoint) {
+            return framegrabber->getCameraFeatureLimits(transport, dma, name, floatingPoint);
+        };
+    _backend.setCameraFeature =
+        [framegrabber](const Framegrabber::CameraTransport transport, const unsigned dma,
+                       const std::string& name, const Framegrabber::ParameterValue& value,
+                       const bool verify) {
+            return framegrabber->setCameraFeature(transport, dma, name, value, verify);
+        };
+    _backend.executeCameraCommand =
+        [framegrabber](const Framegrabber::CameraTransport transport, const unsigned dma,
+                       const std::string& name) {
+            return framegrabber->executeCameraCommand(transport, dma, name);
+        };
+}
+
 void FramegrabberSourceController::start()
 {
-    if (_framegrabber)
+    if (!_sessionAvailable.load(std::memory_order_acquire))
     {
-        publishSourceDescriptors();
-        _framegrabber->grab();
+        return;
     }
+    publishSourceDescriptors();
+    if (_backend.grab) _backend.grab(0);
 }
 
 void FramegrabberSourceController::stop()
 {
-    if (_framegrabber)
-    {
-        _framegrabber->stop();
-    }
+    if (_sessionAvailable.load(std::memory_order_acquire) && _backend.stop) _backend.stop();
     _isGrabbing.store(false, std::memory_order_release);
 }
 
 std::vector<GraphicsSourceDescriptor> FramegrabberSourceController::sourceDescriptors() const
 {
     std::vector<GraphicsSourceDescriptor> sources;
-    const int count = _framegrabber ? _framegrabber->getDMACount() : 0;
+    const int count = _sessionAvailable.load(std::memory_order_acquire) && _backend.dmaCount
+        ? _backend.dmaCount() : 0;
     sources.reserve(count > 0 ? static_cast<std::size_t>(count) : 1U);
     for (int index = 0; index < count; ++index)
     {
@@ -264,6 +457,9 @@ void FramegrabberSourceController::registerCallbacks()
             {
                 _isGrabbing.store(on, std::memory_order_release);
                 emit diagnosticAcquisitionChanged(on, QStringLiteral("framegrabber"));
+                // Writability is re-observed after acquisition changes; never cached from a
+                // locked state and never deferred to a GUI timer.
+                wakeObservation(false);
             }
             else if (status == Framegrabber::ConnectionStatus && on && guard)
             {
@@ -272,7 +468,21 @@ void FramegrabberSourceController::registerCallbacks()
                 {
                     if (guard) guard->publishSourceDescriptors();
                 }, Qt::QueuedConnection);
+                wakeObservation(false);
             }
+            else if (status == Framegrabber::ConnectionStatus
+                     || status == Framegrabber::ConfigurationStatus)
+            {
+                wakeObservation(false);
+            }
+        });
+
+    // The panel and the API observe the same node replacements; reopen is not required.
+    _nodeCallbackId = _framegrabber->registerNodeUpdatedCallback(
+        [this](Framegrabber::FeatureSource, Framegrabber::CameraTransport,
+               unsigned int, const std::string&)
+        {
+            wakeObservation(false);
         });
 
     _graphicsStream = std::make_unique<FramegrabberGraphicsFrameStream>(
@@ -299,6 +509,11 @@ void FramegrabberSourceController::deregisterCallbacks()
         _framegrabber->deregisterStatusCallback(_statusCallbackId);
         _statusCallbackId = 0;
     }
+    if (_nodeCallbackId != 0)
+    {
+        _framegrabber->deregisterNodeUpdatedCallback(_nodeCallbackId);
+        _nodeCallbackId = 0;
+    }
 }
 
 bool FramegrabberSourceController::workerBusy() const
@@ -308,19 +523,21 @@ bool FramegrabberSourceController::workerBusy() const
 
 QString FramegrabberSourceController::connectionId() const
 {
-    const std::uint64_t generation = _framegrabber ? _framegrabber->connectionGeneration() : 0;
+    const std::uint64_t generation = _sessionAvailable.load(std::memory_order_acquire)
+        && _backend.connectionGeneration ? _backend.connectionGeneration() : 0;
     return generation == 0 ? QString() : _instanceId + QLatin1Char(':') + QString::number(generation);
 }
 
 QJsonObject FramegrabberSourceController::controlState(const bool fromWorker) const
 {
-    const bool connected = _framegrabber && _framegrabber->isOpened();
+    const bool available = _sessionAvailable.load(std::memory_order_acquire);
+    const bool connected = available && _backend.isOpened && _backend.isOpened();
     const Framegrabber::OperationError error =
-        _framegrabber ? _framegrabber->lastError() : Framegrabber::OperationError{};
+        available && _backend.lastError ? _backend.lastError() : Framegrabber::OperationError{};
     QJsonArray statistics;
-    if (_framegrabber)
+    if (available && _backend.acquisitionStatistics)
     {
-        for (const auto& channel : _framegrabber->acquisitionStatistics())
+        for (const auto& channel : _backend.acquisitionStatistics())
         {
             statistics.append(QJsonObject{{"dma", static_cast<int>(channel.dmaIndex)},
                 {"delivered", QString::number(channel.delivered)},
@@ -329,20 +546,25 @@ QJsonObject FramegrabberSourceController::controlState(const bool fromWorker) co
                 {"rejected", QString::number(channel.rejected)}});
         }
     }
+    const auto stringOrEmpty = [connected](const std::function<std::string()>& getter) {
+        return connected && getter ? QString::fromStdString(getter()) : QString();
+    };
+    const auto discovery = available && _backend.cameraDiscovery
+        ? _backend.cameraDiscovery() : Framegrabber::CameraDiscovery{};
     return {{"connected", connected},
-        {"live", _framegrabber && _framegrabber->isGrabbing()},
-        {"busy", (_framegrabber && _framegrabber->controlBusy()) || (!fromWorker && workerBusy())},
+        {"live", connected && _backend.isGrabbing && _backend.isGrabbing()},
+        {"busy", (available && _backend.controlBusy && _backend.controlBusy())
+            || (!fromWorker && workerBusy())},
         {"connectionId", connectionId()},
-        {"board", connected ? QString::fromStdString(_framegrabber->getConnectedFramegrabberName()) : QString()},
+        {"board", stringOrEmpty(_backend.connectedBoard)},
         {"applet", QJsonObject{
-            {"name", connected ? QString::fromStdString(_framegrabber->getLoadedAppletName()) : QString()},
-            {"path", connected ? QString::fromStdString(_framegrabber->appletPath()) : QString()},
-            {"version", connected ? QString::fromStdString(_framegrabber->getLoadedAppletVersion()) : QString()}}},
-        {"configuration", connected ? QString::fromStdString(_framegrabber->configurationPath()) : QString()},
-        {"dmaCount", connected ? _framegrabber->getDMACount() : 0},
+            {"name", stringOrEmpty(_backend.loadedAppletName)},
+            {"path", stringOrEmpty(_backend.appletPath)},
+            {"version", stringOrEmpty(_backend.loadedAppletVersion)}}},
+        {"configuration", stringOrEmpty(_backend.configurationPath)},
+        {"dmaCount", connected && _backend.dmaCount ? _backend.dmaCount() : 0},
         {"lastError", QJsonObject{{"code", error.code}, {"message", QString::fromStdString(error.message)}}},
-        {"cameraDiscovery", discoveryJson(_framegrabber
-            ? _framegrabber->lastCameraDiscovery() : Framegrabber::CameraDiscovery{})},
+        {"cameraDiscovery", discoveryJson(discovery)},
         {"statistics", statistics}};
 }
 
@@ -351,6 +573,8 @@ QList<ToolDescriptor> FramegrabberSourceController::toolDescriptors() const
     const auto empty = schema({}, {});
     const auto connection = schema({{"connectionId", text()}}, {"connectionId"});
     const auto state = stateSchema();
+    const QStringList options = appletOptions(_backend);
+    const QJsonObject applet = options.isEmpty() ? text() : enumText(options);
     QList<ToolDescriptor> result{
         {"framegrabber.state", 1, "Frame grabber state",
             "Observe the loaded board/applet, connection generation, last SDK error and per-DMA acquisition counters.",
@@ -364,24 +588,46 @@ QList<ToolDescriptor> FramegrabberSourceController::toolDescriptors() const
             "Re-enumerate loadable applets for a board; refused while an applet is loaded.",
             ToolEffect::Device, ToolEgress::Metadata, true, {}, schema({{"board", text()}}, {}), appletsSchema()},
         {"framegrabber.applet-load", 1, "Load applet",
-            "Initialize the board with an applet path or unique applet name (Fg_Init). Replacing a loaded applet requires its connectionId; acquisition must be stopped.",
+            "Initialize the board with an installed applet selected by name or path (Fg_Init). Replacing a loaded applet requires its connectionId; acquisition must be stopped.",
             ToolEffect::Device, ToolEgress::Metadata, true, {},
-            schema({{"board", text()}, {"applet", text()}, {"connectionId", text()}}, {"board", "applet"}), state},
+            schema({{"board", text()}, {"applet", applet}, {"connectionId", text()}}, {"board", "applet"}), state},
         {"framegrabber.configuration-load", 1, "Load configuration",
-            "Apply an .mcf file: Fg_InitConfig, or Fg_loadConfig when its applet is loaded. An applet argument replaces the MCF applet reference.",
+            "Apply an .mcf file: Fg_InitConfig, or Fg_loadConfig when its applet is loaded. An applet argument selects an installed applet that replaces the MCF applet reference.",
             ToolEffect::Device, ToolEgress::Metadata, true, {},
-            schema({{"board", text()}, {"configuration", text()}, {"applet", text()}, {"connectionId", text()}},
+            schema({{"board", text()}, {"configuration", promptText("file-open")},
+                    {"applet", applet}, {"connectionId", text()}},
                 {"board", "configuration"}), state},
         {"framegrabber.configuration-save", 1, "Save configuration",
             "Write the current applet parameters to an .mcf file (Fg_saveConfig) on the host file system.",
             ToolEffect::Device, ToolEgress::Metadata, true, {},
-            schema({{"connectionId", text()}, {"configuration", text()}}, {"connectionId", "configuration"}), state},
+            schema({{"connectionId", text()}, {"configuration", promptText("file-save")}},
+                {"connectionId", "configuration"}), state},
         {"framegrabber.cameras", 1, "CoaXPress cameras", "Copy the cameras found by the last CXP discovery.",
             ToolEffect::Observe, ToolEgress::Metadata, true, {}, empty, camerasSchema()},
         {"framegrabber.cameras-refresh", 1, "Rediscover cameras",
             "Restart CXP discovery and reconnect cameras on the exact connection; topology mismatches are reported.",
             ToolEffect::Device, ToolEgress::Metadata, true, {}, connection, camerasSchema()}};
-    if (!_framegrabber)
+    // Only user actions carry presentation metadata; observation tools stay API-only.
+    for (auto& descriptor : result)
+    {
+        if (!isActionName(descriptor.name)) continue;
+        descriptor.presentation.actionId = descriptor.name;
+        descriptor.presentation.group = actionGroup();
+    }
+    const auto present = [&result](const char* name, const char* icon, const int order) {
+        for (auto& descriptor : result)
+        {
+            if (descriptor.name != QLatin1String(name)) continue;
+            descriptor.presentation.iconId = QString::fromLatin1(icon);
+            descriptor.presentation.order = order;
+        }
+    };
+    present("framegrabber.applets-refresh", "refresh", 10);
+    present("framegrabber.applet-load", "plug-connected", 20);
+    present("framegrabber.configuration-load", "opened-folder", 30);
+    present("framegrabber.configuration-save", "save", 40);
+    present("framegrabber.cameras-refresh", "cameras", 50);
+    if (!_sessionAvailable.load(std::memory_order_acquire))
     {
         for (auto& descriptor : result)
         {
@@ -397,6 +643,55 @@ ApiResult<void> FramegrabberSourceController::requestTool(const QString& name,
                                                           QJsonObject arguments,
                                                           IToolProvider::Completion completion)
 {
+    return requestToolInternal(name, version, std::move(arguments), {}, std::move(completion));
+}
+
+ApiResult<void> FramegrabberSourceController::requestToolWithProgress(
+    const QString& callId, const QString& name, const int version, QJsonObject arguments,
+    Progress progress, IToolProvider::Completion completion)
+{
+    Q_ASSERT(QThread::currentThread() == thread());
+    if (callId.isEmpty())
+        return ApiResult<void>::failure(ApiErrorCode::InvalidArgument, "An exact call identity is required.");
+    {
+        std::lock_guard<std::mutex> lock(_activeCallMutex);
+        if (!_activeCallId.isEmpty())
+            return ApiResult<void>::failure(ApiErrorCode::Busy,
+                "Another accepted call already holds the module worker.");
+        _activeCallId = callId;
+    }
+    const auto clear = [this, callId] {
+        std::lock_guard<std::mutex> lock(_activeCallMutex);
+        if (_activeCallId == callId) _activeCallId.clear();
+    };
+    const auto admitted = requestToolInternal(name, version, std::move(arguments), progress,
+        [clear, completion = std::move(completion)](ApiResult<QJsonValue> result) noexcept
+        {
+            clear();
+            try { completion(std::move(result)); }
+            catch (...) { qWarning() << "[Framegrabber] tool consumer callback threw."; }
+        });
+    if (!admitted.succeeded()) clear();
+    return admitted;
+}
+
+ApiResult<void> FramegrabberSourceController::cancelTool(const QString& callId)
+{
+    Q_ASSERT(QThread::currentThread() == thread());
+    std::lock_guard<std::mutex> lock(_activeCallMutex);
+    if (callId.isEmpty() || _activeCallId != callId)
+        return ApiResult<void>::failure(ApiErrorCode::NotFound,
+            "No accepted call holds that identity.");
+    // The Basler Frame Grabber SDK exposes no cancellation for Fg_Init/Fg_InitConfig; the
+    // accepted call completes normally and its completion reports the outcome.
+    return ApiResult<void>::failure(ApiErrorCode::Unsupported,
+        "The Basler Frame Grabber SDK cannot cancel an applet or configuration load.");
+}
+
+ApiResult<void> FramegrabberSourceController::requestToolInternal(
+    const QString& name, const int version, QJsonObject arguments,
+    std::function<void(const ApiProgress&)> progress, IToolProvider::Completion completion)
+{
     Q_ASSERT(QThread::currentThread() == thread());
     using Result = ApiResult<QJsonValue>;
     using Admission = ApiResult<void>;
@@ -405,49 +700,126 @@ ApiResult<void> FramegrabberSourceController::requestTool(const QString& name,
     for (const auto& candidate : toolDescriptors()) if (candidate.name == name) descriptor = candidate;
     if (!descriptor) return Admission::failure(ApiErrorCode::NotFound, "Tool is not declared.");
     if (version != descriptor->version) return Admission::failure(ApiErrorCode::Unsupported, "Unsupported tool version.");
-    if (!_framegrabber) return Admission::failure(ApiErrorCode::Unavailable, descriptor->unavailableReason);
+    if (!_sessionAvailable.load(std::memory_order_acquire))
+        return Admission::failure(ApiErrorCode::Unavailable, descriptor->unavailableReason);
     // The registry validates schemas; direct callers get the same strict check here.
     const QJsonObject properties = descriptor->inputSchema.value("properties").toObject();
     for (auto it = arguments.begin(); it != arguments.end(); ++it)
         if (!properties.contains(it.key()) || !it.value().isString() || it.value().toString().isEmpty()
             || it.value().toString().contains(QChar::Null))
             return Admission::failure(ApiErrorCode::InvalidArgument, "Exact typed arguments are required.");
+    const QStringList options = appletOptions(_backend);
     for (const auto required : descriptor->inputSchema.value("required").toArray())
-        if (!arguments.contains(required.toString()))
-            return Admission::failure(ApiErrorCode::InvalidArgument, "Exact typed arguments are required.");
+    {
+        if (arguments.contains(required.toString())) continue;
+        const QString field = required.toString();
+        if (field == QLatin1String("applet") && !options.isEmpty())
+        {
+            // A missing installed applet is a retryable prompt, never an effect.
+            try { completion(argumentRequiredFailure("applet", "enum",
+                "Choose one of the applets installed for this board.", options)); }
+            catch (...) { qWarning() << "[Framegrabber] tool consumer callback threw."; }
+            return Admission::success();
+        }
+        if (field == QLatin1String("configuration"))
+        {
+            const bool save = name == QLatin1String("framegrabber.configuration-save");
+            try { completion(argumentRequiredFailure("configuration",
+                save ? "file-save" : "file-open",
+                save ? "Choose the .mcf file to write." : "Choose the .mcf file to apply.")); }
+            catch (...) { qWarning() << "[Framegrabber] tool consumer callback threw."; }
+            return Admission::success();
+        }
+        return Admission::failure(ApiErrorCode::InvalidArgument, "Exact typed arguments are required.");
+    }
 
-    return admitControl(name, std::move(arguments), [completion = std::move(completion)](Result result) noexcept {
-        try { completion(std::move(result)); }
-        catch (...) { qWarning() << "[Framegrabber] tool consumer callback threw."; }
-    });
+    // Q3: the callable route loads only applets inside the installed catalog. The caller is
+    // prompted with that catalog instead of receiving a native-library path permission.
+    if (arguments.contains("applet"))
+    {
+        const std::string requested = arguments.value("applet").toString().toStdString();
+        if (catalogApplet(_backend, requested).empty())
+        {
+            if (options.isEmpty())
+                return Admission::failure(ApiErrorCode::PermissionDenied,
+                    "Only applets listed by framegrabber.applets can be loaded through the API; refresh the catalog first.");
+            try { completion(argumentRequiredFailure("applet", "enum",
+                "Only applets listed by framegrabber.applets can be loaded through the API.", options)); }
+            catch (...) { qWarning() << "[Framegrabber] tool consumer callback threw."; }
+            return Admission::success();
+        }
+    }
+    if (name == QLatin1String("framegrabber.configuration-load") && !arguments.contains("applet"))
+    {
+        const std::string configuration = arguments.value("configuration").toString().toStdString();
+        std::string boardName;
+        if (arguments.contains("board"))
+        {
+            const QString board = arguments.value("board").toString();
+            if (_backend.boards)
+            {
+                for (const auto& candidate : _backend.boards())
+                    if (boardMatches(candidate, board)) boardName = candidate.displayName();
+            }
+        }
+        if (_backend.appletPathFromConfiguration)
+        {
+            const std::string configured = _backend.appletPathFromConfiguration(configuration, boardName);
+            // F3: an MCF whose applet is not installed offers only installed applets.
+            if (!configured.empty() && catalogApplet(_backend, configured).empty())
+            {
+                if (options.isEmpty())
+                    return Admission::failure(ApiErrorCode::PermissionDenied,
+                        "The configuration does not reference an applet listed by framegrabber.applets; refresh the catalog first.");
+                try { completion(argumentRequiredFailure("applet", "enum",
+                    "The configuration references an applet that is not installed; choose an installed applet.",
+                    options)); }
+                catch (...) { qWarning() << "[Framegrabber] tool consumer callback threw."; }
+                return Admission::success();
+            }
+        }
+    }
+
+    return admitControl(name, std::move(arguments), std::move(progress),
+        [completion = std::move(completion)](Result result) noexcept {
+            try { completion(std::move(result)); }
+            catch (...) { qWarning() << "[Framegrabber] tool consumer callback threw."; }
+        });
 }
 
-ApiResult<void> FramegrabberSourceController::admitControl(const QString& name, QJsonObject arguments,
-                                                           std::function<void(ApiResult<QJsonValue>)> deliver)
+ApiResult<void> FramegrabberSourceController::admitControl(
+    const QString& name, QJsonObject arguments, std::function<void(const ApiProgress&)> progress,
+    std::function<void(ApiResult<QJsonValue>)> deliver)
 {
     Q_ASSERT(QThread::currentThread() == thread());
     using Result = ApiResult<QJsonValue>;
     using Admission = ApiResult<void>;
-    if (!_framegrabber) return Admission::failure(ApiErrorCode::Unavailable, "The frame grabber session has ended.");
+    if (!_sessionAvailable.load(std::memory_order_acquire))
+        return Admission::failure(ApiErrorCode::Unavailable, "The frame grabber session has ended.");
     if (name == "framegrabber.state") { deliver(Result::success(controlState())); return Admission::success(); }
-    if (name == "framegrabber.applets") { deliver(Result::success(appletsJson(*_framegrabber))); return Admission::success(); }
-    if (name == "framegrabber.cameras") { deliver(Result::success(camerasJson(*_framegrabber))); return Admission::success(); }
+    if (name == "framegrabber.applets") { deliver(Result::success(appletsJson(_backend))); return Admission::success(); }
+    if (name == "framegrabber.cameras") { deliver(Result::success(camerasJson(_backend))); return Admission::success(); }
     if (name == "framegrabber.boards") {
         QJsonArray boards;
-        const std::string connected = _framegrabber->isOpened() ? _framegrabber->getConnectedFramegrabberName() : std::string{};
-        for (const auto& board : _framegrabber->getCachedBoardInfo())
-            boards.append(QJsonObject{{"boardId", QString::fromStdString(board.displayName())},
-                {"index", static_cast<int>(board.index)}, {"name", QString::fromStdString(board.name)},
-                {"serial", QString::fromStdString(board.serial)}, {"firmware", QString::fromStdString(board.firmware)},
-                {"driver", QString::fromStdString(board.driver)}, {"hardware", QString::fromStdString(board.hardware)},
-                {"connected", !connected.empty() && connected == board.displayName()}});
+        const std::string connected = _backend.isOpened && _backend.isOpened()
+            ? _backend.connectedBoard() : std::string{};
+        if (_backend.boards)
+        {
+            for (const auto& board : _backend.boards())
+                boards.append(QJsonObject{{"boardId", QString::fromStdString(board.displayName())},
+                    {"index", static_cast<int>(board.index)}, {"name", QString::fromStdString(board.name)},
+                    {"serial", QString::fromStdString(board.serial)}, {"firmware", QString::fromStdString(board.firmware)},
+                    {"driver", QString::fromStdString(board.driver)}, {"hardware", QString::fromStdString(board.hardware)},
+                    {"connected", !connected.empty() && connected == board.displayName()}});
+        }
         deliver(Result::success(QJsonObject{{"boards", boards}}));
         return Admission::success();
     }
 
-    if (workerBusy() || _framegrabber->controlBusy())
+    if (workerBusy() || (_backend.controlBusy && _backend.controlBusy()))
         return Admission::failure(ApiErrorCode::Busy, "Another frame grabber control operation is active.");
-    const bool connected = _framegrabber->isOpened();
+
+    const bool connected = _backend.isOpened && _backend.isOpened();
     const QString currentConnection = connectionId();
     const QString requestedConnection = arguments.value("connectionId").toString();
     const bool needsConnection = name == "framegrabber.configuration-save" || name == kDisconnect
@@ -461,94 +833,109 @@ ApiResult<void> FramegrabberSourceController::admitControl(const QString& name, 
     if (arguments.contains("board")) {
         const QString board = arguments.value("board").toString();
         bool found = false;
-        for (const auto& candidate : _framegrabber->getCachedBoardInfo())
-            if (boardMatches(candidate, board)) { found = true; boardName = candidate.displayName(); }
+        if (_backend.boards)
+        {
+            for (const auto& candidate : _backend.boards())
+                if (boardMatches(candidate, board)) { found = true; boardName = candidate.displayName(); }
+        }
         if (!found) return Admission::failure(ApiErrorCode::NotFound, "Exact declared board was not found.");
     }
     if (name == "framegrabber.applets-refresh" && connected)
         return Admission::failure(ApiErrorCode::Conflict, "Release the board before enumerating applets.");
-    // Applets contain native libraries. Callable requests load only applets the SDK
-    // enumerated from its standard locations; arbitrary files remain a GUI choice.
-    if (arguments.contains("applet")
-        && catalogApplet(*_framegrabber, arguments.value("applet").toString().toStdString()).empty())
-        return Admission::failure(ApiErrorCode::PermissionDenied,
-            "Only applets listed by framegrabber.applets can be loaded through the API.");
     if (name == "framegrabber.applet-load" || name == "framegrabber.configuration-load") {
         if (connected && requestedConnection.isEmpty())
             return Admission::failure(ApiErrorCode::Conflict, "Pass the current connectionId to replace the loaded applet.");
         if (connected && requestedConnection != currentConnection)
             return Admission::failure(ApiErrorCode::Conflict, "Connection generation changed.");
-        if (connected && boardName != _framegrabber->getConnectedFramegrabberName())
+        if (connected && boardName != (connected ? _backend.connectedBoard() : std::string{}))
             return Admission::failure(ApiErrorCode::Conflict, "Release the loaded board before selecting another board.");
     }
-    if (_framegrabber->isGrabbing() && name != kDisconnect)
+    if (_backend.isGrabbing && _backend.isGrabbing() && name != kDisconnect)
         return Admission::failure(ApiErrorCode::Busy, "Stop acquisition explicitly first.");
     // The same gate serializes the control panel; it never implicitly stops acquisition.
-    if (!_framegrabber->tryBeginControl())
+    if (!_backend.tryBeginControl || !_backend.tryBeginControl())
         return Admission::failure(ApiErrorCode::Busy, "Another frame grabber control operation is active.");
 
-    Framegrabber* framegrabber = _framegrabber;
-    _work = QtConcurrent::run([this, framegrabber, name, arguments, boardName, deliver] {
+    Backend* const backend = &_backend;
+    _work = QtConcurrent::run([this, backend, name, arguments, boardName, deliver,
+                               progress = std::move(progress)] {
         // Results are copied after the gate is released, so they report the settled state.
         enum class Payload { State, Applets, Cameras, None };
         Payload payload = Payload::None;
         std::optional<Result> failure;
-        const auto failed = [framegrabber](const QString& fallback) {
-            const auto error = framegrabber->lastError();
+        const auto failed = [backend](const QString& fallback) {
+            const auto error = backend->lastError ? backend->lastError() : Framegrabber::OperationError{};
             return Result::failure(ApiErrorCode::Unavailable,
                 error.message.empty() ? fallback : QString::fromStdString(error.message),
                 QJsonObject{{"sdkResult", error.code}});
         };
+        const auto report = [&progress](const ApiProgress& value) {
+            if (!progress) return;
+            try { progress(value); } catch (...) {}
+        };
         try {
             if (name == "framegrabber.applets-refresh") {
-                if (framegrabber->refreshAppletCatalog(boardName)) payload = Payload::Applets;
+                if (backend->refreshAppletCatalog && backend->refreshAppletCatalog(boardName)) payload = Payload::Applets;
                 else failure = Result::failure(ApiErrorCode::Conflict, "Applet enumeration requires a released board.");
             } else if (name == "framegrabber.applet-load") {
-                if (framegrabber->loadApplet(arguments.value("applet").toString().toStdString(), boardName))
+                const QString applet = arguments.value("applet").toString();
+                report({loadPhase(name), loadMessage(name, applet), 0, 1, false});
+                if (backend->loadApplet && backend->loadApplet(applet.toStdString(), boardName))
                     payload = Payload::State;
                 else failure = failed("Failed to load the applet.");
             } else if (name == "framegrabber.configuration-load") {
                 const std::string configuration = arguments.value("configuration").toString().toStdString();
                 const std::string applet = arguments.value("applet").toString().toStdString();
+                report({loadPhase(name), loadMessage(name, QString::fromStdString(configuration)), 0, 1, false});
                 // The MCF names its own applet; apply the same catalog restriction to it.
-                const std::string configured = applet.empty()
-                    ? framegrabber->appletPathFromConfiguration(configuration, boardName) : applet;
-                if (catalogApplet(*framegrabber, configured).empty())
+                const std::string configured = applet.empty() && backend->appletPathFromConfiguration
+                    ? backend->appletPathFromConfiguration(configuration, boardName) : applet;
+                if (catalogApplet(*backend, configured).empty())
                     failure = Result::failure(ApiErrorCode::PermissionDenied,
                         "The configuration does not reference an applet listed by framegrabber.applets; pass one as applet.");
-                else if (framegrabber->loadAppletConfiguration(applet, configuration, boardName))
+                else if (backend->loadAppletConfiguration
+                    && backend->loadAppletConfiguration(applet, configuration, boardName))
                     payload = Payload::State;
                 else failure = failed("Failed to apply the configuration.");
             } else if (name == "framegrabber.configuration-save") {
-                if (framegrabber->saveConfiguration(arguments.value("configuration").toString().toStdString()))
+                if (backend->saveConfiguration
+                    && backend->saveConfiguration(arguments.value("configuration").toString().toStdString()))
                     payload = Payload::State;
                 else failure = failed("Failed to save the configuration.");
             } else if (name == kDisconnect) {
-                framegrabber->close();
-                if (!framegrabber->isOpened()) payload = Payload::State;
+                if (backend->close) backend->close();
+                if (!(backend->isOpened && backend->isOpened())) payload = Payload::State;
                 else failure = failed("The frame grabber could not be released.");
             } else if (name == "framegrabber.cameras-refresh") {
-                const bool connected = framegrabber->refreshCameras(Framegrabber::CameraTransport::CoaXPress);
-                const auto discovery = framegrabber->lastCameraDiscovery();
-                if (connected || discovery.topologyMismatch) payload = Payload::Cameras;
+                const bool refreshed = backend->refreshCameras
+                    && backend->refreshCameras(Framegrabber::CameraTransport::CoaXPress);
+                const auto discovery = backend->cameraDiscovery ? backend->cameraDiscovery()
+                                                                : Framegrabber::CameraDiscovery{};
+                if (refreshed || discovery.topologyMismatch) payload = Payload::Cameras;
                 else failure = Result::failure(ApiErrorCode::Unavailable,
                     discovery.message.empty() ? QStringLiteral("CXP camera discovery failed.")
                                               : QString::fromStdString(discovery.message),
                     QJsonObject{{"sdkResult", discovery.sdkResult}});
             } else if (name == kSingle) {
-                framegrabber->grab(1);
+                if (backend->grab) backend->grab(1);
                 const auto deadline = std::chrono::steady_clock::now() + kSingleAcquisitionTimeout;
-                while (framegrabber->isGrabbing() && std::chrono::steady_clock::now() < deadline)
+                const auto grabbing = [backend] {
+                    return backend->isGrabbing && backend->isGrabbing();
+                };
+                while (grabbing() && std::chrono::steady_clock::now() < deadline)
                     std::this_thread::sleep_for(std::chrono::milliseconds(10));
-                if (framegrabber->isGrabbing()) {
-                    framegrabber->stop();
+                if (grabbing()) {
+                    if (backend->stop) backend->stop();
                     failure = Result::failure(ApiErrorCode::Timeout,
                         "Not every DMA channel delivered a frame within 30 s; acquisition was stopped.");
                 } else {
-                    const int dmaCount = framegrabber->getDMACount();
+                    const int dmaCount = backend->dmaCount ? backend->dmaCount() : 0;
                     int delivered = 0;
-                    for (const auto& channel : framegrabber->acquisitionStatistics())
-                        if (channel.delivered >= 1) ++delivered;
+                    if (backend->acquisitionStatistics)
+                    {
+                        for (const auto& channel : backend->acquisitionStatistics())
+                            if (channel.delivered >= 1) ++delivered;
+                    }
                     if (dmaCount > 0 && delivered >= dmaCount) payload = Payload::State;
                     else failure = Result::failure(ApiErrorCode::Unavailable,
                         "Acquisition ended before every DMA channel delivered a frame.");
@@ -559,12 +946,20 @@ ApiResult<void> FramegrabberSourceController::admitControl(const QString& name, 
         } catch (...) {
             failure = Result::failure(ApiErrorCode::Internal, "Unexpected frame grabber backend failure.");
         }
-        framegrabber->endControl();
+        if (progress)
+        {
+            if (name == QLatin1String("framegrabber.applet-load"))
+                report({loadPhase(name), loadMessage(name, arguments.value("applet").toString()), 1, 1, false});
+            else if (name == QLatin1String("framegrabber.configuration-load"))
+                report({loadPhase(name),
+                    loadMessage(name, arguments.value("configuration").toString()), 1, 1, false});
+        }
+        if (backend->endControl) backend->endControl();
         if (failure) { deliver(std::move(*failure)); return; }
         switch (payload) {
         case Payload::State: deliver(Result::success(controlState(true))); break;
-        case Payload::Applets: deliver(Result::success(appletsJson(*framegrabber))); break;
-        case Payload::Cameras: deliver(Result::success(camerasJson(*framegrabber))); break;
+        case Payload::Applets: deliver(Result::success(appletsJson(*backend))); break;
+        case Payload::Cameras: deliver(Result::success(camerasJson(*backend))); break;
         case Payload::None: deliver(Result::failure(ApiErrorCode::Internal, "Frame grabber operation did not complete.")); break;
         }
     });
@@ -587,47 +982,181 @@ DeviceConnectionError lifecycleError(const ApiErrorCode code)
     default: return DeviceConnectionError::BackendFailure;
     }
 }
+
+DeviceConnectionInterfaceInfo interfaceInfo(const std::string& hardware)
+{
+    DeviceConnectionInterfaceInfo info;
+    info.type = hardware.empty() ? std::string(kInterfaceType) : hardware;
+    if (info.type.size() > 64) info.type.resize(64);
+    info.exclusive = true;
+    info.reason = std::string(kInterfaceReason);
+    return info;
+}
+
+template<class Callback, class Value>
+void completeConnection(const Callback& callback, Value value) noexcept
+{
+    try { callback(std::move(value)); } catch (...) {}
+}
 }
 
 DeviceConnectionState FramegrabberSourceController::connectionState() const
 {
-    const bool connected = _framegrabber && _framegrabber->isOpened();
+    const bool connected = _sessionAvailable.load(std::memory_order_acquire)
+        && _backend.isOpened && _backend.isOpened();
     if (!connected) return {};
-    const std::string board = _framegrabber->getConnectedFramegrabberName();
-    const std::string applet = _framegrabber->getLoadedAppletName();
-    return {true, _framegrabber->isGrabbing(), connectionId().toStdString(), board,
-            applet.empty() ? board : board + " / " + applet, std::nullopt};
+    const std::string board = _backend.connectedBoard ? _backend.connectedBoard() : std::string{};
+    const std::string applet = _backend.loadedAppletName ? _backend.loadedAppletName() : std::string{};
+    DeviceConnectionState state;
+    state.connected = true;
+    state.live = _backend.isGrabbing && _backend.isGrabbing();
+    state.connectionId = connectionId().toStdString();
+    state.targetId = board;
+    state.displayName = applet.empty() ? board : board + " / " + applet;
+    state.kind = DeviceConnectionTargetKind::Interface;
+    std::uint64_t delivered = 0;
+    if (_backend.acquisitionStatistics)
+        for (const auto& channel : _backend.acquisitionStatistics()) delivered += channel.delivered;
+    state.deliveredFrames = delivered;
+    std::string hardware;
+    if (_backend.boards)
+        for (const auto& candidate : _backend.boards())
+            if (candidate.displayName() == board) hardware = candidate.hardware;
+    state.interfaceInfo = interfaceInfo(hardware);
+    for (const auto& source : sourceDescriptors())
+    {
+        if (source.id.empty()) continue;
+        state.sources.push_back({source.id, source.index});
+    }
+    return state;
 }
 
 DeviceConnectionCapabilities FramegrabberSourceController::connectionCapabilities() const
 {
-    if (!_framegrabber) {
+    if (!_sessionAvailable.load(std::memory_order_acquire)) {
         const DeviceConnectionAvailability ended{false, "The frame grabber session has ended."};
-        return {ended, ended, ended, ended, ended, ended};
+        DeviceConnectionCapabilities capabilities{ended, ended, ended, ended, ended, ended};
+        capabilities.connectionModel = DeviceConnectionModel::Hierarchical;
+        return capabilities;
     }
     const DeviceConnectionAvailability yes{true, {}};
-    const DeviceConnectionAvailability applet{false,
-        "A frame grabber connection is made by loading an applet with framegrabber.applet-load or framegrabber.configuration-load."};
-    return {applet, applet, applet, yes, yes, {false, "Live acquisition uses source.start and source.stop."}};
+    DeviceConnectionCapabilities capabilities{
+        yes,
+        {false, "Board discovery runs when the session is created; observe the cached device.targets."},
+        yes, yes, yes,
+        {false, "Live acquisition uses source.start and source.stop."}};
+    // One board connection owns its DMA-channel sources.
+    capabilities.connectionModel = DeviceConnectionModel::Hierarchical;
+    return capabilities;
 }
 
-DeviceConnectionResult FramegrabberSourceController::requestConnectionTargets(TargetsCompletion)
+DeviceConnectionTargets FramegrabberSourceController::connectionTargets() const
 {
-    return {DeviceConnectionError::Unsupported, connectionCapabilities().targets.reason};
+    DeviceConnectionTargets targets;
+    if (!_sessionAvailable.load(std::memory_order_acquire)) {
+        targets.result = {DeviceConnectionError::Unavailable, "The frame grabber session has ended."};
+        return targets;
+    }
+    if (_backend.boards)
+    {
+        for (const auto& board : _backend.boards())
+        {
+            DeviceConnectionTarget target;
+            target.targetId = board.displayName();
+            target.displayName = board.displayName();
+            target.kind = DeviceConnectionTargetKind::Interface;
+            target.interfaceInfo = interfaceInfo(board.hardware);
+            targets.targets.push_back(std::move(target));
+        }
+    }
+    return targets;
 }
 
-DeviceConnectionResult FramegrabberSourceController::requestConnect(std::string, IDeviceConnectionControl::Completion)
+DeviceConnectionResult FramegrabberSourceController::requestConnectionTargets(TargetsCompletion completion)
 {
-    return {DeviceConnectionError::Unsupported, connectionCapabilities().connect.reason};
+    Q_ASSERT(QThread::currentThread() == thread());
+    if (!completion) return {DeviceConnectionError::InvalidArgument, "Completion is required."};
+    completeConnection(completion, connectionTargets());
+    return {};
+}
+
+DeviceConnectionResult FramegrabberSourceController::requestConnect(std::string targetId,
+                                                                    IDeviceConnectionControl::Completion completion)
+{
+    Q_ASSERT(QThread::currentThread() == thread());
+    if (!completion) return {DeviceConnectionError::InvalidArgument, "Completion is required."};
+    if (!_sessionAvailable.load(std::memory_order_acquire))
+        return {DeviceConnectionError::Unavailable, "The frame grabber session has ended."};
+    if (targetId.empty() || targetId.find('\0') != std::string::npos)
+        return {DeviceConnectionError::InvalidArgument, "An exact board targetId is required."};
+    if (_backend.isOpened && _backend.isOpened())
+        return {DeviceConnectionError::Conflict, "Disconnect before connecting another board."};
+    if ((_backend.isGrabbing && _backend.isGrabbing()) || workerBusy()
+        || (_backend.controlBusy && _backend.controlBusy()))
+        return {DeviceConnectionError::Busy, "Another frame grabber control operation is active."};
+    const QString reference = QString::fromStdString(targetId);
+    std::string boardName;
+    if (_backend.boards)
+    {
+        for (const auto& board : _backend.boards())
+            if (boardMatches(board, reference)) boardName = board.displayName();
+    }
+    if (boardName.empty())
+        return {DeviceConnectionError::NotFound, "Exact declared board was not found."};
+    if (!_backend.tryBeginControl || !_backend.tryBeginControl())
+        return {DeviceConnectionError::Busy, "Another frame grabber control operation is active."};
+
+    Backend* const backend = &_backend;
+    _work = QtConcurrent::run([this, backend, boardName, completion = std::move(completion)] {
+        DeviceConnectionResult result;
+        try {
+            if (backend->refreshAppletCatalog) backend->refreshAppletCatalog(boardName);
+            std::string applet;
+            if (backend->appletCatalog)
+            {
+                std::string powerUp;
+                for (const auto& candidate : backend->appletCatalog())
+                {
+                    if (candidate.active) { applet = candidate.path; break; }
+                    if (powerUp.empty() && candidate.powerUp) powerUp = candidate.path;
+                }
+                if (applet.empty()) applet = powerUp;
+            }
+            if (applet.empty()) {
+                result = {DeviceConnectionError::NotFound,
+                    "The board reports no active or power-up applet to load.",
+                    DeviceConnectionEffect::None, connectionState()};
+            } else if (backend->loadApplet && backend->loadApplet(applet, boardName)) {
+                result = {{}, {}, DeviceConnectionEffect::Applied, connectionState()};
+            } else {
+                const auto error = backend->lastError ? backend->lastError()
+                                                      : Framegrabber::OperationError{};
+                result = {DeviceConnectionError::BackendFailure,
+                    error.message.empty() ? "The board's opening applet could not be loaded."
+                                          : error.message,
+                    DeviceConnectionEffect::None, connectionState()};
+            }
+        } catch (const std::exception& error) {
+            result = {DeviceConnectionError::BackendFailure, error.what(),
+                DeviceConnectionEffect::Unknown, std::nullopt};
+        } catch (...) {
+            result = {DeviceConnectionError::BackendFailure,
+                "Unexpected frame grabber opening failure.", DeviceConnectionEffect::Unknown, std::nullopt};
+        }
+        if (backend->endControl) backend->endControl();
+        wakeObservation(true);
+        completeConnection(completion, std::move(result));
+    });
+    return {};
 }
 
 DeviceConnectionResult FramegrabberSourceController::requestConnectionState(IDeviceConnectionControl::Completion completion)
 {
     Q_ASSERT(QThread::currentThread() == thread());
     if (!completion) return {DeviceConnectionError::InvalidArgument, "Completion is required."};
-    if (!_framegrabber) return {DeviceConnectionError::Unavailable, "The frame grabber session has ended."};
-    try { completion({{}, {}, {}, connectionState()}); }
-    catch (...) { qWarning() << "[Framegrabber] lifecycle consumer callback threw."; }
+    if (!_sessionAvailable.load(std::memory_order_acquire))
+        return {DeviceConnectionError::Unavailable, "The frame grabber session has ended."};
+    completeConnection(completion, DeviceConnectionResult{{}, {}, {}, connectionState()});
     return {};
 }
 
@@ -648,12 +1177,14 @@ DeviceConnectionResult FramegrabberSourceController::admitLifecycle(const QStrin
 {
     Q_ASSERT(QThread::currentThread() == thread());
     if (!completion) return {DeviceConnectionError::InvalidArgument, "Completion is required."};
-    if (_framegrabber && !_framegrabber->isOpened())
+    if (!_sessionAvailable.load(std::memory_order_acquire))
+        return {DeviceConnectionError::Unavailable, "The frame grabber session has ended."};
+    if (_backend.isOpened && !_backend.isOpened())
         return {DeviceConnectionError::Disconnected, "No applet is loaded."};
     // The shared control path keeps one gate and one worker for GUI, module tools and lifecycle calls.
     // The controller drains its worker before destruction, so the completion may read it.
     const auto admitted = admitControl(name, QJsonObject{{"connectionId", QString::fromStdString(connectionId)}},
-        [this, completion = std::move(completion)](ApiResult<QJsonValue> result) noexcept {
+        {}, [this, completion = std::move(completion)](ApiResult<QJsonValue> result) noexcept {
             DeviceConnectionResult copied;
             if (result.succeeded()) {
                 copied = {{}, {}, DeviceConnectionEffect::Applied, connectionState()};
@@ -662,6 +1193,7 @@ DeviceConnectionResult FramegrabberSourceController::admitLifecycle(const QStrin
                 copied = {lifecycleError(result.error()->code), result.error()->message.toStdString(),
                           DeviceConnectionEffect::Unknown};
             }
+            wakeObservation(false);
             try { completion(std::move(copied)); }
             catch (...) { qWarning() << "[Framegrabber] lifecycle consumer callback threw."; }
         });
@@ -669,9 +1201,129 @@ DeviceConnectionResult FramegrabberSourceController::admitLifecycle(const QStrin
     return {lifecycleError(admitted.error()->code), admitted.error()->message.toStdString()};
 }
 
+void FramegrabberSourceController::startObservationThread()
+{
+    std::lock_guard<std::mutex> lock(_observerMutex);
+    if (_observerThread.joinable()) return;
+    _observerStop = false;
+    _observerThread = std::thread([this] { observationLoop(); });
+}
+
+void FramegrabberSourceController::stopObservationThread()
+{
+    {
+        std::lock_guard<std::mutex> lock(_observerMutex);
+        _observerStop = true;
+    }
+    _observerWake.notify_all();
+    if (_observerThread.joinable()) _observerThread.join();
+}
+
+void FramegrabberSourceController::wakeObservation(const bool snapshot)
+{
+    std::lock_guard<std::mutex> lock(_observerMutex);
+    if (_observerStop) return;
+    _observerPending = true;
+    _observerSnapshot = _observerSnapshot || snapshot;
+    _observerWake.notify_one();
+}
+
+void FramegrabberSourceController::observationLoop()
+{
+    for (;;)
+    {
+        bool snapshot = false;
+        {
+            std::unique_lock<std::mutex> lock(_observerMutex);
+            _observerWake.wait(lock, [this] { return _observerStop || _observerPending; });
+            if (_observerStop) return;
+            _observerPending = false;
+            snapshot = _observerSnapshot;
+            _observerSnapshot = false;
+        }
+        if (!_notifications.active()) continue;
+
+        bool haveGate = false;
+        for (;;)
+        {
+            {
+                std::lock_guard<std::mutex> lock(_observerMutex);
+                if (_observerStop) return;
+            }
+            if (!_sessionAvailable.load(std::memory_order_acquire)) break;
+            if (!_backend.tryBeginControl) break;
+            // The shared gate serializes this pass with every accepted control operation.
+            if (_backend.tryBeginControl())
+            {
+                haveGate = true;
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+        if (haveGate)
+        {
+            try { observeAndPublish(snapshot); }
+            catch (...) { qWarning() << "[Framegrabber] parameter observation failed."; }
+            if (_backend.endControl) _backend.endControl();
+            _notifications.drain();
+        }
+    }
+}
+
+void FramegrabberSourceController::observeAndPublish(const bool snapshot)
+{
+    if (!_notifications.active()) return;
+    const bool opened = _sessionAvailable.load(std::memory_order_acquire)
+        && _backend.isOpened && _backend.isOpened();
+    std::string previous;
+    {
+        std::lock_guard<std::mutex> lock(_observationMutex);
+        previous = _notificationConnectionId;
+    }
+    if (!opened)
+    {
+        if (previous.empty()) return;
+        _notifications.publishTerminal(previous, DeviceParameterError::Disconnected,
+            "The frame grabber connection closed.");
+        std::lock_guard<std::mutex> lock(_observationMutex);
+        _notificationConnectionId.clear();
+        for (auto it = _observations.begin(); it != _observations.end();)
+            it = it->second.target.connectionId == previous ? _observations.erase(it) : std::next(it);
+        return;
+    }
+    const std::string current = connectionId().toStdString();
+    if (current.empty()) return;
+    bool snapshotRequired = snapshot;
+    if (previous != current)
+    {
+        if (!previous.empty())
+            _notifications.publishTerminal(previous, DeviceParameterError::Disconnected,
+                "The frame grabber connection changed.");
+        {
+            std::lock_guard<std::mutex> lock(_observationMutex);
+            _notificationConnectionId = current;
+            for (auto it = _observations.begin(); it != _observations.end();)
+                it = it->second.target.connectionId == current ? std::next(it) : _observations.erase(it);
+        }
+        snapshotRequired = true;
+    }
+    const Observation observed = observeAll(current, true);
+    if (!observed.error.empty())
+    {
+        _notifications.publishTerminal(current, DeviceParameterError::BackendFailure, observed.error);
+        return;
+    }
+    if (snapshotRequired)
+        _notifications.publishSnapshot(current);
+    else if (!observed.changed.empty() || !observed.invalidated.empty())
+        _notifications.publishDelta(current, observed.changed, observed.invalidated);
+}
 std::optional<SourceRuntimeDiagnostics> FramegrabberSourceController::sourceRuntimeDiagnostics(unsigned sourceIndex) const
 {
-    if (!_framegrabber || sourceIndex >= static_cast<unsigned>(_framegrabber->getDMACount())) return std::nullopt;
-    const auto value = _framegrabber->runtimeDiagnostics(sourceIndex);
+    if (!_sessionAvailable.load(std::memory_order_acquire) || !_backend.runtimeDiagnostics)
+        return std::nullopt;
+    if (sourceIndex >= static_cast<unsigned>(_backend.dmaCount ? _backend.dmaCount() : 0))
+        return std::nullopt;
+    const auto value = _backend.runtimeDiagnostics(sourceIndex);
     return SourceRuntimeDiagnostics{value.grabbing, value.delivered, value.failed};
 }
