@@ -1,12 +1,12 @@
 #pragma once
 
-#include "AbstractSourceController.h"
-#include "DeviceConnectionControl.h"
-#include "DeviceParameterControl.h"
-#include "FrameStorage.h"
+#include "DeviceRuntime/Contract/AbstractSourceController.h"
+#include "DeviceRuntime/Contract/DeviceConnectionControl.h"
+#include "DeviceRuntime/Contract/DeviceParameterControl.h"
+#include "DeviceRuntime/Contract/FrameStorage.h"
 #include "Framegrabber.h"
 #include "FramegrabberParameterNotifications.h"
-#include "ToolProvider.h"
+#include "Tools/ToolProvider.h"
 
 #include <QFuture>
 #include <QJsonObject>

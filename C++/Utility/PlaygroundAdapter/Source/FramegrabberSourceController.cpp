@@ -1,7 +1,7 @@
 #include "FramegrabberSourceController.h"
 
 #include "Utility/PlaygroundAdapter/FramegrabberGraphicsFrameStream.h"
-#include "SessionFrame.h"
+#include "DeviceRuntime/Contract/SessionFrame.h"
 
 #include <QDebug>
 #include <QJsonArray>
