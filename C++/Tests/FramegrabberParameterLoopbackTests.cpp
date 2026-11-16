@@ -26,6 +26,7 @@ class FramegrabberParameterLoopbackTests final : public QObject
     Q_OBJECT
 private slots:
     void codecCarriesTreeSnapshotDeltaAndResync();
+    void toolDescriptorsRoundTripAndBoardlessLoadRefusal();
 };
 
 namespace {
@@ -58,6 +59,13 @@ const DeviceParameterDescriptor* findParameter(
 {
     for (const auto& parameter : parameters)
         if (parameter.target.scope == scope && parameter.target.name == name) return &parameter;
+    return nullptr;
+}
+
+const ToolDescriptor* findTool(const QList<ToolDescriptor>& tools, const char* name)
+{
+    for (const auto& tool : tools)
+        if (tool.name == QLatin1String(name)) return &tool;
     return nullptr;
 }
 
@@ -277,6 +285,53 @@ void FramegrabberParameterLoopbackTests::codecCarriesTreeSnapshotDeltaAndResync(
 
     QVERIFY(loopback.roundTrips() > 0);
     loopback.close();
+}
+
+void FramegrabberParameterLoopbackTests::toolDescriptorsRoundTripAndBoardlessLoadRefusal()
+{
+    FramegrabberTestBackend fake;
+    FramegrabberSourceController controller(nullptr);
+    FramegrabberControllerTestAccess::install(controller, fake);
+
+    // The worker snapshot carries the same descriptors, including the optional board.
+    QList<ToolDescriptor> descriptors;
+    QString error;
+    QVERIFY2(DeviceRuntimeProtocol::decodeToolDescriptors(
+        DeviceRuntimeProtocol::encodeToolDescriptors(controller.toolDescriptors()),
+        &descriptors, &error), qPrintable(error));
+    const auto* load = findTool(descriptors, "framegrabber.applet-load");
+    QVERIFY(load != nullptr);
+    QCOMPARE(load->inputSchema.value(QStringLiteral("required")).toArray(),
+        QJsonArray{QStringLiteral("applet")});
+    QVERIFY(load->inputSchema.value(QStringLiteral("properties")).toObject()
+        .contains(QStringLiteral("board")));
+    QVERIFY(load->description.contains(QStringLiteral("connected board")));
+    const auto* configuration = findTool(descriptors, "framegrabber.configuration-load");
+    QVERIFY(configuration != nullptr);
+    QCOMPARE(configuration->inputSchema.value(QStringLiteral("required")).toArray(),
+        QJsonArray{QStringLiteral("configuration")});
+    QVERIFY(configuration->inputSchema.value(QStringLiteral("properties")).toObject()
+        .contains(QStringLiteral("board")));
+    QVERIFY(configuration->description.contains(QStringLiteral("connected board")));
+    QCOMPARE(load->inputSchema.value(QStringLiteral("properties")).toObject()
+        .value(QStringLiteral("applet")).toObject().value(QStringLiteral("format")).toString(),
+        QStringLiteral("enum"));
+    QCOMPARE(configuration->inputSchema.value(QStringLiteral("properties")).toObject()
+        .value(QStringLiteral("configuration")).toObject().value(QStringLiteral("format")).toString(),
+        QStringLiteral("file-open"));
+
+    bool completed = false;
+    const auto refused = controller.requestTool(QStringLiteral("framegrabber.applet-load"), 1,
+        QJsonObject{{QStringLiteral("applet"), QStringLiteral("Acquisition")}},
+        [&completed](ApiResult<QJsonValue>) { completed = true; });
+    QVERIFY(!refused.succeeded());
+    QCOMPARE(refused.error()->code, ApiErrorCode::Unavailable);
+    QVERIFY(refused.error()->message.contains(QStringLiteral("No board is connected")));
+    QVERIFY(!completed);
+    {
+        std::lock_guard<std::mutex> lock(fake.state.mutex);
+        QVERIFY(!fake.state.opened);
+    }
 }
 
 QTEST_GUILESS_MAIN(FramegrabberParameterLoopbackTests)

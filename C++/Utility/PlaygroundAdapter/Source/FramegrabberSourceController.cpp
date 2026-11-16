@@ -596,15 +596,15 @@ QList<ToolDescriptor> FramegrabberSourceController::toolDescriptors() const
             "Re-enumerate loadable applets for a board; refused while an applet is loaded.",
             ToolEffect::Device, ToolEgress::Metadata, true, {}, schema({{"board", text()}}, {}), appletsSchema()},
         {"framegrabber.applet-load", 1, "Load applet",
-            "Initialize the board with an installed applet selected by an enumerated unique name or path (Fg_Init). Replacing a loaded applet requires its connectionId; acquisition must be stopped.",
+            "Initialize the board with an installed applet selected by an enumerated unique name or path (Fg_Init). An omitted board uses the session's connected board. Replacing a loaded applet requires its connectionId; acquisition must be stopped.",
             ToolEffect::Device, ToolEgress::Metadata, true, {},
-            schema({{"board", text()}, {"applet", applet}, {"connectionId", text()}}, {"board", "applet"}), state},
+            schema({{"board", text()}, {"applet", applet}, {"connectionId", text()}}, {"applet"}), state},
         {"framegrabber.configuration-load", 1, "Load configuration",
-            "Apply an .mcf file: Fg_InitConfig, or Fg_loadConfig when its applet is loaded. An applet argument selects an installed applet that replaces the MCF applet reference.",
+            "Apply an .mcf file: Fg_InitConfig, or Fg_loadConfig when its applet is loaded. An omitted board uses the session's connected board. An applet argument selects an installed applet that replaces the MCF applet reference.",
             ToolEffect::Device, ToolEgress::Metadata, true, {},
             schema({{"board", text()}, {"configuration", promptText("file-open")},
                     {"applet", applet}, {"connectionId", text()}},
-                {"board", "configuration"}), state},
+                {"configuration"}), state},
         {"framegrabber.configuration-save", 1, "Save configuration",
             "Write the current applet parameters to an .mcf file (Fg_saveConfig) on the host file system.",
             ToolEffect::Device, ToolEgress::Metadata, true, {},
@@ -716,6 +716,20 @@ ApiResult<void> FramegrabberSourceController::requestToolInternal(
         if (!properties.contains(it.key()) || !it.value().isString() || it.value().toString().isEmpty()
             || it.value().toString().contains(QChar::Null))
             return Admission::failure(ApiErrorCode::InvalidArgument, "Exact typed arguments are required.");
+    // An omitted board means the session's connected board, so the host panel never needs a
+    // field-name rule. Resolve it before prompting; a session without a board refuses first.
+    const bool loadAction = name == QLatin1String("framegrabber.applet-load")
+        || name == QLatin1String("framegrabber.configuration-load");
+    if (loadAction && !arguments.contains("board"))
+    {
+        const std::string connected =
+            _backend.connectedBoard ? _backend.connectedBoard() : std::string{};
+        if (connected.empty())
+            return Admission::failure(ApiErrorCode::Unavailable,
+                "No board is connected; pass board explicitly or connect the session board first.");
+        arguments.insert(QStringLiteral("board"), QString::fromStdString(connected));
+    }
+
     const QStringList options = appletOptions(_backend);
     for (const auto required : descriptor->inputSchema.value("required").toArray())
     {
@@ -760,15 +774,12 @@ ApiResult<void> FramegrabberSourceController::requestToolInternal(
     if (name == QLatin1String("framegrabber.configuration-load") && !arguments.contains("applet"))
     {
         const std::string configuration = arguments.value("configuration").toString().toStdString();
+        const QString board = arguments.value("board").toString();
         std::string boardName;
-        if (arguments.contains("board"))
+        if (_backend.boards)
         {
-            const QString board = arguments.value("board").toString();
-            if (_backend.boards)
-            {
-                for (const auto& candidate : _backend.boards())
-                    if (boardMatches(candidate, board)) boardName = candidate.displayName();
-            }
+            for (const auto& candidate : _backend.boards())
+                if (boardMatches(candidate, board)) boardName = candidate.displayName();
         }
         if (_backend.appletPathFromConfiguration)
         {

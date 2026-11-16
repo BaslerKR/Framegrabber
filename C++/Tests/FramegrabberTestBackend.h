@@ -41,6 +41,7 @@ struct FramegrabberTestState
     int cameraCommands = 0;
     std::string appletPath;
     std::string appletName;
+    std::string loadedBoard;
     std::string configuration;
     std::string savedConfiguration;
     std::string outsideMcfApplet = "C:/outside/legacy.hap";
@@ -298,7 +299,7 @@ struct FramegrabberTestBackend
                     return applet.path;
             return std::string{};
         };
-        result.loadApplet = [shared](const std::string& reference, const std::string&) {
+        result.loadApplet = [shared](const std::string& reference, const std::string& board) {
             std::lock_guard<std::mutex> lock(shared->mutex);
             for (const auto& applet : shared->catalog)
             {
@@ -309,6 +310,7 @@ struct FramegrabberTestBackend
                 ++shared->generation;
                 shared->appletName = applet.name;
                 shared->appletPath = applet.path;
+                shared->loadedBoard = board;
                 shared->configuration.clear();
                 return true;
             }
@@ -322,7 +324,7 @@ struct FramegrabberTestBackend
             return std::string{};
         };
         result.loadAppletConfiguration =
-            [shared](const std::string& applet, const std::string& configuration, const std::string&) {
+            [shared](const std::string& applet, const std::string& configuration, const std::string& board) {
                 std::lock_guard<std::mutex> lock(shared->mutex);
                 std::string path = applet;
                 if (path.empty())
@@ -334,6 +336,7 @@ struct FramegrabberTestBackend
                 ++shared->generation;
                 shared->appletName = "Configured";
                 shared->appletPath = path;
+                shared->loadedBoard = board;
                 shared->configuration = configuration;
                 return true;
             };

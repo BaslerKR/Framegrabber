@@ -235,13 +235,14 @@ Other tools, and the lifecycle disconnect and Single, run on one worker and hold
 | Tool | Effect |
 | --- | --- |
 | `framegrabber.applets-refresh` | Re-enumerates applets and replaces the cached catalog; only while released (device) |
-| `framegrabber.applet-load` | Loads `{board, applet}` (device) |
-| `framegrabber.configuration-load` | Loads `{board, configuration, applet?}` (device) |
+| `framegrabber.applet-load` | Loads `{applet, connectionId?, board?}` (device); an omitted board uses the session's connected board |
+| `framegrabber.configuration-load` | Loads `{configuration, applet?, connectionId?, board?}` (device); an omitted board uses the session's connected board |
 | `framegrabber.configuration-save` | Writes `{connectionId, configuration}` to a host file (device) |
 | `framegrabber.cameras-refresh` | Restarts CXP discovery (device) |
 
 Admission rules:
 
+- Applet and configuration loads default the board to the session's connected board; a session without a connected board refuses them without effect.
 - Replacing a loaded applet requires its current `connectionId`.
 - Switching boards requires a release first.
 - Acquisition is never stopped implicitly.
