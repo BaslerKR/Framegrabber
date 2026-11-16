@@ -963,6 +963,19 @@ ApiResult<void> FramegrabberSourceController::admitControl(
                     loadMessage(name, arguments.value("configuration").toString()), 1, 1, false});
         }
         if (backend->endControl) backend->endControl();
+        if (!failure
+            && (name == QLatin1String("framegrabber.applet-load")
+                || name == QLatin1String("framegrabber.configuration-load")
+                || name == QLatin1String("framegrabber.cameras-refresh"))) {
+            if (name == QLatin1String("framegrabber.cameras-refresh")) {
+                // A refresh may replace the connected camera or its feature list under the same
+                // connection generation; drop both XML and parsed declarations.
+                std::lock_guard<std::mutex> lock(_observationMutex);
+                _cameraDeclarations.clear();
+                _cameraFeatureXml.clear();
+            }
+            wakeObservation(false);
+        }
         if (failure) { deliver(std::move(*failure)); return; }
         switch (payload) {
         case Payload::State: deliver(Result::success(controlState(true))); break;

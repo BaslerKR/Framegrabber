@@ -3,6 +3,7 @@
 #include "FramegrabberSourceController.h"
 
 #include <atomic>
+#include <condition_variable>
 #include <cstdint>
 #include <map>
 #include <mutex>
@@ -27,6 +28,10 @@ struct FramegrabberTestState
     std::map<std::uint64_t, double> floats;
     std::map<std::uint64_t, std::string> strings;
     std::map<std::string, std::string> cameraValues;
+    std::mutex observationGateMutex;
+    std::condition_variable observationGate;
+    bool blockObservation = false;
+    bool observationEntered = false;
     bool opened = false;
     bool grabbing = false;
     bool control = false;
@@ -39,6 +44,96 @@ struct FramegrabberTestState
     std::string configuration;
     std::string savedConfiguration;
     std::string outsideMcfApplet = "C:/outside/legacy.hap";
+    bool extendedCameraXml = false;
+    bool cameraXmlEmpty = false;
+
+    [[nodiscard]] std::string cameraXml(const bool extended) const
+    {
+        std::string xml = R"(<?xml version="1.0"?>
+<RegisterDescription>
+  <RegisterBlock>
+    <Category Name="Root">
+      <pFeature>Image</pFeature>
+    </Category>
+    <Category Name="Image">
+      <DisplayName>Image</DisplayName>
+      <pFeature>Width</pFeature>
+      <pFeature>PixelFormat</pFeature>
+      <pFeature>SerialNumber</pFeature>
+      <pFeature>Gain</pFeature>
+      <pFeature>Test</pFeature>
+    </Category>
+    <Integer Name="Width">
+      <DisplayName>Width</DisplayName>
+      <Description>Sensor width</Description>
+      <Unit>px</Unit>
+      <Visibility>Beginner</Visibility>
+      <pValue>WidthReg</pValue>
+    </Integer>
+    <Integer Name="WidthReg">
+      <AccessMode>RW</AccessMode>
+    </Integer>
+    <Enumeration Name="PixelFormat">
+      <DisplayName>Pixel format</DisplayName>
+      <Visibility>Expert</Visibility>
+      <pValue>PixelFormatReg</pValue>
+      <EnumEntry Name="Mono8"><Value>0</Value></EnumEntry>
+      <EnumEntry Name="RGB8"><Value>1</Value></EnumEntry>
+    </Enumeration>
+    <Enumeration Name="PixelFormatReg">
+      <AccessMode>RW</AccessMode>
+    </Enumeration>
+    <String Name="SerialNumber">
+      <DisplayName>Serial number</DisplayName>
+      <ImposedAccessMode>RO</ImposedAccessMode>
+      <pValue>SerialReg</pValue>
+    </String>
+    <String Name="SerialReg">
+      <AccessMode>RW</AccessMode>
+    </String>
+    <Float Name="Gain">
+      <DisplayName>Gain</DisplayName>
+      <pValue>GainReg</pValue>
+      <pIsLocked>GainLocked</pIsLocked>
+    </Float>
+    <Float Name="GainReg">
+      <AccessMode>RW</AccessMode>
+    </Float>
+    <Boolean Name="GainLocked">
+      <pValue>GainLockedReg</pValue>
+    </Boolean>
+    <Boolean Name="GainLockedReg">
+      <AccessMode>RW</AccessMode>
+    </Boolean>
+    <Command Name="Test">
+      <DisplayName>Test</DisplayName>
+      <Visibility>Guru</Visibility>
+      <pCommand>TestReg</pCommand>
+    </Command>
+    <Command Name="TestReg">
+      <AccessMode>WO</AccessMode>
+    </Command>
+  </RegisterBlock>
+</RegisterDescription>)";
+        if (extended)
+        {
+            const std::string height = R"(
+    <Integer Name="Height">
+      <DisplayName>Height</DisplayName>
+      <pValue>HeightReg</pValue>
+    </Integer>
+    <Integer Name="HeightReg">
+      <AccessMode>RW</AccessMode>
+    </Integer>)";
+            const auto close = xml.rfind("  </RegisterBlock>");
+            xml.insert(close, height + "\n");
+            const auto feature = xml.find("      <pFeature>Test</pFeature>");
+            xml.insert(feature + std::string("      <pFeature>Test</pFeature>").size(),
+                       "\n      <pFeature>Height</pFeature>");
+        }
+        return xml;
+    }
+
 };
 
 /** @brief Builds one ready-to-use synthetic backend and its owned state. */
@@ -150,76 +245,6 @@ struct FramegrabberTestBackend
         state.cameraValues["PixelFormat"] = "Mono8";
         state.cameraValues["SerialNumber"] = "SN-1";
         state.cameraValues["Gain"] = "1.5";
-    }
-
-    [[nodiscard]] std::string cameraXml() const
-    {
-        return R"(<?xml version="1.0"?>
-<RegisterDescription>
-  <RegisterBlock>
-    <Category Name="Root">
-      <pFeature>Image</pFeature>
-    </Category>
-    <Category Name="Image">
-      <DisplayName>Image</DisplayName>
-      <pFeature>Width</pFeature>
-      <pFeature>PixelFormat</pFeature>
-      <pFeature>SerialNumber</pFeature>
-      <pFeature>Gain</pFeature>
-      <pFeature>Test</pFeature>
-    </Category>
-    <Integer Name="Width">
-      <DisplayName>Width</DisplayName>
-      <Description>Sensor width</Description>
-      <Unit>px</Unit>
-      <Visibility>Beginner</Visibility>
-      <pValue>WidthReg</pValue>
-    </Integer>
-    <Integer Name="WidthReg">
-      <AccessMode>RW</AccessMode>
-    </Integer>
-    <Enumeration Name="PixelFormat">
-      <DisplayName>Pixel format</DisplayName>
-      <Visibility>Expert</Visibility>
-      <pValue>PixelFormatReg</pValue>
-      <EnumEntry Name="Mono8"><Value>0</Value></EnumEntry>
-      <EnumEntry Name="RGB8"><Value>1</Value></EnumEntry>
-    </Enumeration>
-    <Enumeration Name="PixelFormatReg">
-      <AccessMode>RW</AccessMode>
-    </Enumeration>
-    <String Name="SerialNumber">
-      <DisplayName>Serial number</DisplayName>
-      <ImposedAccessMode>RO</ImposedAccessMode>
-      <pValue>SerialReg</pValue>
-    </String>
-    <String Name="SerialReg">
-      <AccessMode>RW</AccessMode>
-    </String>
-    <Float Name="Gain">
-      <DisplayName>Gain</DisplayName>
-      <pValue>GainReg</pValue>
-      <pIsLocked>GainLocked</pIsLocked>
-    </Float>
-    <Float Name="GainReg">
-      <AccessMode>RW</AccessMode>
-    </Float>
-    <Boolean Name="GainLocked">
-      <pValue>GainLockedReg</pValue>
-    </Boolean>
-    <Boolean Name="GainLockedReg">
-      <AccessMode>RW</AccessMode>
-    </Boolean>
-    <Command Name="Test">
-      <DisplayName>Test</DisplayName>
-      <Visibility>Guru</Visibility>
-      <pCommand>TestReg</pCommand>
-    </Command>
-    <Command Name="TestReg">
-      <AccessMode>WO</AccessMode>
-    </Command>
-  </RegisterBlock>
-</RegisterDescription>)";
     }
 
     [[nodiscard]] FramegrabberSourceController::Backend backend()
@@ -398,6 +423,18 @@ struct FramegrabberTestBackend
         };
         result.getAppletParameter = [shared](std::int64_t id, unsigned dma,
                                              Framegrabber::ParameterValue& value, bool) {
+            if (id == 5)
+            {
+                std::unique_lock<std::mutex> gate(shared->observationGateMutex);
+                if (shared->blockObservation)
+                {
+                    shared->observationEntered = true;
+                    shared->observationGate.notify_all();
+                    shared->observationGate.wait(gate, [shared] {
+                        return !shared->blockObservation;
+                    });
+                }
+            }
             std::lock_guard<std::mutex> lock(shared->mutex);
             const std::uint64_t key = (std::uint64_t(dma) << 32) | std::uint64_t(id);
             switch (id)
@@ -443,10 +480,11 @@ struct FramegrabberTestBackend
                 Framegrabber::CameraControlCapability{
                     Framegrabber::CameraTransport::CoaXPress, true, true, true}};
         };
-        const std::string xml = cameraXml();
-        result.cameraFeatureXml = [xml](Framegrabber::CameraTransport transport, unsigned dma) {
+        result.cameraFeatureXml = [shared](Framegrabber::CameraTransport transport, unsigned dma) {
             if (transport != Framegrabber::CameraTransport::CoaXPress || dma != 0) return std::string{};
-            return xml;
+            std::lock_guard<std::mutex> lock(shared->mutex);
+            if (shared->cameraXmlEmpty) return std::string{};
+            return shared->cameraXml(shared->extendedCameraXml);
         };
         result.getCameraFeature = [shared](Framegrabber::CameraTransport, unsigned,
                                            const std::string& name, Framegrabber::ParameterValue& value) {
@@ -532,5 +570,11 @@ struct FramegrabberControllerTestAccess
     static void drain(FramegrabberSourceController& controller)
     {
         controller._notifications.drain();
+    }
+
+    /** @brief Wakes the module observation thread without a public API call. */
+    static void wakeObservation(FramegrabberSourceController& controller, bool snapshot)
+    {
+        controller.wakeObservation(snapshot);
     }
 };

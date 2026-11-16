@@ -75,9 +75,12 @@ The optional Playground device plugin is a separate MODULE. Enable `FRAMEGRABBER
   device's `pIsLocked`/`pIsAvailable` gates, and re-observed after every
   transition. `requestParameterChanges` delivers an
   initial snapshot, revision-stamped deltas after writes/executes and
-  acquisition transitions, and one resync snapshot when the bounded queue
-  overflows; release waits for in-flight delivery. Observation runs on a module
-  thread and serializes against the shared control gate.
+  acquisition transitions measured against the last published inventory, and
+  one resync snapshot when the bounded queue overflows; release waits for
+  in-flight delivery. Observation runs on a module thread with its own pass
+  serialization, waits for accepted control work to settle without holding the
+  shared gate, and caches camera feature XML only while its content is
+  unchanged so a refresh or camera reconnect replaces the tree.
 
 
 ## Acquisition Contract

@@ -25,6 +25,7 @@ private slots:
     void parameterTreeCoversAppletAndCameraScopes();
     void parameterChangesDeliverSnapshotAndDelta();
     void parameterAdmissionsStayAvailableDuringObservation();
+    void cameraRefreshReplacesTheCachedFeatureTree();
     void notificationQueueOverflowsToResync();
 };
 
@@ -388,9 +389,9 @@ void FramegrabberControllerTests::parameterTreeCoversAppletAndCameraScopes()
     QVERIFY(findParameter(parameters.parameters, "Applet:1", "Width") != nullptr);
 
     const auto* locatedCameraWidth = findParameter(parameters.parameters, "Camera:cxp:0", "Width");
+    QVERIFY(locatedCameraWidth != nullptr);
     // The feature's access mode comes from its pValue register, not a direct attribute.
     QVERIFY(locatedCameraWidth->writable);
-    QVERIFY(locatedCameraWidth != nullptr);
     const auto cameraWidth = *locatedCameraWidth;
     QCOMPARE(cameraWidth.kind, DeviceParameterKind::Integer);
     QVERIFY(cameraWidth.categoryPath == std::vector<std::string>({"Image"}));
@@ -632,22 +633,92 @@ void FramegrabberControllerTests::parameterAdmissionsStayAvailableDuringObservat
         return changes > 0;
     }, 5000));
 
-    // The subscription's observation thread must not hold the shared lifecycle gate, so two
-    // consecutive admissions cannot be refused as busy because a refresh is in flight.
-    for (int attempt = 0; attempt < 3; ++attempt)
+    // Block the observation thread inside a parameter read, then admit an inventory while it
+    // is running. Before the fix the observation held the shared lifecycle gate and this
+    // admission was refused as busy; now it is admitted and waits for the observation pass.
     {
-        Sink<DeviceParameterInventory> inventory;
-        QCOMPARE(controller.requestParameters(inventory.completion()).error,
-            DeviceParameterError::None);
-        QVERIFY(inventory.wait());
-        QCOMPARE(inventory.take().result.error, DeviceParameterError::None);
+        std::lock_guard<std::mutex> lock(fake.state.observationGateMutex);
+        fake.state.blockObservation = true;
+        fake.state.observationEntered = false;
     }
+    FramegrabberControllerTestAccess::wakeObservation(controller, false);
+    QVERIFY(QTest::qWaitFor([&] {
+        std::lock_guard<std::mutex> lock(fake.state.observationGateMutex);
+        return fake.state.observationEntered;
+    }, 5000));
+    Sink<DeviceParameterInventory> during;
+    QCOMPARE(controller.requestParameters(during.completion()).error, DeviceParameterError::None);
+    {
+        std::lock_guard<std::mutex> lock(fake.state.observationGateMutex);
+        fake.state.blockObservation = false;
+    }
+    fake.state.observationGate.notify_all();
+    QVERIFY(during.wait());
+    QCOMPARE(during.take().result.error, DeviceParameterError::None);
+    Sink<DeviceParameterInventory> after;
+    QCOMPARE(controller.requestParameters(after.completion()).error, DeviceParameterError::None);
+    QVERIFY(after.wait());
+    QCOMPARE(after.take().result.error, DeviceParameterError::None);
     Sink<DeviceParameterResult> released;
     QCOMPARE(controller.releaseParameterChanges(connection, "watch-admission",
         released.completion()).error, DeviceParameterError::None);
     QVERIFY(released.wait());
 }
 
+void FramegrabberControllerTests::cameraRefreshReplacesTheCachedFeatureTree()
+{
+    FramegrabberTestBackend fake;
+    FramegrabberSourceController controller(nullptr);
+    FramegrabberControllerTestAccess::install(controller, fake);
+    const auto outcome = connectBoard(controller);
+    QVERIFY2(outcome.error.isEmpty(), qPrintable(outcome.error));
+    const auto connection = outcome.result.state->connectionId;
+
+    const auto inventory = [&controller] {
+        Sink<DeviceParameterInventory> sink;
+        const auto admission = controller.requestParameters(sink.completion());
+        if (admission.error != DeviceParameterError::None) return DeviceParameterInventory{admission};
+        if (!sink.wait()) return DeviceParameterInventory{};
+        return sink.take();
+    };
+    auto parameters = inventory();
+    QCOMPARE(parameters.result.error, DeviceParameterError::None);
+    QVERIFY(findParameter(parameters.parameters, "Camera:cxp:0", "Width") != nullptr);
+    QVERIFY(findParameter(parameters.parameters, "Camera:cxp:0", "Height") == nullptr);
+
+    {
+        std::lock_guard<std::mutex> lock(fake.state.mutex);
+        fake.state.extendedCameraXml = true;
+    }
+    Sink<ApiResult<QJsonValue>> refreshed;
+    QCOMPARE(controller.requestTool(QStringLiteral("framegrabber.cameras-refresh"), 1,
+        QJsonObject{{QStringLiteral("connectionId"), QString::fromStdString(connection)}},
+        refreshed.completion()).succeeded(), true);
+    QVERIFY(refreshed.wait());
+    QVERIFY(refreshed.take().succeeded());
+    parameters = inventory();
+    QCOMPARE(parameters.result.error, DeviceParameterError::None);
+    const auto* height = findParameter(parameters.parameters, "Camera:cxp:0", "Height");
+    QVERIFY(height != nullptr);
+    QVERIFY(height->categoryPath == std::vector<std::string>({"Image"}));
+    QVERIFY(findParameter(parameters.parameters, "Camera:cxp:0", "Width") != nullptr);
+
+    // A temporary empty feature XML drops the camera scope instead of serving the old tree.
+    {
+        std::lock_guard<std::mutex> lock(fake.state.mutex);
+        fake.state.cameraXmlEmpty = true;
+    }
+    parameters = inventory();
+    QCOMPARE(parameters.result.error, DeviceParameterError::None);
+    QVERIFY(findParameter(parameters.parameters, "Camera:cxp:0", "Width") == nullptr);
+    {
+        std::lock_guard<std::mutex> lock(fake.state.mutex);
+        fake.state.cameraXmlEmpty = false;
+    }
+    parameters = inventory();
+    QCOMPARE(parameters.result.error, DeviceParameterError::None);
+    QVERIFY(findParameter(parameters.parameters, "Camera:cxp:0", "Width") != nullptr);
+}
 void FramegrabberControllerTests::notificationQueueOverflowsToResync()
 {
     framegrabber::ParameterNotificationHub hub(

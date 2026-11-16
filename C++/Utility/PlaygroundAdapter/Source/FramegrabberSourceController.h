@@ -254,6 +254,8 @@ private:
     std::map<std::string, DeviceParameterDescriptor> _publishedObservations;
     /** @brief Parsed camera feature XML per connection generation and DMA channel. */
     std::map<std::string, std::vector<FramegrabberCameraFeatureDeclaration>> _cameraDeclarations;
+    /** @brief Feature XML that produced each parsed declaration list; refresh clears it. */
+    std::map<std::string, std::string> _cameraFeatureXml;
     std::atomic<std::uint64_t> _revision{0};
     /** @brief Serializes observation passes independently of the shared control gate. */
     std::mutex _observationCycleMutex;

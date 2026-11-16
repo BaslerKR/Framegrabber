@@ -808,18 +808,29 @@ FramegrabberSourceController::cameraDeclarations(const Transport transport,
                                                  const std::string& connection)
 {
     const std::string key = connection + "/" + cameraScope(transport, dmaIndex);
-    {
-        std::lock_guard<std::mutex> lock(_observationMutex);
-        const auto cached = _cameraDeclarations.find(key);
-        if (cached != _cameraDeclarations.end()) return cached->second;
-    }
     const auto xml = _backend.cameraFeatureXml
         ? _backend.cameraFeatureXml(transport, dmaIndex) : std::string{};
+    {
+        std::lock_guard<std::mutex> lock(_observationMutex);
+        if (xml.empty())
+        {
+            // A refresh or camera reconnect may temporarily report no XML; do not serve a
+            // previous camera's feature list under the same connection and DMA.
+            _cameraFeatureXml.erase(key);
+            _cameraDeclarations.erase(key);
+            return {};
+        }
+        const auto cachedXml = _cameraFeatureXml.find(key);
+        if (cachedXml != _cameraFeatureXml.end() && cachedXml->second == xml)
+        {
+            const auto cached = _cameraDeclarations.find(key);
+            if (cached != _cameraDeclarations.end()) return cached->second;
+        }
+    }
     auto parsed = parseCameraFeatureDeclarations(xml);
     std::lock_guard<std::mutex> lock(_observationMutex);
-    const auto cached = _cameraDeclarations.find(key);
-    if (cached != _cameraDeclarations.end()) return cached->second;
-    _cameraDeclarations.emplace(key, parsed);
+    _cameraFeatureXml[key] = xml;
+    _cameraDeclarations[key] = parsed;
     return parsed;
 }
 
