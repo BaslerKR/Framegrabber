@@ -402,21 +402,19 @@ void FramegrabberControllerTests::boardlessLoadsUseTheSessionBoard()
     // An omitted board with no session connection refuses before any device effect.
     auto refused = invoke("framegrabber.applet-load",
         QJsonObject{{"applet", "Acquisition"}});
-    QVERIFY(refused.admission->succeeded());
-    QVERIFY(refused.result.has_value());
-    QVERIFY(!refused.result->succeeded());
-    QCOMPARE(refused.result->error()->code, ApiErrorCode::Unavailable);
-    QVERIFY(refused.result->error()->message.contains(QStringLiteral("No board is connected")));
+    QVERIFY(!refused.admission->succeeded());
+    QCOMPARE(refused.admission->error()->code, ApiErrorCode::Unavailable);
+    QVERIFY(refused.admission->error()->message.contains(QStringLiteral("No board is connected")));
+    QVERIFY(!refused.result.has_value());
     expectNoEffect();
 
     auto refusedConfiguration = invoke("framegrabber.configuration-load",
         QJsonObject{{"configuration", "installed.mcf"}});
-    QVERIFY(refusedConfiguration.admission->succeeded());
-    QVERIFY(refusedConfiguration.result.has_value());
-    QVERIFY(!refusedConfiguration.result->succeeded());
-    QCOMPARE(refusedConfiguration.result->error()->code, ApiErrorCode::Unavailable);
-    QVERIFY(refusedConfiguration.result->error()->message.contains(
+    QVERIFY(!refusedConfiguration.admission->succeeded());
+    QCOMPARE(refusedConfiguration.admission->error()->code, ApiErrorCode::Unavailable);
+    QVERIFY(refusedConfiguration.admission->error()->message.contains(
         QStringLiteral("No board is connected")));
+    QVERIFY(!refusedConfiguration.result.has_value());
     expectNoEffect();
 
     // A connected session supplies the board for both loads.

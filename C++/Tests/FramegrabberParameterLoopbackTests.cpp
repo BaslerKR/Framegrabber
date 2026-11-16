@@ -320,28 +320,14 @@ void FramegrabberParameterLoopbackTests::toolDescriptorsRoundTripAndBoardlessLoa
         .value(QStringLiteral("configuration")).toObject().value(QStringLiteral("format")).toString(),
         QStringLiteral("file-open"));
 
-    struct ToolOutcome
-    {
-        std::mutex mutex;
-        std::optional<ApiResult<QJsonValue>> result;
-    };
-    ToolOutcome outcome;
-    QCOMPARE(controller.requestTool(QStringLiteral("framegrabber.applet-load"), 1,
+    bool completed = false;
+    const auto refused = controller.requestTool(QStringLiteral("framegrabber.applet-load"), 1,
         QJsonObject{{QStringLiteral("applet"), QStringLiteral("Acquisition")}},
-        [&outcome](ApiResult<QJsonValue> result) {
-            std::lock_guard<std::mutex> lock(outcome.mutex);
-            outcome.result = std::move(result);
-        }).succeeded(), true);
-    QVERIFY(waitFor([&] {
-        std::lock_guard<std::mutex> lock(outcome.mutex);
-        return outcome.result.has_value();
-    }));
-    {
-        std::lock_guard<std::mutex> lock(outcome.mutex);
-        QVERIFY(!outcome.result->succeeded());
-        QCOMPARE(outcome.result->error()->code, ApiErrorCode::Unavailable);
-        QVERIFY(outcome.result->error()->message.contains(QStringLiteral("No board is connected")));
-    }
+        [&completed](ApiResult<QJsonValue>) { completed = true; });
+    QVERIFY(!refused.succeeded());
+    QCOMPARE(refused.error()->code, ApiErrorCode::Unavailable);
+    QVERIFY(refused.error()->message.contains(QStringLiteral("No board is connected")));
+    QVERIFY(!completed);
     {
         std::lock_guard<std::mutex> lock(fake.state.mutex);
         QVERIFY(!fake.state.opened);
