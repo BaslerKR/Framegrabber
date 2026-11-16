@@ -470,10 +470,9 @@ void FramegrabberControllerTests::boardlessLoadsUseTheSessionBoard()
     auto other = invoke("framegrabber.applet-load",
         QJsonObject{{"board", "Second Board (SN2)"}, {"applet", "Acquisition"},
                     {"connectionId", connection}});
-    QVERIFY(other.admission->succeeded());
-    QVERIFY(other.result.has_value());
-    QVERIFY(!other.result->succeeded());
-    QCOMPARE(other.result->error()->code, ApiErrorCode::Conflict);
+    QVERIFY(!other.admission->succeeded());
+    QCOMPARE(other.admission->error()->code, ApiErrorCode::Conflict);
+    QVERIFY(!other.result.has_value());
     {
         std::lock_guard<std::mutex> lock(fake.state.mutex);
         QCOMPARE(fake.state.loadedBoard, std::string("Test Board (SN1)"));
