@@ -333,6 +333,7 @@ if(FRAMEGRABBER_BUILD_PLAYGROUND_PLUGIN)
             Utility/PlaygroundAdapter/Source/FramegrabberParameterNotifications.h
         )
         set_target_properties(FramegrabberControllerTests PROPERTIES AUTOMOC ON)
+        playground_sdk_add_runtime_contract(FramegrabberControllerTests)
         target_include_directories(FramegrabberControllerTests PRIVATE
             "${CMAKE_CURRENT_SOURCE_DIR}"
             "${CMAKE_CURRENT_SOURCE_DIR}/Utility/PlaygroundAdapter"
@@ -368,6 +369,7 @@ if(FRAMEGRABBER_BUILD_PLAYGROUND_PLUGIN)
                 "${FRAMEGRABBER_PLAYGROUND_SOURCE_DIR}/src/DeviceRuntime/Protocol/DeviceParameterLoopback.cpp"
                 "${FRAMEGRABBER_PLAYGROUND_SOURCE_DIR}/src/DeviceRuntime/Protocol/DeviceParameterService.cpp"
                 "${FRAMEGRABBER_PLAYGROUND_SOURCE_DIR}/src/DeviceRuntime/Protocol/DeviceRuntimeProtocol.cpp"
+                "${FRAMEGRABBER_PLAYGROUND_SOURCE_DIR}/src/DeviceRuntime/Contract/AbstractSourceController.h"
             )
             set_target_properties(FramegrabberParameterLoopbackTests PROPERTIES AUTOMOC ON)
             target_include_directories(FramegrabberParameterLoopbackTests PRIVATE
@@ -379,7 +381,6 @@ if(FRAMEGRABBER_BUILD_PLAYGROUND_PLUGIN)
                 "${FRAMEGRABBER_PLAYGROUND_SOURCE_DIR}/src"
             )
             target_link_libraries(FramegrabberParameterLoopbackTests PRIVATE
-                Playground::DeviceRuntimeContract
                 Framegrabber::QtWidget
                 Framegrabber::PlaygroundAdapter
                 Qt6::Test

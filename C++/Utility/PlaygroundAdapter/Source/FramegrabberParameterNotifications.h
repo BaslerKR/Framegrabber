@@ -1,7 +1,7 @@
 #pragma once
 
-#include "DeviceParameter.h"
-#include "DeviceParameterControl.h"
+#include "DeviceRuntime/Contract/DeviceParameter.h"
+#include "DeviceRuntime/Contract/DeviceParameterControl.h"
 
 #include <atomic>
 #include <cstddef>
