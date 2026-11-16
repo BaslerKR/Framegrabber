@@ -1311,6 +1311,7 @@ void FramegrabberSourceController::observeAndPublish(const bool snapshot)
         _observations.clear();
         _publishedObservations.clear();
         _cameraDeclarations.clear();
+        _cameraFeatureXml.clear();
         return;
     }
     const std::string current = connectionId().toStdString();
@@ -1333,6 +1334,7 @@ void FramegrabberSourceController::observeAndPublish(const bool snapshot)
         _observations.clear();
         _publishedObservations.clear();
         _cameraDeclarations.clear();
+        _cameraFeatureXml.clear();
         snapshotRequired = true;
     }
     const Observation observed = observeAll(current, true);
