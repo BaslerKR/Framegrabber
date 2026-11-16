@@ -13,10 +13,11 @@ set(PLAYGROUND_PLUGIN_DESCRIPTION "Discover Basler frame grabbers, load applets,
 set(PLAYGROUND_PLUGIN_ADD_ACTION_TEXT "Frame Grabber")
 set(PLAYGROUND_PLUGIN_SESSION_TYPE "Frame Grabber")
 set(PLAYGROUND_PLUGIN_MENU_ORDER 200)
-set(PLAYGROUND_PLUGIN_LOAD_ORDER 100)
-set(PLAYGROUND_PLUGIN_LIBRARY_WINDOWS "FramegrabberPlugin.dll")
-set(PLAYGROUND_PLUGIN_LIBRARY_LINUX "FramegrabberPlugin.so")
-set(PLAYGROUND_PLUGIN_LIBRARY_MACOS "FramegrabberPlugin.so")
+set(PLAYGROUND_PLUGIN_INSTANCING "package")
+set(PLAYGROUND_PLUGIN_SESSION_SERVICES "graphicsEngine" "scriptEditor")
+set(PLAYGROUND_PLUGIN_MODULE_WINDOWS "FramegrabberPlugin.dll")
+set(PLAYGROUND_PLUGIN_MODULE_LINUX "FramegrabberPlugin.so")
+set(PLAYGROUND_PLUGIN_MODULE_MACOS "FramegrabberPlugin.so")
 set(PLAYGROUND_PLUGIN_LIBRARY_DIRECTORIES
     "runtime/bin"
     "runtime/bin/plugins"
