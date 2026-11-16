@@ -2,6 +2,7 @@
 
 #include <QDebug>
 #include <QDomDocument>
+#include <QHash>
 #include <QSet>
 #include <QStringList>
 #include <QThread>
@@ -323,19 +324,47 @@ QDomElement findCategoryElement(const QDomElement& root, const QString& name)
     return {};
 }
 
-/** @brief One flattened camera feature declaration copied from the SDK XML. */
-struct CameraFeatureDecl
+/** @brief One feature and category index built once per XML document. */
+struct CameraDocumentIndex
 {
-    std::string name;
-    std::string tag;
-    std::string displayName;
-    std::string description;
-    std::string unit;
-    std::string accessMode;
-    DeviceParameterVisibility visibility = DeviceParameterVisibility::Primary;
-    std::vector<std::string> categoryPath;
-    std::vector<std::string> enumEntries;
+    QHash<QString, QDomElement> features;
+    QHash<QString, QDomElement> categories;
 };
+
+void indexCameraElement(const QDomElement& element, CameraDocumentIndex* index)
+{
+    const QString name = element.attribute(QStringLiteral("Name"));
+    if (!name.isEmpty())
+    {
+        if (element.tagName() == QStringLiteral("Category")) index->categories.insert(name, element);
+        else if (cameraKind(element.tagName())) index->features.insert(name, element);
+    }
+    for (QDomElement child = element.firstChildElement(); !child.isNull();
+         child = child.nextSiblingElement())
+        indexCameraElement(child, index);
+}
+
+CameraDocumentIndex indexCameraDocument(const QDomElement& root)
+{
+    CameraDocumentIndex index;
+    indexCameraElement(root, &index);
+    return index;
+}
+
+/** @brief Resolves the access mode declared on the feature or the register it references. */
+QString featureAccessMode(const QDomElement& feature, const CameraDocumentIndex& index)
+{
+    const QString imposed = elementText(feature, QStringLiteral("ImposedAccessMode")).trimmed();
+    if (!imposed.isEmpty()) return imposed;
+    const QString direct = elementText(feature, QStringLiteral("AccessMode")).trimmed();
+    if (!direct.isEmpty()) return direct;
+    const QString value = elementText(feature, QStringLiteral("pValue")).trimmed();
+    const QString command = elementText(feature, QStringLiteral("pCommand")).trimmed();
+    const QDomElement referenced = index.features.value(
+        value.isEmpty() ? command : value);
+    return referenced.isNull() ? QString()
+                               : elementText(referenced, QStringLiteral("AccessMode")).trimmed();
+}
 
 void appendCategoryPath(std::vector<std::string>* path, const QString& displayName,
                         const QString& fallback)
@@ -346,8 +375,9 @@ void appendCategoryPath(std::vector<std::string>* path, const QString& displayNa
     path->push_back(segment);
 }
 
-void collectCategory(const QDomElement& root, const QDomElement& category,
-                     std::vector<std::string> path, std::vector<CameraFeatureDecl>* features,
+void collectCategory(const CameraDocumentIndex& index, const QDomElement& category,
+                     std::vector<std::string> path,
+                     std::vector<FramegrabberCameraFeatureDeclaration>* features,
                      QSet<QString>& visiting)
 {
     const QString categoryName = category.attribute(QStringLiteral("Name"));
@@ -361,41 +391,44 @@ void collectCategory(const QDomElement& root, const QDomElement& category,
          child = child.nextSiblingElement(QStringLiteral("pFeature")))
     {
         const QString featureName = child.text().trimmed();
-        const QDomElement childCategory = findCategoryElement(root, featureName);
+        const QDomElement childCategory = index.categories.value(featureName);
         if (!childCategory.isNull())
         {
-            collectCategory(root, childCategory, path, features, visiting);
+            collectCategory(index, childCategory, path, features, visiting);
             continue;
         }
-        const QDomElement feature = findFeatureElement(root, featureName);
+        const QDomElement feature = index.features.value(featureName);
         if (feature.isNull()) continue;
-        const auto kind = cameraKind(feature.tagName());
-        if (!kind) continue;
+        if (!cameraKind(feature.tagName())) continue;
         if (path.size() > deviceParameterCategoryDepthLimit) continue;
-        CameraFeatureDecl decl;
-        decl.name = featureName.toStdString();
-        decl.tag = feature.tagName().toStdString();
-        decl.displayName = featureDisplayName(feature, featureName).toStdString();
-        decl.description = elementText(feature, QStringLiteral("Description")).toStdString();
-        if (decl.description.empty()) decl.description = elementText(feature, QStringLiteral("ToolTip")).toStdString();
-        decl.unit = elementText(feature, QStringLiteral("Unit")).toStdString();
-        decl.accessMode = elementText(feature, QStringLiteral("AccessMode")).toStdString();
-        decl.visibility = visibilityFrom(elementText(feature, QStringLiteral("Visibility")));
-        decl.categoryPath = path;
+        FramegrabberCameraFeatureDeclaration declaration;
+        declaration.name = featureName.toStdString();
+        declaration.tag = feature.tagName().toStdString();
+        declaration.displayName = featureDisplayName(feature, featureName).toStdString();
+        declaration.description = elementText(feature, QStringLiteral("Description")).toStdString();
+        if (declaration.description.empty())
+            declaration.description = elementText(feature, QStringLiteral("ToolTip")).toStdString();
+        declaration.unit = elementText(feature, QStringLiteral("Unit")).toStdString();
+        declaration.accessMode = featureAccessMode(feature, index).toStdString();
+        declaration.visibility = visibilityFrom(elementText(feature, QStringLiteral("Visibility")));
+        declaration.lockedFeature = elementText(feature, QStringLiteral("pIsLocked")).toStdString();
+        declaration.availableFeature = elementText(feature, QStringLiteral("pIsAvailable")).toStdString();
+        declaration.categoryPath = path;
         const QDomNodeList entries = feature.elementsByTagName(QStringLiteral("EnumEntry"));
-        for (int index = 0; index < entries.count(); ++index)
+        for (int position = 0; position < entries.count(); ++position)
         {
-            const QString entry = entries.at(index).toElement().attribute(QStringLiteral("Name"));
-            if (!entry.isEmpty()) decl.enumEntries.push_back(entry.toStdString());
+            const QString entry = entries.at(position).toElement().attribute(QStringLiteral("Name"));
+            if (!entry.isEmpty()) declaration.enumEntries.push_back(entry.toStdString());
         }
-        features->push_back(std::move(decl));
+        features->push_back(std::move(declaration));
     }
     visiting.remove(categoryName);
 }
 
-std::vector<CameraFeatureDecl> cameraFeatureDeclarations(const std::string& xml)
+std::vector<FramegrabberCameraFeatureDeclaration> parseCameraFeatureDeclarations(
+    const std::string& xml)
 {
-    std::vector<CameraFeatureDecl> features;
+    std::vector<FramegrabberCameraFeatureDeclaration> features;
     if (xml.empty()) return features;
     QDomDocument document;
     if (!document.setContent(QString::fromStdString(xml)))
@@ -404,28 +437,29 @@ std::vector<CameraFeatureDecl> cameraFeatureDeclarations(const std::string& xml)
         return features;
     }
     const QDomElement root = document.documentElement();
+    const CameraDocumentIndex index = indexCameraDocument(root);
     QSet<QString> visiting;
-    const QDomElement rootCategory = findCategoryElement(root, QStringLiteral("Root"));
+    const QDomElement rootCategory = index.categories.value(QStringLiteral("Root"));
     if (!rootCategory.isNull())
     {
-        collectCategory(root, rootCategory, {}, &features, visiting);
+        collectCategory(index, rootCategory, {}, &features, visiting);
     }
     else
     {
         const QDomNodeList categories = root.elementsByTagName(QStringLiteral("Category"));
-        for (int index = 0; index < categories.count(); ++index)
+        for (int position = 0; position < categories.count(); ++position)
         {
-            const QDomElement category = categories.at(index).toElement();
+            const QDomElement category = categories.at(position).toElement();
             const QDomElement parent = category.parentNode().toElement();
             if (parent.isNull() || parent.tagName() != QStringLiteral("Categories")) continue;
-            collectCategory(root, category, {}, &features, visiting);
+            collectCategory(index, category, {}, &features, visiting);
         }
     }
     return features;
 }
 
-const CameraFeatureDecl* findCameraFeature(const std::vector<CameraFeatureDecl>& features,
-                                           const std::string& name)
+const FramegrabberCameraFeatureDeclaration* findCameraFeature(
+    const std::vector<FramegrabberCameraFeatureDeclaration>& features, const std::string& name)
 {
     for (const auto& feature : features)
         if (feature.name == name) return &feature;
@@ -551,33 +585,46 @@ DeviceParameterDescriptor FramegrabberSourceController::observeParameter(
 }
 
 DeviceParameterDescriptor FramegrabberSourceController::observeCameraParameter(
-    const Transport transport, const unsigned int dmaIndex, const std::string& connection,
-    const std::string& featureName, const std::string& tag, const std::string& displayName,
-    const std::string& description, const std::string& unit, const std::string& accessMode,
-    const DeviceParameterVisibility visibility,
-    const std::vector<std::string>& categoryPath, const std::vector<std::string>& enumEntries)
+    const FramegrabberCameraFeatureDeclaration& declaration,
+    const Transport transport, const unsigned int dmaIndex, const std::string& connection)
 {
     DeviceParameterDescriptor result;
-    result.target = {connection, cameraScope(transport, dmaIndex), featureName, {}};
-    result.kind = cameraKind(QString::fromStdString(tag)).value_or(Kind::String);
-    result.displayName = displayName;
-    result.description = description;
-    result.unit = unit;
-    result.categoryPath = categoryPath;
-    result.visibility = visibility;
+    result.target = {connection, cameraScope(transport, dmaIndex), declaration.name, {}};
+    result.kind = cameraKind(QString::fromStdString(declaration.tag)).value_or(Kind::String);
+    result.displayName = declaration.displayName;
+    result.description = declaration.description;
+    result.unit = declaration.unit;
+    result.categoryPath = declaration.categoryPath;
+    result.visibility = declaration.visibility;
     result.representation = representationFor(result.kind);
-    const QString mode = QString::fromStdString(accessMode).trimmed();
+    const QString mode = QString::fromStdString(declaration.accessMode).trimmed();
     const bool readable = mode.isEmpty() || mode == QStringLiteral("RW") || mode == QStringLiteral("RO");
-    // Writability is the access mode observed now, gated by the current acquisition state;
-    // it is never cached from a locked state.
-    const bool writable = (mode.isEmpty() || mode == QStringLiteral("RW") || mode == QStringLiteral("WO"))
+    bool writable = (mode.isEmpty() || mode == QStringLiteral("RW") || mode == QStringLiteral("WO"))
         && !(_backend.isGrabbing && _backend.isGrabbing());
+    // Dynamic GenICam gates are read from the device, so a locked or unavailable feature is
+    // never reported writable from the static access mode alone.
+    const auto readGate = [this, transport, dmaIndex](const std::string& feature, bool* value) {
+        if (feature.empty() || !_backend.getCameraFeature) return false;
+        Framegrabber::ParameterValue current = std::uint32_t{0};
+        if (!_backend.getCameraFeature(transport, dmaIndex, feature, current)) return false;
+        const auto boolean = signedInteger(current);
+        if (!boolean) return false;
+        *value = *boolean != 0;
+        return true;
+    };
+    bool locked = false;
+    if (readGate(declaration.lockedFeature, &locked) && locked) writable = false;
+    bool available = true;
+    if (readGate(declaration.availableFeature, &available) && !available)
+        writable = false;
     result.readable = readable && result.kind != Kind::Command;
     result.writable = writable;
-    result.available = result.readable || result.writable;
+    result.available = available && (result.readable || result.writable);
     if (!result.available)
-        result.unavailableReason = "The camera does not allow this feature in its current access mode.";
-    if (result.kind == Kind::Enumeration) result.enumEntries = enumEntries;
+        result.unavailableReason = available
+            ? "The camera does not allow this feature in its current access mode."
+            : "The device reports this feature as unavailable.";
+    if (result.kind == Kind::Enumeration) result.enumEntries = declaration.enumEntries;
 
     if (result.kind == Kind::Command)
     {
@@ -589,7 +636,7 @@ DeviceParameterDescriptor FramegrabberSourceController::observeCameraParameter(
         if (result.kind == Kind::Float) value = 0.0;
         else if (result.kind == Kind::String || result.kind == Kind::Enumeration) value = std::string{};
         else if (result.kind == Kind::Boolean) value = std::uint32_t{0};
-        if (!_backend.getCameraFeature(transport, dmaIndex, featureName, value))
+        if (!_backend.getCameraFeature(transport, dmaIndex, declaration.name, value))
         {
             result.observationError = "The SDK could not read the camera feature.";
         }
@@ -629,7 +676,7 @@ DeviceParameterDescriptor FramegrabberSourceController::observeCameraParameter(
     if (result.available && (result.kind == Kind::Integer || result.kind == Kind::Float)
         && _backend.cameraFeatureLimits)
     {
-        const auto limits = _backend.cameraFeatureLimits(transport, dmaIndex, featureName,
+        const auto limits = _backend.cameraFeatureLimits(transport, dmaIndex, declaration.name,
             result.kind == Kind::Float);
         if (result.kind == Kind::Integer)
         {
@@ -672,19 +719,11 @@ FramegrabberSourceController::Observation FramegrabberSourceController::observeA
     const std::string& connection, const bool purge)
 {
     Observation result;
-    std::map<std::string, DeviceParameterDescriptor> previous;
-    {
-        std::lock_guard<std::mutex> lock(_observationMutex);
-        previous = _observations;
-    }
     std::set<std::string> seen;
     const auto visit = [&](DeviceParameterDescriptor descriptor) {
         const std::string key = descriptor.target.connectionId + "/"
             + descriptor.target.scope + "/" + descriptor.target.name;
         seen.insert(key);
-        const auto earlier = previous.find(key);
-        if (earlier == previous.end() || !sameObservation(earlier->second, descriptor))
-            result.changed.push_back(descriptor);
         if (result.descriptors.size() < deviceParameterSnapshotDescriptorLimit)
             result.descriptors.push_back(std::move(descriptor));
         else if (result.error.empty())
@@ -731,15 +770,12 @@ FramegrabberSourceController::Observation FramegrabberSourceController::observeA
             for (const auto& camera : _backend.cachedCameras(capability.transport))
             {
                 if (!camera.connected) continue;
-                const auto xml = _backend.cameraFeatureXml(capability.transport, camera.dmaIndex);
-                if (xml.empty()) continue;
-                for (const auto& feature : cameraFeatureDeclarations(xml))
+                const auto declarations = cameraDeclarations(capability.transport,
+                    camera.dmaIndex, connection);
+                for (const auto& declaration : declarations)
                 {
-                    visit(observeCameraParameter(capability.transport, camera.dmaIndex, connection,
-                        feature.name, feature.tag, feature.displayName,
-                        feature.description, feature.unit,
-                        feature.accessMode, feature.visibility, feature.categoryPath,
-                        feature.enumEntries));
+                    visit(observeCameraParameter(declaration, capability.transport,
+                        camera.dmaIndex, connection));
                     if (!result.error.empty()) break;
                 }
                 if (!result.error.empty()) break;
@@ -755,7 +791,6 @@ FramegrabberSourceController::Observation FramegrabberSourceController::observeA
         {
             if (it->second.target.connectionId == connection && !seen.count(it->first))
             {
-                result.invalidated.push_back(it->second.target);
                 it = _observations.erase(it);
             }
             else
@@ -765,6 +800,87 @@ FramegrabberSourceController::Observation FramegrabberSourceController::observeA
         }
     }
     return result;
+}
+
+std::vector<FramegrabberCameraFeatureDeclaration>
+FramegrabberSourceController::cameraDeclarations(const Transport transport,
+                                                 const unsigned int dmaIndex,
+                                                 const std::string& connection)
+{
+    const std::string key = connection + "/" + cameraScope(transport, dmaIndex);
+    {
+        std::lock_guard<std::mutex> lock(_observationMutex);
+        const auto cached = _cameraDeclarations.find(key);
+        if (cached != _cameraDeclarations.end()) return cached->second;
+    }
+    const auto xml = _backend.cameraFeatureXml
+        ? _backend.cameraFeatureXml(transport, dmaIndex) : std::string{};
+    auto parsed = parseCameraFeatureDeclarations(xml);
+    std::lock_guard<std::mutex> lock(_observationMutex);
+    const auto cached = _cameraDeclarations.find(key);
+    if (cached != _cameraDeclarations.end()) return cached->second;
+    _cameraDeclarations.emplace(key, parsed);
+    return parsed;
+}
+
+void FramegrabberSourceController::publishObservation(
+    const std::string& connection, const bool snapshot, const Observation& observed)
+{
+    if (!_notifications.active()) return;
+    const auto keyOf = [](const DeviceParameterDescriptor& descriptor) {
+        return descriptor.target.connectionId + "/" + descriptor.target.scope + "/"
+            + descriptor.target.name;
+    };
+    std::vector<DeviceParameterDescriptor> changed;
+    std::vector<DeviceParameterTarget> invalidated;
+    {
+        std::lock_guard<std::mutex> lock(_observationMutex);
+        if (snapshot)
+        {
+            // A snapshot is the complete current inventory; it also resets the publication
+            // baseline so a later delta is measured against what consumers actually received.
+            _publishedObservations.clear();
+            for (const auto& descriptor : observed.descriptors)
+                _publishedObservations[keyOf(descriptor)] = descriptor;
+        }
+        else
+        {
+            std::set<std::string> currentKeys;
+            for (const auto& descriptor : observed.descriptors)
+            {
+                const std::string key = keyOf(descriptor);
+                currentKeys.insert(key);
+                const auto published = _publishedObservations.find(key);
+                if (published == _publishedObservations.end()
+                    || !sameObservation(published->second, descriptor))
+                    changed.push_back(descriptor);
+            }
+            for (auto it = _publishedObservations.begin(); it != _publishedObservations.end();)
+            {
+                if (it->second.target.connectionId != connection)
+                {
+                    it = _publishedObservations.erase(it);
+                    continue;
+                }
+                if (!currentKeys.count(it->first))
+                {
+                    invalidated.push_back(it->second.target);
+                    it = _publishedObservations.erase(it);
+                    continue;
+                }
+                ++it;
+            }
+            for (const auto& descriptor : changed)
+                _publishedObservations[keyOf(descriptor)] = descriptor;
+        }
+    }
+    if (snapshot)
+    {
+        _notifications.publishSnapshot(connection);
+        return;
+    }
+    if (!changed.empty() || !invalidated.empty())
+        _notifications.publishDelta(connection, std::move(changed), std::move(invalidated));
 }
 
 DeviceParameterChange FramegrabberSourceController::snapshotChange(
@@ -891,18 +1007,12 @@ DeviceParameterResult FramegrabberSourceController::requestParameter(
         try {
             if (camera)
             {
-                const auto declarations = _backend.cameraFeatureXml
-                    ? cameraFeatureDeclarations(_backend.cameraFeatureXml(transport, dma))
-                    : std::vector<CameraFeatureDecl>{};
+                const auto declarations = cameraDeclarations(transport, dma, target.connectionId);
                 const auto* feature = findCameraFeature(declarations, target.name);
                 if (!feature) {
                     result = failure(Error::NotFound, "Camera feature was not found.");
                 } else {
-                    auto current = observeCameraParameter(transport, dma, target.connectionId,
-                        feature->name, feature->tag, feature->displayName,
-                        feature->description, feature->unit,
-                        feature->accessMode, feature->visibility, feature->categoryPath,
-                        feature->enumEntries);
+                    auto current = observeCameraParameter(*feature, transport, dma, target.connectionId);
                     result.descriptor = current;
                     if (!mutate) {
                         if (!current.available) result.error = Error::Unavailable;
@@ -934,15 +1044,11 @@ DeviceParameterResult FramegrabberSourceController::requestParameter(
                                 result.message = "The SDK rejected the camera write.";
                             }
                             result.descriptor.reset();
-                            const auto refreshed = _backend.cameraFeatureXml
-                                ? cameraFeatureDeclarations(_backend.cameraFeatureXml(transport, dma))
-                                : std::vector<CameraFeatureDecl>{};
+                            const auto refreshed = cameraDeclarations(transport, dma,
+                                target.connectionId);
                             if (const auto* after = findCameraFeature(refreshed, target.name))
-                                result.descriptor = observeCameraParameter(transport, dma,
-                                    target.connectionId, after->name, after->tag,
-                                    after->displayName, after->description,
-                                    after->unit, after->accessMode, after->visibility,
-                                    after->categoryPath, after->enumEntries);
+                                result.descriptor = observeCameraParameter(*after, transport, dma,
+                                    target.connectionId);
                         }
                     }
                     if (result.error != Error::None && result.message.empty())

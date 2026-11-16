@@ -22,9 +22,10 @@ struct FramegrabberTestState
     std::vector<FramegrabberSystem::BoardInfo> boards;
     std::vector<Framegrabber::AppletInfo> catalog;
     std::vector<Framegrabber::AppletFeatureNode> appletModel;
-    std::map<std::int64_t, std::int64_t> integers;
-    std::map<std::int64_t, double> floats;
-    std::map<std::int64_t, std::string> strings;
+    /** @brief Applet values keyed by (dma << 32) | parameter id. */
+    std::map<std::uint64_t, std::int64_t> integers;
+    std::map<std::uint64_t, double> floats;
+    std::map<std::uint64_t, std::string> strings;
     std::map<std::string, std::string> cameraValues;
     bool opened = false;
     bool grabbing = false;
@@ -72,7 +73,10 @@ struct FramegrabberTestBackend
         second.path = "C:/applets/Second.hap";
         second.version = "1.0";
         second.dmaCount = 1;
-        state.catalog = {first, second};
+        Framegrabber::AppletInfo duplicate = second;
+        duplicate.file = "Second-alt.hap";
+        duplicate.path = "C:/applets/Second-alt.hap";
+        state.catalog = {first, second, duplicate};
 
         auto integer = [](const char* name, const std::int64_t id, const bool writable) {
             Framegrabber::AppletFeatureNode node;
@@ -133,13 +137,19 @@ struct FramegrabberTestBackend
         device.children.push_back(gain);
         state.appletModel = {acquisition, device};
 
-        state.integers[1] = 640;
-        state.integers[2] = 0;
-        state.integers[3] = 0;
-        state.strings[4] = "Synthetic";
-        state.floats[5] = 1.5;
+        for (unsigned int dma = 0; dma < 2; ++dma)
+        {
+            const std::uint64_t base = std::uint64_t(dma) << 32;
+            state.integers[base | 1] = dma == 0 ? 640 : 320;
+            state.integers[base | 2] = 0;
+            state.integers[base | 3] = 0;
+            state.strings[base | 4] = dma == 0 ? "Synthetic" : "Second";
+            state.floats[base | 5] = dma == 0 ? 1.5 : 2.5;
+        }
         state.cameraValues["Width"] = "1280";
         state.cameraValues["PixelFormat"] = "Mono8";
+        state.cameraValues["SerialNumber"] = "SN-1";
+        state.cameraValues["Gain"] = "1.5";
     }
 
     [[nodiscard]] std::string cameraXml() const
@@ -154,6 +164,8 @@ struct FramegrabberTestBackend
       <DisplayName>Image</DisplayName>
       <pFeature>Width</pFeature>
       <pFeature>PixelFormat</pFeature>
+      <pFeature>SerialNumber</pFeature>
+      <pFeature>Gain</pFeature>
       <pFeature>Test</pFeature>
     </Category>
     <Integer Name="Width">
@@ -161,7 +173,6 @@ struct FramegrabberTestBackend
       <Description>Sensor width</Description>
       <Unit>px</Unit>
       <Visibility>Beginner</Visibility>
-      <AccessMode>RW</AccessMode>
       <pValue>WidthReg</pValue>
     </Integer>
     <Integer Name="WidthReg">
@@ -170,18 +181,38 @@ struct FramegrabberTestBackend
     <Enumeration Name="PixelFormat">
       <DisplayName>Pixel format</DisplayName>
       <Visibility>Expert</Visibility>
-      <AccessMode>RW</AccessMode>
+      <pValue>PixelFormatReg</pValue>
       <EnumEntry Name="Mono8"><Value>0</Value></EnumEntry>
       <EnumEntry Name="RGB8"><Value>1</Value></EnumEntry>
-      <pValue>PixelFormatReg</pValue>
     </Enumeration>
     <Enumeration Name="PixelFormatReg">
       <AccessMode>RW</AccessMode>
     </Enumeration>
+    <String Name="SerialNumber">
+      <DisplayName>Serial number</DisplayName>
+      <ImposedAccessMode>RO</ImposedAccessMode>
+      <pValue>SerialReg</pValue>
+    </String>
+    <String Name="SerialReg">
+      <AccessMode>RW</AccessMode>
+    </String>
+    <Float Name="Gain">
+      <DisplayName>Gain</DisplayName>
+      <pValue>GainReg</pValue>
+      <pIsLocked>GainLocked</pIsLocked>
+    </Float>
+    <Float Name="GainReg">
+      <AccessMode>RW</AccessMode>
+    </Float>
+    <Boolean Name="GainLocked">
+      <pValue>GainLockedReg</pValue>
+    </Boolean>
+    <Boolean Name="GainLockedReg">
+      <AccessMode>RW</AccessMode>
+    </Boolean>
     <Command Name="Test">
       <DisplayName>Test</DisplayName>
       <Visibility>Guru</Visibility>
-      <AccessMode>WO</AccessMode>
       <pCommand>TestReg</pCommand>
     </Command>
     <Command Name="TestReg">
@@ -365,16 +396,17 @@ struct FramegrabberTestBackend
             }
             return limits;
         };
-        result.getAppletParameter = [shared](std::int64_t id, unsigned,
+        result.getAppletParameter = [shared](std::int64_t id, unsigned dma,
                                              Framegrabber::ParameterValue& value, bool) {
             std::lock_guard<std::mutex> lock(shared->mutex);
+            const std::uint64_t key = (std::uint64_t(dma) << 32) | std::uint64_t(id);
             switch (id)
             {
-            case 1: value = shared->integers.at(1); return true;
-            case 2: value = shared->integers.at(2); return true;
+            case 1: value = shared->integers.at(key); return true;
+            case 2: value = shared->integers.at(key); return true;
             case 3: value = std::int64_t{0}; return true;
-            case 4: value = shared->strings.at(4); return true;
-            case 5: value = shared->floats.at(5); return true;
+            case 4: value = shared->strings.at(key); return true;
+            case 5: value = shared->floats.at(key); return true;
             default: return false;
             }
         };
@@ -389,13 +421,14 @@ struct FramegrabberTestBackend
             default: return std::nullopt;
             }
         };
-        result.setAppletParameter = [shared](std::int64_t id, unsigned,
+        result.setAppletParameter = [shared](std::int64_t id, unsigned dma,
                                              const Framegrabber::ParameterValue& value, bool, bool,
                                              int* sdkResult) {
             std::lock_guard<std::mutex> lock(shared->mutex);
-            if (const auto* number = std::get_if<std::int64_t>(&value)) shared->integers[id] = *number;
-            else if (const auto* number = std::get_if<double>(&value)) shared->floats[id] = *number;
-            else if (const auto* text = std::get_if<std::string>(&value)) shared->strings[id] = *text;
+            const std::uint64_t key = (std::uint64_t(dma) << 32) | std::uint64_t(id);
+            if (const auto* number = std::get_if<std::int64_t>(&value)) shared->integers[key] = *number;
+            else if (const auto* number = std::get_if<double>(&value)) shared->floats[key] = *number;
+            else if (const auto* text = std::get_if<std::string>(&value)) shared->strings[key] = *text;
             if (sdkResult) *sdkResult = 0;
             return true;
         };
@@ -425,9 +458,19 @@ struct FramegrabberTestBackend
                     ? 1280 : std::stoll(stored->second)};
                 return true;
             }
-            if (name == "PixelFormat")
+            if (name == "PixelFormat" || name == "SerialNumber")
             {
                 value = shared->cameraValues.at(name);
+                return true;
+            }
+            if (name == "GainLocked")
+            {
+                value = std::int64_t{1};
+                return true;
+            }
+            if (name == "Gain")
+            {
+                value = std::stod(shared->cameraValues.at(name));
                 return true;
             }
             if (name == "Test")
@@ -453,6 +496,8 @@ struct FramegrabberTestBackend
                                            const Framegrabber::ParameterValue& value, bool) {
             std::lock_guard<std::mutex> lock(shared->mutex);
             if (const auto* number = std::get_if<std::int64_t>(&value))
+                shared->cameraValues[name] = std::to_string(*number);
+            else if (const auto* number = std::get_if<double>(&value))
                 shared->cameraValues[name] = std::to_string(*number);
             else if (const auto* text = std::get_if<std::string>(&value))
                 shared->cameraValues[name] = *text;

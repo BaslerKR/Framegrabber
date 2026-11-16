@@ -58,10 +58,11 @@ The optional Playground device plugin is a separate MODULE. Enable `FRAMEGRABBER
   `framegrabber.applet-load`, `framegrabber.configuration-load`,
   `framegrabber.configuration-save` and `framegrabber.cameras-refresh` publish
   semantic action and icon ids from the shared Resources set. Applet load
-  declares an enum prompt over the installed catalog; a missing or non-catalog
-  applet returns the typed `argument_required` prompt without effects. The
-  callable route never loads a native library from an arbitrary path, which
-  stays a GUI choice. Configuration load declares a file-open prompt and offers
+  declares an enum prompt over the installed catalog; duplicated applet names
+  fall back to their exact catalog paths so every option loads. A missing or
+  non-catalog applet returns the typed `argument_required` prompt without
+  effects. The callable route never loads a native library from an arbitrary
+  path, which stays a GUI choice. Configuration load declares a file-open prompt and offers
   only installed applets when the MCF reference is outside the catalog;
   configuration save declares a file-save prompt. Load actions report bounded
   progress and answer cancellation with an explicit unsupported reason because
@@ -70,8 +71,9 @@ The optional Playground device plugin is a separate MODULE. Enable `FRAMEGRABBER
   `Camera:<transport>:<dma>` exposes CoaXPress GenICam features. Descriptors
   carry category paths, display text, units, visibility, representation,
   numeric limits, enum entries and exact revisions. Camera writability is the
-  access mode observed now, gated by the current acquisition state and
-  re-observed after every transition. `requestParameterChanges` delivers an
+  access mode observed now, gated by the current acquisition state plus the
+  device's `pIsLocked`/`pIsAvailable` gates, and re-observed after every
+  transition. `requestParameterChanges` delivers an
   initial snapshot, revision-stamped deltas after writes/executes and
   acquisition transitions, and one resync snapshot when the bounded queue
   overflows; release waits for in-flight delivery. Observation runs on a module

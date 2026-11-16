@@ -27,6 +27,21 @@
 class FramegrabberGraphicsFrameStream;
 struct FramegrabberControllerTestAccess;
 
+/** @brief One flattened camera feature declaration copied from the SDK feature XML. */
+struct FramegrabberCameraFeatureDeclaration {
+    std::string name;
+    std::string tag;
+    std::string displayName;
+    std::string description;
+    std::string unit;
+    std::string accessMode;
+    DeviceParameterVisibility visibility = DeviceParameterVisibility::Primary;
+    std::string lockedFeature;
+    std::string availableFeature;
+    std::vector<std::string> categoryPath;
+    std::vector<std::string> enumEntries;
+};
+
 /**
  * @brief Session source controller and the callable contract of the Framegrabber plugin.
  *
@@ -194,15 +209,15 @@ private:
                                                const std::vector<std::string>& categoryPath);
     /** @brief Observes one typed camera feature from its XML declaration. */
     DeviceParameterDescriptor observeCameraParameter(
+        const FramegrabberCameraFeatureDeclaration& declaration,
         Framegrabber::CameraTransport transport, unsigned int dmaIndex,
-        const std::string& connection, const std::string& featureName,
-        const std::string& tag, const std::string& displayName, const std::string& description,
-        const std::string& unit, const std::string& accessMode,
-        DeviceParameterVisibility visibility,
-        const std::vector<std::string>& categoryPath,
-        const std::vector<std::string>& enumEntries);
+        const std::string& connection);
     /** @brief Observes every applet and camera parameter for one connection. */
     Observation observeAll(const std::string& connection, bool purge);
+    /** @brief Copies the cached camera declarations, parsing the XML once per generation. */
+    std::vector<FramegrabberCameraFeatureDeclaration> cameraDeclarations(
+        Framegrabber::CameraTransport transport, unsigned int dmaIndex,
+        const std::string& connection);
     /** @brief Copies one complete snapshot from the current observations. */
     DeviceParameterChange snapshotChange(const std::string& connection,
                                          const std::string& subscriptionId) const;
@@ -235,7 +250,13 @@ private:
     mutable std::mutex _observationMutex;
     // Revisions change only when an observed descriptor differs.
     std::map<std::string, DeviceParameterDescriptor> _observations;
+    /** @brief Descriptors as last delivered to subscriptions; never the request-path cache. */
+    std::map<std::string, DeviceParameterDescriptor> _publishedObservations;
+    /** @brief Parsed camera feature XML per connection generation and DMA channel. */
+    std::map<std::string, std::vector<FramegrabberCameraFeatureDeclaration>> _cameraDeclarations;
     std::atomic<std::uint64_t> _revision{0};
+    /** @brief Serializes observation passes independently of the shared control gate. */
+    std::mutex _observationCycleMutex;
     /** @brief Connection whose descriptors are published; empty while disconnected. */
     std::string _notificationConnectionId;
 

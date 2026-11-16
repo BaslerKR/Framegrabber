@@ -209,12 +209,20 @@ QStringList appletOptions(const Backend& backend)
 {
     QStringList options;
     if (!backend.appletCatalog) return options;
-    for (const auto& applet : backend.appletCatalog())
+    const auto catalog = backend.appletCatalog();
+    std::map<std::string, int> nameCounts;
+    for (const auto& applet : catalog)
+        if (!applet.name.empty()) ++nameCounts[applet.name];
+    for (const auto& applet : catalog)
     {
         if (options.size() == 64) break;
-        const QString name = QString::fromStdString(applet.name);
-        const QString file = QString::fromStdString(applet.file);
-        const QString option = name.isEmpty() ? file : name;
+        // A unique name resolves unambiguously; a duplicated or empty name falls back to the
+        // exact catalog path so every offered value can still be loaded.
+        QString option;
+        if (!applet.name.empty() && nameCounts[applet.name] == 1)
+            option = QString::fromStdString(applet.name);
+        else
+            option = QString::fromStdString(applet.path.empty() ? applet.file : applet.path);
         if (!option.isEmpty() && !options.contains(option)) options.append(option);
     }
     return options;
@@ -588,7 +596,7 @@ QList<ToolDescriptor> FramegrabberSourceController::toolDescriptors() const
             "Re-enumerate loadable applets for a board; refused while an applet is loaded.",
             ToolEffect::Device, ToolEgress::Metadata, true, {}, schema({{"board", text()}}, {}), appletsSchema()},
         {"framegrabber.applet-load", 1, "Load applet",
-            "Initialize the board with an installed applet selected by name or path (Fg_Init). Replacing a loaded applet requires its connectionId; acquisition must be stopped.",
+            "Initialize the board with an installed applet selected by an enumerated unique name or path (Fg_Init). Replacing a loaded applet requires its connectionId; acquisition must be stopped.",
             ToolEffect::Device, ToolEgress::Metadata, true, {},
             schema({{"board", text()}, {"applet", applet}, {"connectionId", text()}}, {"board", "applet"}), state},
         {"framegrabber.configuration-load", 1, "Load configuration",
@@ -1243,30 +1251,30 @@ void FramegrabberSourceController::observationLoop()
         }
         if (!_notifications.active()) continue;
 
-        bool haveGate = false;
+        // Observation has its own serialization. It waits for an accepted control operation
+        // to settle but never holds the shared gate, so a lifecycle or parameter admission is
+        // not refused as busy just because a subscription is refreshing the tree.
+        bool ready = true;
         for (;;)
         {
             {
                 std::lock_guard<std::mutex> lock(_observerMutex);
                 if (_observerStop) return;
             }
-            if (!_sessionAvailable.load(std::memory_order_acquire)) break;
-            if (!_backend.tryBeginControl) break;
-            // The shared gate serializes this pass with every accepted control operation.
-            if (_backend.tryBeginControl())
-            {
-                haveGate = true;
-                break;
-            }
+            if (!_sessionAvailable.load(std::memory_order_acquire)) { ready = false; break; }
+            if (!_backend.controlBusy || !_backend.controlBusy()) break;
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
         }
-        if (haveGate)
-        {
-            try { observeAndPublish(snapshot); }
-            catch (...) { qWarning() << "[Framegrabber] parameter observation failed."; }
-            if (_backend.endControl) _backend.endControl();
-            _notifications.drain();
-        }
+        if (!ready) continue;
+
+        std::lock_guard<std::mutex> cycle(_observationCycleMutex);
+        const std::string before = connectionId().toStdString();
+        try { observeAndPublish(snapshot); }
+        catch (...) { qWarning() << "[Framegrabber] parameter observation failed."; }
+        _notifications.drain();
+        // A lifecycle command may have changed the generation during the pass; observe again
+        // from the new generation instead of publishing a mixed tree.
+        if (connectionId().toStdString() != before) wakeObservation(true);
     }
 }
 
@@ -1287,24 +1295,31 @@ void FramegrabberSourceController::observeAndPublish(const bool snapshot)
             "The frame grabber connection closed.");
         std::lock_guard<std::mutex> lock(_observationMutex);
         _notificationConnectionId.clear();
-        for (auto it = _observations.begin(); it != _observations.end();)
-            it = it->second.target.connectionId == previous ? _observations.erase(it) : std::next(it);
+        _observations.clear();
+        _publishedObservations.clear();
+        _cameraDeclarations.clear();
         return;
     }
     const std::string current = connectionId().toStdString();
     if (current.empty()) return;
     bool snapshotRequired = snapshot;
-    if (previous != current)
+    if (previous.empty())
     {
-        if (!previous.empty())
-            _notifications.publishTerminal(previous, DeviceParameterError::Disconnected,
-                "The frame grabber connection changed.");
-        {
-            std::lock_guard<std::mutex> lock(_observationMutex);
-            _notificationConnectionId = current;
-            for (auto it = _observations.begin(); it != _observations.end();)
-                it = it->second.target.connectionId == current ? std::next(it) : _observations.erase(it);
-        }
+        // Adopt the current generation without discarding the revisions a caller already
+        // observed through the request path; the first subscription still gets a snapshot.
+        std::lock_guard<std::mutex> lock(_observationMutex);
+        _notificationConnectionId = current;
+        snapshotRequired = true;
+    }
+    else if (previous != current)
+    {
+        _notifications.publishTerminal(previous, DeviceParameterError::Disconnected,
+            "The frame grabber connection changed.");
+        std::lock_guard<std::mutex> lock(_observationMutex);
+        _notificationConnectionId = current;
+        _observations.clear();
+        _publishedObservations.clear();
+        _cameraDeclarations.clear();
         snapshotRequired = true;
     }
     const Observation observed = observeAll(current, true);
@@ -1313,11 +1328,9 @@ void FramegrabberSourceController::observeAndPublish(const bool snapshot)
         _notifications.publishTerminal(current, DeviceParameterError::BackendFailure, observed.error);
         return;
     }
-    if (snapshotRequired)
-        _notifications.publishSnapshot(current);
-    else if (!observed.changed.empty() || !observed.invalidated.empty())
-        _notifications.publishDelta(current, observed.changed, observed.invalidated);
+    publishObservation(current, snapshotRequired, observed);
 }
+
 std::optional<SourceRuntimeDiagnostics> FramegrabberSourceController::sourceRuntimeDiagnostics(unsigned sourceIndex) const
 {
     if (!_sessionAvailable.load(std::memory_order_acquire) || !_backend.runtimeDiagnostics)

@@ -24,6 +24,7 @@ private slots:
     void typedArgumentRequiredPrompts();
     void parameterTreeCoversAppletAndCameraScopes();
     void parameterChangesDeliverSnapshotAndDelta();
+    void parameterAdmissionsStayAvailableDuringObservation();
     void notificationQueueOverflowsToResync();
 };
 
@@ -253,9 +254,11 @@ void FramegrabberControllerTests::declaredActionsCarryPresentationAndPromptKinds
     const auto applet = load->inputSchema.value("properties").toObject().value("applet").toObject();
     QCOMPARE(applet.value("format").toString(), QStringLiteral("enum"));
     const auto values = applet.value("enum").toArray();
-    QCOMPARE(values.size(), 2);
+    QCOMPARE(values.size(), 3);
     QVERIFY(values.contains(QStringLiteral("Acquisition")));
-    QVERIFY(values.contains(QStringLiteral("Second")));
+    // A duplicated applet name falls back to the exact catalog path so the option can load.
+    QVERIFY(values.contains(QStringLiteral("C:/applets/Second.hap")));
+    QVERIFY(values.contains(QStringLiteral("C:/applets/Second-alt.hap")));
 
     const auto* configuration = findDescriptor(descriptors, "framegrabber.configuration-load");
     QVERIFY(configuration != nullptr);
@@ -385,6 +388,8 @@ void FramegrabberControllerTests::parameterTreeCoversAppletAndCameraScopes()
     QVERIFY(findParameter(parameters.parameters, "Applet:1", "Width") != nullptr);
 
     const auto* locatedCameraWidth = findParameter(parameters.parameters, "Camera:cxp:0", "Width");
+    // The feature's access mode comes from its pValue register, not a direct attribute.
+    QVERIFY(locatedCameraWidth->writable);
     QVERIFY(locatedCameraWidth != nullptr);
     const auto cameraWidth = *locatedCameraWidth;
     QCOMPARE(cameraWidth.kind, DeviceParameterKind::Integer);
@@ -406,6 +411,17 @@ void FramegrabberControllerTests::parameterTreeCoversAppletAndCameraScopes()
     QCOMPARE(command.visibility, DeviceParameterVisibility::Expert);
     QVERIFY(command.writable);
     QVERIFY(!command.readable);
+    // ImposedAccessMode overrides the referenced register's access mode.
+    const auto* locatedSerial = findParameter(parameters.parameters, "Camera:cxp:0", "SerialNumber");
+    QVERIFY(locatedSerial != nullptr);
+    QVERIFY(locatedSerial->readable);
+    QVERIFY(!locatedSerial->writable);
+    QVERIFY(locatedSerial->available);
+    // pIsLocked is read from the device; a locked feature is never reported writable.
+    const auto* locatedGain = findParameter(parameters.parameters, "Camera:cxp:0", "Gain");
+    QVERIFY(locatedGain != nullptr);
+    QVERIFY(locatedGain->readable);
+    QVERIFY(!locatedGain->writable);
 
     {
         std::lock_guard<std::mutex> lock(fake.state.mutex);
@@ -537,6 +553,12 @@ void FramegrabberControllerTests::parameterChangesDeliverSnapshotAndDelta()
         QVERIFY(width != nullptr);
         widthTarget = width->target;
     }
+    // A read and an inventory before the write must not consume the delta.
+    Sink<DeviceParameterResult> before;
+    QCOMPARE(controller.requestReadParameter(widthTarget, before.completion()).error,
+        DeviceParameterError::None);
+    QVERIFY(before.wait());
+    QCOMPARE(before.take().error, DeviceParameterError::None);
     Sink<DeviceParameterResult> write;
     QCOMPARE(controller.requestWriteParameter(widthTarget, std::int64_t(801),
         std::nullopt, write.completion()).error, DeviceParameterError::None);
@@ -553,7 +575,10 @@ void FramegrabberControllerTests::parameterChangesDeliverSnapshotAndDelta()
         QCOMPARE(delta.kind, DeviceParameterChangeKind::Delta);
         QCOMPARE(delta.sequence, std::uint64_t(2));
         QCOMPARE(delta.descriptors.size(), std::size_t(1));
+        QCOMPARE(delta.descriptors.front().target.scope, std::string("Applet:0"));
         QCOMPARE(delta.descriptors.front().target.name, std::string("Width"));
+        QVERIFY(delta.descriptors.front().value.has_value());
+        QCOMPARE(std::get<std::int64_t>(*delta.descriptors.front().value), std::int64_t(801));
         QVERIFY(delta.descriptors.front().revision > snapshotRevision);
         changes.clear();
     }
@@ -584,6 +609,43 @@ void FramegrabberControllerTests::parameterChangesDeliverSnapshotAndDelta()
     QCOMPARE(controller.releaseParameterChanges(connection, "watch-1",
         releasedAgain.completion()).error, DeviceParameterError::None);
     QVERIFY(releasedAgain.wait());
+}
+
+void FramegrabberControllerTests::parameterAdmissionsStayAvailableDuringObservation()
+{
+    FramegrabberTestBackend fake;
+    FramegrabberSourceController controller(nullptr);
+    FramegrabberControllerTestAccess::install(controller, fake);
+    const auto outcome = connectBoard(controller);
+    QVERIFY2(outcome.error.isEmpty(), qPrintable(outcome.error));
+    const auto connection = outcome.result.state->connectionId;
+
+    std::mutex changeMutex;
+    int changes = 0;
+    QCOMPARE(controller.requestParameterChanges(connection, "watch-admission",
+        [&](DeviceParameterChange) {
+            std::lock_guard<std::mutex> lock(changeMutex);
+            ++changes;
+        }).error, DeviceParameterError::None);
+    QVERIFY(QTest::qWaitFor([&] {
+        std::lock_guard<std::mutex> lock(changeMutex);
+        return changes > 0;
+    }, 5000));
+
+    // The subscription's observation thread must not hold the shared lifecycle gate, so two
+    // consecutive admissions cannot be refused as busy because a refresh is in flight.
+    for (int attempt = 0; attempt < 3; ++attempt)
+    {
+        Sink<DeviceParameterInventory> inventory;
+        QCOMPARE(controller.requestParameters(inventory.completion()).error,
+            DeviceParameterError::None);
+        QVERIFY(inventory.wait());
+        QCOMPARE(inventory.take().result.error, DeviceParameterError::None);
+    }
+    Sink<DeviceParameterResult> released;
+    QCOMPARE(controller.releaseParameterChanges(connection, "watch-admission",
+        released.completion()).error, DeviceParameterError::None);
+    QVERIFY(released.wait());
 }
 
 void FramegrabberControllerTests::notificationQueueOverflowsToResync()
