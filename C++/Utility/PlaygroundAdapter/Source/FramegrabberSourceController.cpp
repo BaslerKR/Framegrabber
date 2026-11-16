@@ -716,6 +716,20 @@ ApiResult<void> FramegrabberSourceController::requestToolInternal(
         if (!properties.contains(it.key()) || !it.value().isString() || it.value().toString().isEmpty()
             || it.value().toString().contains(QChar::Null))
             return Admission::failure(ApiErrorCode::InvalidArgument, "Exact typed arguments are required.");
+    // An omitted board means the session's connected board, so the host panel never needs a
+    // field-name rule. Resolve it before prompting; a session without a board refuses first.
+    const bool loadAction = name == QLatin1String("framegrabber.applet-load")
+        || name == QLatin1String("framegrabber.configuration-load");
+    if (loadAction && !arguments.contains("board"))
+    {
+        const std::string connected =
+            _backend.connectedBoard ? _backend.connectedBoard() : std::string{};
+        if (connected.empty())
+            return Admission::failure(ApiErrorCode::Unavailable,
+                "No board is connected; pass board explicitly or connect the session board first.");
+        arguments.insert(QStringLiteral("board"), QString::fromStdString(connected));
+    }
+
     const QStringList options = appletOptions(_backend);
     for (const auto required : descriptor->inputSchema.value("required").toArray())
     {
@@ -741,19 +755,6 @@ ApiResult<void> FramegrabberSourceController::requestToolInternal(
         return Admission::failure(ApiErrorCode::InvalidArgument, "Exact typed arguments are required.");
     }
 
-    // An omitted board means the session's connected board, so the host panel never needs a
-    // field-name rule for these two actions.
-    std::string loadBoardName;
-    const bool loadAction = name == QLatin1String("framegrabber.applet-load")
-        || name == QLatin1String("framegrabber.configuration-load");
-    if (loadAction && !arguments.contains("board"))
-    {
-        if (_backend.connectedBoard) loadBoardName = _backend.connectedBoard();
-        if (loadBoardName.empty())
-            return Admission::failure(ApiErrorCode::Unavailable,
-                "No board is connected; pass board explicitly or connect the session board first.");
-    }
-
     // Q3: the callable route loads only applets inside the installed catalog. The caller is
     // prompted with that catalog instead of receiving a native-library path permission.
     if (arguments.contains("applet"))
@@ -773,15 +774,12 @@ ApiResult<void> FramegrabberSourceController::requestToolInternal(
     if (name == QLatin1String("framegrabber.configuration-load") && !arguments.contains("applet"))
     {
         const std::string configuration = arguments.value("configuration").toString().toStdString();
-        std::string boardName = loadBoardName;
-        if (arguments.contains("board"))
+        const QString board = arguments.value("board").toString();
+        std::string boardName;
+        if (_backend.boards)
         {
-            const QString board = arguments.value("board").toString();
-            if (_backend.boards)
-            {
-                for (const auto& candidate : _backend.boards())
-                    if (boardMatches(candidate, board)) boardName = candidate.displayName();
-            }
+            for (const auto& candidate : _backend.boards())
+                if (boardMatches(candidate, board)) boardName = candidate.displayName();
         }
         if (_backend.appletPathFromConfiguration)
         {
@@ -860,12 +858,6 @@ ApiResult<void> FramegrabberSourceController::admitControl(
                 if (boardMatches(candidate, board)) { found = true; boardName = candidate.displayName(); }
         }
         if (!found) return Admission::failure(ApiErrorCode::NotFound, "Exact declared board was not found.");
-    } else if (name == QLatin1String("framegrabber.applet-load")
-               || name == QLatin1String("framegrabber.configuration-load")) {
-        if (_backend.connectedBoard) boardName = _backend.connectedBoard();
-        if (boardName.empty())
-            return Admission::failure(ApiErrorCode::Unavailable,
-                "No board is connected; pass board explicitly or connect the session board first.");
     }
     if (name == "framegrabber.applets-refresh" && connected)
         return Admission::failure(ApiErrorCode::Conflict, "Release the board before enumerating applets.");

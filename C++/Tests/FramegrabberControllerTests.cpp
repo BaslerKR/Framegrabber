@@ -305,22 +305,19 @@ void FramegrabberControllerTests::typedArgumentRequiredPrompts()
         return run;
     };
 
-    // The board is never the requested argument, with or without an explicit board.
+    // A session without a connected board refuses before asking for a prompt argument.
     auto boardless = invoke("framegrabber.applet-load", QJsonObject{});
-    QVERIFY(boardless.admission->succeeded());
-    QVERIFY(boardless.result.has_value());
-    QVERIFY(!boardless.result->succeeded());
-    QCOMPARE(boardless.result->error()->code, ApiErrorCode::ArgumentRequired);
-    QCOMPARE(boardless.result->error()->details.value("argumentRequired").toObject()
-        .value("argument").toString(), QStringLiteral("applet"));
+    QVERIFY(!boardless.admission->succeeded());
+    QCOMPARE(boardless.admission->error()->code, ApiErrorCode::Unavailable);
+    QVERIFY(boardless.admission->error()->message.contains(QStringLiteral("No board is connected")));
+    QVERIFY(!boardless.result.has_value());
 
     auto boardlessFile = invoke("framegrabber.configuration-load", QJsonObject{});
-    QVERIFY(boardlessFile.admission->succeeded());
-    QVERIFY(boardlessFile.result.has_value());
-    QVERIFY(!boardlessFile.result->succeeded());
-    QCOMPARE(boardlessFile.result->error()->code, ApiErrorCode::ArgumentRequired);
-    QCOMPARE(boardlessFile.result->error()->details.value("argumentRequired").toObject()
-        .value("argument").toString(), QStringLiteral("configuration"));
+    QVERIFY(!boardlessFile.admission->succeeded());
+    QCOMPARE(boardlessFile.admission->error()->code, ApiErrorCode::Unavailable);
+    QVERIFY(boardlessFile.admission->error()->message.contains(
+        QStringLiteral("No board is connected")));
+    QVERIFY(!boardlessFile.result.has_value());
 
     auto run = invoke("framegrabber.applet-load",
         QJsonObject{{"board", "Test Board (SN1)"}});
@@ -422,6 +419,29 @@ void FramegrabberControllerTests::boardlessLoadsUseTheSessionBoard()
     QVERIFY2(outcome.error.isEmpty(), qPrintable(outcome.error));
     QString connection = QString::fromStdString(outcome.result.state->connectionId);
     QVERIFY(!connection.isEmpty());
+
+    // With a connected session the board resolves first, then only the prompt argument is asked.
+    auto prompt = invoke("framegrabber.applet-load",
+        QJsonObject{{"connectionId", connection}});
+    QVERIFY(prompt.admission->succeeded());
+    QVERIFY(prompt.result.has_value());
+    QVERIFY(!prompt.result->succeeded());
+    QCOMPARE(prompt.result->error()->code, ApiErrorCode::ArgumentRequired);
+    QCOMPARE(prompt.result->error()->details.value("argumentRequired").toObject()
+        .value("argument").toString(), QStringLiteral("applet"));
+    QCOMPARE(prompt.result->error()->details.value("argumentRequired").toObject()
+        .value("format").toString(), QStringLiteral("enum"));
+
+    auto promptFile = invoke("framegrabber.configuration-load",
+        QJsonObject{{"connectionId", connection}});
+    QVERIFY(promptFile.admission->succeeded());
+    QVERIFY(promptFile.result.has_value());
+    QVERIFY(!promptFile.result->succeeded());
+    QCOMPARE(promptFile.result->error()->code, ApiErrorCode::ArgumentRequired);
+    QCOMPARE(promptFile.result->error()->details.value("argumentRequired").toObject()
+        .value("argument").toString(), QStringLiteral("configuration"));
+    QCOMPARE(promptFile.result->error()->details.value("argumentRequired").toObject()
+        .value("format").toString(), QStringLiteral("file-open"));
 
     auto load = invoke("framegrabber.applet-load",
         QJsonObject{{"applet", "Acquisition"}, {"connectionId", connection}});
