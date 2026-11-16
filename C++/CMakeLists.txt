@@ -268,12 +268,12 @@ if(FRAMEGRABBER_BUILD_PLAYGROUND_PLUGIN)
     find_package(Qt6 REQUIRED COMPONENTS Widgets OpenGL OpenGLWidgets Concurrent)
 
     add_library(FramegrabberPlugin MODULE
-        "${PlaygroundPluginSDK_PREFIX}/include/Playground/DeviceRuntime/Contract/AbstractSourceController.h"
         Utility/PlaygroundAdapter/Plugin/FramegrabberPlugin.cpp
         Utility/PlaygroundAdapter/Source/FramegrabberSourceController.h
         Utility/PlaygroundAdapter/Source/FramegrabberSourceController.cpp
         Utility/PlaygroundAdapter/Source/FramegrabberParameterControl.cpp
     )
+    playground_sdk_add_runtime_contract(FramegrabberPlugin)
     set_target_properties(FramegrabberPlugin PROPERTIES
         PREFIX ""
         OUTPUT_NAME FramegrabberPlugin
