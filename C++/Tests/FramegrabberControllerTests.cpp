@@ -4,10 +4,11 @@
 #include "FramegrabberTestBackend.h"
 
 #include <QDir>
+#include <QFile>
 #include <QFileInfo>
 #include <QJsonArray>
 #include <QJsonObject>
-#include <QTemporaryFile>
+#include <QTemporaryDir>
 
 #include <atomic>
 #include <condition_variable>
@@ -389,14 +390,12 @@ void FramegrabberControllerTests::typedArgumentRequiredPrompts()
 
 void FramegrabberControllerTests::hostSelectedAppletFileLoadsAndValidatesPath()
 {
-    QTemporaryFile hap(QStringLiteral("%1/XXXXXX.hap").arg(QDir::tempPath()));
-    QVERIFY(hap.open());
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const QString hapPath = QDir::toNativeSeparators(directory.filePath(QStringLiteral("chosen.hap")));
+    QFile hap(hapPath);
+    QVERIFY(hap.open(QIODevice::WriteOnly));
     hap.close();
-    const QString hapPath = QDir::toNativeSeparators(hap.fileName());
-    QTemporaryFile text(QStringLiteral("%1/XXXXXX.txt").arg(QDir::tempPath()));
-    QVERIFY(text.open());
-    text.close();
-    const QString textPath = QDir::toNativeSeparators(text.fileName());
 
     FramegrabberTestBackend fake;
     FramegrabberSourceController controller(nullptr);
@@ -417,6 +416,7 @@ void FramegrabberControllerTests::hostSelectedAppletFileLoadsAndValidatesPath()
         return run;
     };
 
+    qInfo() << "host-file: missing path";
     auto missing = invoke(QStringLiteral("C:/missing/nowhere.hap"));
     QVERIFY2(missing.admission->succeeded(), missing.admission->error()
         ? qPrintable(missing.admission->error()->message) : "");
@@ -425,7 +425,8 @@ void FramegrabberControllerTests::hostSelectedAppletFileLoadsAndValidatesPath()
     QCOMPARE(missing.result->error()->code, ApiErrorCode::InvalidArgument);
     QVERIFY(missing.result->error()->message.contains(QStringLiteral("does not exist")));
 
-    auto wrongExtension = invoke(textPath);
+    qInfo() << "host-file: wrong extension";
+    auto wrongExtension = invoke(QStringLiteral("C:/missing/nowhere.txt"));
     QVERIFY(wrongExtension.result.has_value());
     QVERIFY(!wrongExtension.result->succeeded());
     QCOMPARE(wrongExtension.result->error()->code, ApiErrorCode::InvalidArgument);
@@ -433,6 +434,7 @@ void FramegrabberControllerTests::hostSelectedAppletFileLoadsAndValidatesPath()
         QStringLiteral("Unsupported applet file extension")));
 
     // A valid path outside the installed catalog reaches Fg_Init and reports its load reason.
+    qInfo() << "host-file: load failure" << hapPath;
     auto loadFailure = invoke(hapPath);
     QVERIFY(loadFailure.result.has_value());
     QVERIFY(!loadFailure.result->succeeded());
@@ -448,6 +450,7 @@ void FramegrabberControllerTests::hostSelectedAppletFileLoadsAndValidatesPath()
         chosen.path = hapPath.toStdString();
         fake.state.catalog.push_back(chosen);
     }
+    qInfo() << "host-file: successful load";
     auto loaded = invoke(hapPath);
     QVERIFY2(loaded.admission->succeeded(), loaded.admission->error()
         ? qPrintable(loaded.admission->error()->message) : "");

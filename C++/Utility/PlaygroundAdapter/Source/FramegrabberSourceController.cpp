@@ -939,12 +939,12 @@ ApiResult<void> FramegrabberSourceController::admitControl(
                 const std::filesystem::path path(appletFile.toStdString());
                 std::error_code existsError;
                 const bool exists = std::filesystem::is_regular_file(path, existsError) && !existsError;
-                if (!exists) {
-                    failure = Result::failure(ApiErrorCode::InvalidArgument,
-                        QStringLiteral("The applet file does not exist: %1.").arg(appletFile));
-                } else if (!isAllowedAppletFile(path)) {
+                if (!isAllowedAppletFile(path)) {
                     failure = Result::failure(ApiErrorCode::InvalidArgument,
                         QStringLiteral("Unsupported applet file extension: use .hap, .dll or .so."));
+                } else if (!exists) {
+                    failure = Result::failure(ApiErrorCode::InvalidArgument,
+                        QStringLiteral("The applet file does not exist: %1.").arg(appletFile));
                 } else if (backend->loadApplet && backend->loadApplet(appletFile.toStdString(), boardName)) {
                     payload = Payload::State;
                 } else failure = failed(QStringLiteral("Failed to load the applet from '%1'.").arg(appletFile));
