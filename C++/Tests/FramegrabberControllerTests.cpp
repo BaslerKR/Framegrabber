@@ -12,7 +12,6 @@
 
 #include <atomic>
 #include <condition_variable>
-#include <cstdio>
 #include <functional>
 #include <mutex>
 #include <optional>
@@ -488,7 +487,6 @@ void FramegrabberControllerTests::hostSelectedAppletFileLoadsAndValidatesPath()
 
 void FramegrabberControllerTests::hostSelectedUnicodePathUsesNativeEncoding()
 {
-    std::fprintf(stderr, "U:enter\n"); std::fflush(stderr);
     // Pick a character the active code page can encode: Hangul on CP949, U+00E9 on CP1252.
     const QList<QChar> candidates{QChar(0xD55C), QChar(0x00E9), QChar(0x4E2D), QChar(0x0416)};
     const auto roundTrips = [](const QChar character) {
@@ -536,7 +534,6 @@ void FramegrabberControllerTests::hostSelectedUnicodePathUsesNativeEncoding()
         return run;
     };
 
-    std::fprintf(stderr, "U:invoke\n"); std::fflush(stderr);
     auto run = invoke(hapPath);
     QVERIFY2(run.admission->succeeded(), run.admission->error()
         ? qPrintable(run.admission->error()->message) : "");
@@ -567,7 +564,6 @@ void FramegrabberControllerTests::hostSelectedUnicodePathUsesNativeEncoding()
 
 void FramegrabberControllerTests::hostSelectedNonAsciiConfigurationPath()
 {
-    std::fprintf(stderr, "C:enter\n"); std::fflush(stderr);
     const QList<QChar> candidates{QChar(0xD55C), QChar(0x00E9), QChar(0x4E2D), QChar(0x0416)};
     const auto roundTrips = [](const QChar character) {
         const QString value = QStringLiteral("mcf-") + character;
@@ -604,8 +600,9 @@ void FramegrabberControllerTests::hostSelectedNonAsciiConfigurationPath()
     };
     const auto invoke = [&controller](const QString& name, const QString& path,
                                       const QString& connection = {}) {
-        QJsonObject arguments{{QStringLiteral("board"), QStringLiteral("Test Board (SN1)")},
-                              {QStringLiteral("configuration"), path}};
+        QJsonObject arguments{{QStringLiteral("configuration"), path}};
+        if (name == QLatin1String("framegrabber.configuration-load"))
+            arguments.insert(QStringLiteral("board"), QStringLiteral("Test Board (SN1)"));
         if (!connection.isEmpty()) arguments.insert(QStringLiteral("connectionId"), connection);
         ToolRun run;
         Sink<ApiResult<QJsonValue>> sink;
@@ -614,7 +611,6 @@ void FramegrabberControllerTests::hostSelectedNonAsciiConfigurationPath()
         return run;
     };
 
-    std::fprintf(stderr, "C:load\n"); std::fflush(stderr);
     auto load = invoke(QStringLiteral("framegrabber.configuration-load"), mcfPath);
     QVERIFY2(load.admission->succeeded(), load.admission->error()
         ? qPrintable(load.admission->error()->message) : "");
@@ -628,7 +624,6 @@ void FramegrabberControllerTests::hostSelectedNonAsciiConfigurationPath()
     const QString connection = load.result->value().toObject()
         .value(QStringLiteral("connectionId")).toString();
     QVERIFY(!connection.isEmpty());
-    std::fprintf(stderr, "C:save\n"); std::fflush(stderr);
     auto save = invoke(QStringLiteral("framegrabber.configuration-save"), mcfPath, connection);
     QVERIFY2(save.admission->succeeded(), save.admission->error()
         ? qPrintable(save.admission->error()->message) : "");
@@ -645,7 +640,6 @@ void FramegrabberControllerTests::hostSelectedNonAsciiConfigurationPath()
         std::lock_guard<std::mutex> lock(fake.state.mutex);
         fake.state.mcfReferencesOutsideApplet = true;
     }
-    std::fprintf(stderr, "C:outside\n"); std::fflush(stderr);
     auto outside = invoke(QStringLiteral("framegrabber.configuration-load"), mcfPath, connection);
     QVERIFY(outside.result.has_value());
     QVERIFY(!outside.result->succeeded());
@@ -661,7 +655,6 @@ void FramegrabberControllerTests::hostSelectedNonAsciiConfigurationPath()
         QFile file(unsupported);
         QVERIFY(file.open(QIODevice::WriteOnly));
         file.close();
-        std::fprintf(stderr, "C:reject\n"); std::fflush(stderr);
         auto refused = invoke(QStringLiteral("framegrabber.configuration-load"), unsupported);
         QVERIFY(refused.admission.has_value());
         QVERIFY(!refused.admission->succeeded());
@@ -674,7 +667,6 @@ void FramegrabberControllerTests::hostSelectedNonAsciiConfigurationPath()
 
 void FramegrabberControllerTests::nonCatalogAppletMetadataGatesCameraControl()
 {
-    std::fprintf(stderr, "M:enter\n"); std::fflush(stderr);
     Framegrabber framegrabber(nullptr);
     const std::string path = "C:/custom/chosen.hap";
     const std::string board = "Test Board (SN1)";
@@ -688,10 +680,8 @@ void FramegrabberControllerTests::nonCatalogAppletMetadataGatesCameraControl()
     QCOMPARE(hit.path, path);
     QVERIFY(hit.supportsCameraControl); // gates Sgc_initBoard in adoptBoard
     QCOMPARE(hit.version, std::string("9.9"));
-    std::fprintf(stderr, "M:hit\n"); std::fflush(stderr);
     const auto miss = FramegrabberCatalogTestAccess::entry(framegrabber, path, board,
         [](const std::string&, const std::string&) { return FramegrabberSystem::AppletMetadata{}; });
-    std::fprintf(stderr, "M:miss\n"); std::fflush(stderr);
     QVERIFY(!miss.supportsCameraControl);
     QVERIFY(miss.version.empty());
 }
