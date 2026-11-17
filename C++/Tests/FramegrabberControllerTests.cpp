@@ -3,8 +3,11 @@
 #include "FramegrabberSourceController.h"
 #include "FramegrabberTestBackend.h"
 
+#include <QDir>
+#include <QFileInfo>
 #include <QJsonArray>
 #include <QJsonObject>
+#include <QTemporaryFile>
 
 #include <atomic>
 #include <condition_variable>
@@ -22,6 +25,7 @@ private slots:
     void connectLoadsOpeningAppletAndOwnsDmaSources();
     void declaredActionsCarryPresentationAndPromptKinds();
     void typedArgumentRequiredPrompts();
+    void hostSelectedAppletFileLoadsAndValidatesPath();
     void boardlessLoadsUseTheSessionBoard();
     void parameterTreeCoversAppletAndCameraScopes();
     void parameterChangesDeliverSnapshotAndDelta();
@@ -227,8 +231,8 @@ void FramegrabberControllerTests::declaredActionsCarryPresentationAndPromptKinds
 
     const auto descriptors = controller.toolDescriptors();
     const QStringList actions{"framegrabber.applets-refresh", "framegrabber.applet-load",
-        "framegrabber.configuration-load", "framegrabber.configuration-save",
-        "framegrabber.cameras-refresh"};
+        "framegrabber.applet-load-file", "framegrabber.configuration-load",
+        "framegrabber.configuration-save", "framegrabber.cameras-refresh"};
     for (const auto* name : {"framegrabber.state", "framegrabber.boards", "framegrabber.applets",
              "framegrabber.cameras"})
     {
@@ -264,6 +268,18 @@ void FramegrabberControllerTests::declaredActionsCarryPresentationAndPromptKinds
     // A duplicated applet name falls back to the exact catalog path so the option can load.
     QVERIFY(values.contains(QStringLiteral("C:/applets/Second.hap")));
     QVERIFY(values.contains(QStringLiteral("C:/applets/Second-alt.hap")));
+
+    const auto* fileLoad = findDescriptor(descriptors, "framegrabber.applet-load-file");
+    QVERIFY(fileLoad != nullptr);
+    QCOMPARE(fileLoad->inputSchema.value("required").toArray(),
+        QJsonArray{QStringLiteral("appletFile")});
+    const auto appletFile = fileLoad->inputSchema.value("properties").toObject()
+        .value("appletFile").toObject();
+    QCOMPARE(appletFile.value("format").toString(), QStringLiteral("file-open"));
+    QCOMPARE(appletFile.value("maxLength").toInt(), 4096);
+    QCOMPARE(appletFile.value("title").toString(), QStringLiteral("Applet file"));
+    QVERIFY(appletFile.value("nameFilters").toArray().contains(
+        QStringLiteral("Applet libraries (*.hap *.dll *.so)")));
 
     const auto* configuration = findDescriptor(descriptors, "framegrabber.configuration-load");
     QVERIFY(configuration != nullptr);
@@ -368,6 +384,79 @@ void FramegrabberControllerTests::typedArgumentRequiredPrompts()
         std::lock_guard<std::mutex> lock(fake.state.mutex);
         QVERIFY(fake.state.opened);
         QCOMPARE(fake.state.appletName, std::string("Acquisition"));
+    }
+}
+
+void FramegrabberControllerTests::hostSelectedAppletFileLoadsAndValidatesPath()
+{
+    QTemporaryFile hap(QStringLiteral("%1/XXXXXX.hap").arg(QDir::tempPath()));
+    QVERIFY(hap.open());
+    hap.close();
+    const QString hapPath = QDir::toNativeSeparators(hap.fileName());
+    QTemporaryFile text(QStringLiteral("%1/XXXXXX.txt").arg(QDir::tempPath()));
+    QVERIFY(text.open());
+    text.close();
+    const QString textPath = QDir::toNativeSeparators(text.fileName());
+
+    FramegrabberTestBackend fake;
+    FramegrabberSourceController controller(nullptr);
+    FramegrabberControllerTestAccess::install(controller, fake);
+
+    struct ToolRun
+    {
+        std::optional<ApiResult<void>> admission;
+        std::optional<ApiResult<QJsonValue>> result;
+    };
+    const auto invoke = [&controller](const QString& path) {
+        ToolRun run;
+        Sink<ApiResult<QJsonValue>> sink;
+        run.admission = controller.requestTool(QStringLiteral("framegrabber.applet-load-file"), 1,
+            QJsonObject{{QStringLiteral("board"), QStringLiteral("Test Board (SN1)")},
+                        {QStringLiteral("appletFile"), path}}, sink.completion());
+        if (run.admission->succeeded() && sink.wait()) run.result = sink.take();
+        return run;
+    };
+
+    auto missing = invoke(QStringLiteral("C:/missing/nowhere.hap"));
+    QVERIFY2(missing.admission->succeeded(), missing.admission->error()
+        ? qPrintable(missing.admission->error()->message) : "");
+    QVERIFY(missing.result.has_value());
+    QVERIFY(!missing.result->succeeded());
+    QCOMPARE(missing.result->error()->code, ApiErrorCode::InvalidArgument);
+    QVERIFY(missing.result->error()->message.contains(QStringLiteral("does not exist")));
+
+    auto wrongExtension = invoke(textPath);
+    QVERIFY(wrongExtension.result.has_value());
+    QVERIFY(!wrongExtension.result->succeeded());
+    QCOMPARE(wrongExtension.result->error()->code, ApiErrorCode::InvalidArgument);
+    QVERIFY(wrongExtension.result->error()->message.contains(
+        QStringLiteral("Unsupported applet file extension")));
+
+    // A valid path outside the installed catalog reaches Fg_Init and reports its load reason.
+    auto loadFailure = invoke(hapPath);
+    QVERIFY(loadFailure.result.has_value());
+    QVERIFY(!loadFailure.result->succeeded());
+    QCOMPARE(loadFailure.result->error()->code, ApiErrorCode::Unavailable);
+    QVERIFY(loadFailure.result->error()->message.contains(
+        QStringLiteral("Failed to load the applet from")));
+
+    {
+        std::lock_guard<std::mutex> lock(fake.state.mutex);
+        Framegrabber::AppletInfo chosen;
+        chosen.name = "Chosen";
+        chosen.file = QFileInfo(hapPath).fileName().toStdString();
+        chosen.path = hapPath.toStdString();
+        fake.state.catalog.push_back(chosen);
+    }
+    auto loaded = invoke(hapPath);
+    QVERIFY2(loaded.admission->succeeded(), loaded.admission->error()
+        ? qPrintable(loaded.admission->error()->message) : "");
+    QVERIFY(loaded.result.has_value());
+    QVERIFY2(loaded.result->succeeded(), loaded.result->error()
+        ? qPrintable(loaded.result->error()->message) : "");
+    {
+        std::lock_guard<std::mutex> lock(fake.state.mutex);
+        QCOMPARE(fake.state.appletPath, hapPath.toStdString());
     }
 }
 
