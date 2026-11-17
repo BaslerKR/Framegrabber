@@ -10,49 +10,9 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <vector>
 
 namespace {
-
-QVariantList toDiscoveryData(const std::vector<FramegrabberSystem::BoardInfo>& boards)
-{
-    QVariantList result;
-    result.reserve(static_cast<qsizetype>(boards.size()));
-    for (const auto& board : boards) {
-        result.append(QVariantMap{
-            {QStringLiteral("index"), board.index},
-            {QStringLiteral("name"), QString::fromStdString(board.name)},
-            {QStringLiteral("serial"), QString::fromStdString(board.serial)},
-            {QStringLiteral("firmware"), QString::fromStdString(board.firmware)},
-            {QStringLiteral("driver"), QString::fromStdString(board.driver)},
-            {QStringLiteral("hardware"), QString::fromStdString(board.hardware)},
-            {QStringLiteral("pcieLinkWidth"), QString::fromStdString(board.pcieLinkWidth)},
-            {QStringLiteral("pcieLinkSpeed"), QString::fromStdString(board.pcieLinkSpeed)},
-            {QStringLiteral("pciePayloadSize"), QString::fromStdString(board.pciePayloadSize)},
-        });
-    }
-    return result;
-}
-
-std::vector<FramegrabberSystem::BoardInfo> fromDiscoveryData(const QVariantList& values)
-{
-    std::vector<FramegrabberSystem::BoardInfo> boards;
-    boards.reserve(static_cast<std::size_t>(values.size()));
-    for (const QVariant& value : values) {
-        const QVariantMap item = value.toMap();
-        boards.push_back({
-            item.value(QStringLiteral("index")).toUInt(),
-            item.value(QStringLiteral("name")).toString().toStdString(),
-            item.value(QStringLiteral("serial")).toString().toStdString(),
-            item.value(QStringLiteral("firmware")).toString().toStdString(),
-            item.value(QStringLiteral("driver")).toString().toStdString(),
-            item.value(QStringLiteral("hardware")).toString().toStdString(),
-            item.value(QStringLiteral("pcieLinkWidth")).toString().toStdString(),
-            item.value(QStringLiteral("pcieLinkSpeed")).toString().toStdString(),
-            item.value(QStringLiteral("pciePayloadSize")).toString().toStdString(),
-        });
-    }
-    return boards;
-}
 
 class FramegrabberPluginTitleState final {
 public:
@@ -133,7 +93,6 @@ public:
     }
 
     QString title() const override { return _titleState->title(); }
-    std::vector<DevicePluginDock> createDockWidgets(QWidget*) override { return {}; }
     AbstractSourceController* sourceController() const override { return _controller.get(); }
     unsigned int capabilities() const noexcept override
     {
@@ -166,7 +125,7 @@ public:
     {
         _claims.store(claims, std::memory_order_release);
     }
-    bool discoverDevices(QVariantMap* discoveryData, QString* errorMessage) override
+    bool discoverDevices(QString* errorMessage) override
     {
         try {
             auto system = std::make_unique<FramegrabberSystem>();
@@ -174,8 +133,8 @@ public:
                 if (errorMessage) *errorMessage = QStringLiteral("No frame grabber board was detected.");
                 return false;
             }
-            if (discoveryData) discoveryData->insert(
-                QStringLiteral("boards"), toDiscoveryData(system->getCachedBoardInfo()));
+            std::lock_guard<std::mutex> lock(_discoveredBoardsMutex);
+            _discoveredBoards = system->getCachedBoardInfo();
             return true;
         } catch (const std::exception& error) {
             if (errorMessage) *errorMessage = QString::fromLocal8Bit(error.what());
@@ -184,10 +143,15 @@ public:
     }
 
     std::unique_ptr<IDevicePluginSession> createSession(
-        const QVariantMap& discoveryData, QString* errorMessage) override
+        const QVariantMap& sessionOptions, QString* errorMessage) override
     {
+        Q_UNUSED(sessionOptions)
         try {
-            const auto boards = fromDiscoveryData(discoveryData.value(QStringLiteral("boards")).toList());
+            std::vector<FramegrabberSystem::BoardInfo> boards;
+            {
+                std::lock_guard<std::mutex> lock(_discoveredBoardsMutex);
+                boards = _discoveredBoards;
+            }
             if (boards.empty()) {
                 if (errorMessage) *errorMessage = QStringLiteral("No frame grabber board was detected.");
                 return {};
@@ -244,6 +208,8 @@ private:
     }
 
     std::atomic<IDevicePluginResourceClaims*> _claims{nullptr};
+    std::mutex _discoveredBoardsMutex;
+    std::vector<FramegrabberSystem::BoardInfo> _discoveredBoards;
 };
 
 #include "FramegrabberPlugin.moc"
