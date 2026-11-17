@@ -47,7 +47,7 @@ struct FramegrabberCameraFeatureDeclaration {
  *
  * The standard connection lifecycle (`IDeviceConnectionControl`, declared by the host as
  * `device.*`), the board/applet `framegrabber.*` actions and the applet/camera `parameters.*`
- * capability call the same Framegrabber authority as the Qt control panel. One board
+ * capability call the same Framegrabber authority as the host device panel. One board
  * connection owns the DMA-channel sources; a connect loads the board's active/power-up
  * applet, so the standard target catalog lists boards and `requestConnect` runs that opening
  * action. Commands share the module's control gate with the panel; at most one accepted
@@ -126,7 +126,7 @@ private:
     friend struct FramegrabberControllerTestAccess;
     friend struct FramegrabberTestBackend;
 
-    /** @brief Copies the SDK and widget-facing module surface used by this adapter. */
+    /** @brief Copies the SDK and consumer-facing module surface used by this adapter. */
     struct Backend {
         std::function<std::vector<FramegrabberSystem::BoardInfo>()> boards;
         std::function<bool()> isOpened;

@@ -1,7 +1,6 @@
 cmake_minimum_required(VERSION 3.16)
 project(Framegrabber VERSION 0.4.0 LANGUAGES C CXX)
 
-option(FRAMEGRABBER_BUILD_QT_WIDGET "Build the optional Qt control widget." OFF)
 option(FRAMEGRABBER_BUILD_PLAYGROUND_ADAPTER
     "Build the optional Framegrabber Playground adapter target."
     OFF
@@ -20,7 +19,6 @@ set(FRAMEGRABBER_PLAYGROUND_SOURCE_DIR "" CACHE PATH
 
 if(FRAMEGRABBER_BUILD_PLAYGROUND_PLUGIN)
     set(FRAMEGRABBER_BUILD_PLAYGROUND_ADAPTER ON)
-    set(FRAMEGRABBER_BUILD_QT_WIDGET ON)
 endif()
 if(PROJECT_NAME STREQUAL "Framegrabber" AND PROJECT_IS_TOP_LEVEL AND
    (FRAMEGRABBER_BUILD_PLAYGROUND_ADAPTER OR FRAMEGRABBER_BUILD_PLAYGROUND_PLUGIN))
@@ -131,65 +129,6 @@ if(SISOPLATFORM_DEFINITIONS)
     target_compile_definitions(Framegrabber PRIVATE ${SISOPLATFORM_DEFINITIONS})
 endif()
 
-if(FRAMEGRABBER_BUILD_QT_WIDGET)
-    if(TARGET Qt6::Core)
-        set(FRAMEGRABBER_QT_VERSION_MAJOR 6)
-    elseif(TARGET Qt5::Core)
-        set(FRAMEGRABBER_QT_VERSION_MAJOR 5)
-    else()
-        find_package(QT NAMES Qt6 Qt5 REQUIRED COMPONENTS Core Gui Widgets Xml)
-        set(FRAMEGRABBER_QT_VERSION_MAJOR "${QT_VERSION_MAJOR}")
-    endif()
-    find_package(
-        Qt${FRAMEGRABBER_QT_VERSION_MAJOR}
-        REQUIRED
-        COMPONENTS Core Gui Widgets Xml
-    )
-
-    add_subdirectory(Utility/Qt)
-    add_library(FramegrabberQtWidget STATIC
-        Utility/Qt/QFramegrabberWidget.h
-        Utility/Qt/QFramegrabberWidget.cpp
-    )
-    add_library(Framegrabber::QtWidget ALIAS FramegrabberQtWidget)
-    set_target_properties(FramegrabberQtWidget PROPERTIES
-        AUTOMOC ON
-        AUTORCC ON
-        AUTOUIC ON
-    )
-    target_compile_features(FramegrabberQtWidget PUBLIC cxx_std_17)
-    target_include_directories(FramegrabberQtWidget
-        PUBLIC
-            "${CMAKE_CURRENT_SOURCE_DIR}"
-    )
-    target_link_libraries(FramegrabberQtWidget
-        PUBLIC
-            Framegrabber::Framegrabber
-            Qt${FRAMEGRABBER_QT_VERSION_MAJOR}::Core
-            Qt${FRAMEGRABBER_QT_VERSION_MAJOR}::Gui
-            Qt${FRAMEGRABBER_QT_VERSION_MAJOR}::Widgets
-            Qt${FRAMEGRABBER_QT_VERSION_MAJOR}::Xml
-    )
-    if(FRAMEGRABBER_BUILD_TESTS)
-        find_package(Qt${FRAMEGRABBER_QT_VERSION_MAJOR} REQUIRED COMPONENTS Test)
-        add_executable(framegrabber_feature_editor_test Tests/FeatureEditorTest.cpp)
-        set_target_properties(framegrabber_feature_editor_test PROPERTIES AUTOMOC ON)
-        target_link_libraries(framegrabber_feature_editor_test PRIVATE
-            Framegrabber::QtWidget Qt${FRAMEGRABBER_QT_VERSION_MAJOR}::Test)
-        add_test(NAME framegrabber_feature_editor_test COMMAND framegrabber_feature_editor_test)
-        set_tests_properties(framegrabber_feature_editor_test PROPERTIES
-            ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
-            ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt${FRAMEGRABBER_QT_VERSION_MAJOR}::Core>")
-        add_executable(framegrabber_runtime_diagnostics_test Tests/RuntimeDiagnosticsTest.cpp)
-        target_link_libraries(framegrabber_runtime_diagnostics_test PRIVATE Framegrabber::QtWidget)
-        add_test(NAME framegrabber_runtime_diagnostics_test COMMAND framegrabber_runtime_diagnostics_test)
-        set_tests_properties(framegrabber_runtime_diagnostics_test PROPERTIES
-            ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
-            ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>")
-    endif()
-    message(STATUS "[Framegrabber] Framegrabber::QtWidget enabled.")
-endif()
-
 if(FRAMEGRABBER_BUILD_PLAYGROUND_ADAPTER)
     if(NOT TARGET GraphicsEngine::Contracts)
         message(FATAL_ERROR
@@ -238,20 +177,10 @@ if(FRAMEGRABBER_BUILD_PLAYGROUND_ADAPTER)
 endif()
 
 if(FRAMEGRABBER_BUILD_PLAYGROUND_PLUGIN)
-    # U2-gated widget libraries resolve the SDK's temporary Resources package
-    # themselves; the runtime contract target does not depend on it.
-    find_package(ResourcesWidgets CONFIG REQUIRED
-        HINTS "${PlaygroundPluginSDK_PREFIX}/lib/cmake/ResourcesWidgets")
     if(NOT FRAMEGRABBER_BUILD_PLAYGROUND_ADAPTER)
         message(FATAL_ERROR
             "[Framegrabber] FRAMEGRABBER_BUILD_PLAYGROUND_PLUGIN=ON requires "
             "FRAMEGRABBER_BUILD_PLAYGROUND_ADAPTER."
-        )
-    endif()
-    if(NOT FRAMEGRABBER_BUILD_QT_WIDGET)
-        message(FATAL_ERROR
-            "[Framegrabber] FRAMEGRABBER_BUILD_PLAYGROUND_PLUGIN=ON requires "
-            "FRAMEGRABBER_BUILD_QT_WIDGET."
         )
     endif()
     if(NOT TARGET Playground::DeviceRuntimeContract)
@@ -260,18 +189,7 @@ if(FRAMEGRABBER_BUILD_PLAYGROUND_PLUGIN)
             "Playground::DeviceRuntimeContract."
         )
     endif()
-    if(NOT TARGET Resources::Dialogs)
-        message(FATAL_ERROR
-            "[Framegrabber] FRAMEGRABBER_BUILD_PLAYGROUND_PLUGIN=ON requires "
-            "Resources::Dialogs."
-        )
-    endif()
-    if(NOT TARGET Qt6::Widgets)
-        message(FATAL_ERROR
-            "[Framegrabber] FRAMEGRABBER_BUILD_PLAYGROUND_PLUGIN=ON requires Qt 6."
-        )
-    endif()
-    find_package(Qt6 REQUIRED COMPONENTS Widgets OpenGL OpenGLWidgets Concurrent)
+    find_package(Qt6 REQUIRED COMPONENTS Core Concurrent Xml)
 
     add_library(FramegrabberPlugin MODULE
         Utility/PlaygroundAdapter/Plugin/FramegrabberPlugin.cpp
@@ -298,12 +216,8 @@ if(FRAMEGRABBER_BUILD_PLAYGROUND_PLUGIN)
     )
     target_link_libraries(FramegrabberPlugin PRIVATE
         Playground::DeviceRuntimeContract
-        Framegrabber::QtWidget
         Framegrabber::PlaygroundAdapter
-        Resources::Dialogs
-        Qt6::Widgets
-        Qt6::OpenGL
-        Qt6::OpenGLWidgets
+        Qt6::Core
         Qt6::Concurrent
         Qt6::Xml
     )
@@ -341,7 +255,6 @@ if(FRAMEGRABBER_BUILD_PLAYGROUND_PLUGIN)
         )
         target_link_libraries(FramegrabberControllerTests PRIVATE
             Playground::DeviceRuntimeContract
-            Framegrabber::QtWidget
             Framegrabber::PlaygroundAdapter
             Qt6::Test
             Qt6::Concurrent
@@ -381,7 +294,6 @@ if(FRAMEGRABBER_BUILD_PLAYGROUND_PLUGIN)
                 "${FRAMEGRABBER_PLAYGROUND_SOURCE_DIR}/src"
             )
             target_link_libraries(FramegrabberParameterLoopbackTests PRIVATE
-                Framegrabber::QtWidget
                 Framegrabber::PlaygroundAdapter
                 Qt6::Test
                 Qt6::Concurrent
@@ -405,7 +317,3 @@ foreach(module_test IN ITEMS framegrabber_graphics_image_adapter_test)
             $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-UNDEBUG>)
     endif()
 endforeach()
-
-if(TARGET FramegrabberQtWidget)
-    target_link_libraries(FramegrabberQtWidget PUBLIC FramegrabberPresentation)
-endif()

@@ -9,14 +9,14 @@ Framegrabber is a C++17 acquisition library for Basler frame grabber boards. It 
 - Load and save MCF configuration files.
 - Start every configured DMA channel and identify each image by `dmaIndex`.
 - Expose applet features and supported camera features through typed APIs.
-- Build an optional Qt control widget and an optional external GraphicsFrame adapter.
+- Build an optional external GraphicsFrame adapter and a widget-free Playground device plugin.
 
 ## Requirements
 
 - CMake 3.16 or newer and a C++17 compiler.
 - A Basler Frame Grabber SDK installation containing the FgLib5, ClSerSis, SisoIoLib, SisoPlatform, and SisoGenicamLib CMake packages.
 - `BASLER_FG_SDK_DIR` when the SDK is not installed in a searched default location.
-- Qt Widgets only when `FRAMEGRABBER_BUILD_QT_WIDGET=ON`.
+- Qt Core, Concurrent and Xml when `FRAMEGRABBER_BUILD_PLAYGROUND_PLUGIN=ON`. The plugin package links no Qt Widgets, Resources widget/dialog library or OpenGL.
 
 Operating-system and board support are defined by the installed SDK and driver. Do not infer hardware support from compilation alone.
 
@@ -29,21 +29,11 @@ add_subdirectory(path/to/Framegrabber/C++ Framegrabber-build)
 target_link_libraries(consumer PRIVATE Framegrabber::Framegrabber)
 ```
 
-To use the Qt control panel, opt in before adding the module and link only the
-widget target; it supplies the core library and required Qt components:
-
-```cmake
-set(FRAMEGRABBER_BUILD_QT_WIDGET ON CACHE BOOL "" FORCE)
-add_subdirectory(path/to/Framegrabber/C++ Framegrabber-build)
-target_link_libraries(qt_consumer PRIVATE Framegrabber::QtWidget)
-```
-
-Enabling `FRAMEGRABBER_BUILD_QT_WIDGET` requires Qt Core, Gui, Widgets, and Xml.
-Configuration fails when the requested Qt components are unavailable.
+The module ships no Qt widget target. Enable `FRAMEGRABBER_BUILD_PLAYGROUND_PLUGIN` to build the widget-free device plugin; the host's common device panel is its only session UI.
 
 The optional Playground adapter is disabled by default. Enable `FRAMEGRABBER_BUILD_PLAYGROUND_ADAPTER` only when the neutral GraphicsEngine contract target is available. Consumers that want owned frames include `Utility/PlaygroundAdapter/FramegrabberGraphicsFrameStream.h` and link `Framegrabber::PlaygroundAdapter`; pixel-format conversion stays in `FramegrabberGraphicsFrameAdapter`. The stream publishes one single-image GraphicsFrame for each accepted DMA image, using the DMA index as the source index. It does not assemble frames across DMA channels; the consumer owns multi-source presentation.
 
-The optional Playground device plugin is a separate MODULE. Enable `FRAMEGRABBER_BUILD_PLAYGROUND_PLUGIN` only when `Playground::DeviceRuntimeContract`, the adapter, `Framegrabber::QtWidget`, and `Resources::Dialogs` are available. The plugin passes `ThemedFileDialog` through `QFramegrabberWidget::setFileDialogPresenter()` for Load, Save and missing-applet selection; without a presenter the widget uses Qt's non-native file dialog and needs no theme. Package identity lives in `Utility/PlaygroundAdapter/Package/Package.cmake` as quoted `set(PLAYGROUND_PLUGIN_* ...)` assignments; the MODULE must set `PLAYGROUND_PLUGIN_PACKAGE` and include `DeviceRuntime/Contract/DeviceRuntime.h`. The host emits `plugin.json` from that identity plus `DeviceRuntime.h`.
+The optional Playground device plugin is a separate MODULE. Enable `FRAMEGRABBER_BUILD_PLAYGROUND_PLUGIN` only when `Playground::DeviceRuntimeContract` and the adapter are available. The plugin creates no dock or session widget and links only the runtime contract, the adapter and Qt Core/Concurrent/Xml; no Qt Widgets, Resources widget/dialog library or OpenGL. Its session declares the camera feature tree's favourites namespace through `DeviceSessionMetadata::favoritesSettingsKey`. Package identity lives in `Utility/PlaygroundAdapter/Package/Package.cmake` as quoted `set(PLAYGROUND_PLUGIN_* ...)` assignments; the MODULE must set `PLAYGROUND_PLUGIN_PACKAGE` and include `DeviceRuntime/Contract/DeviceRuntime.h`. The host emits `plugin.json` from that identity plus `DeviceRuntime.h`.
 
 ### Playground session contract
 
@@ -149,9 +139,8 @@ Validate applet loading, every active DMA channel, payload size and pixel format
 
 Build the existing plugin project using this repository, an installed Plugin
 SDK, the matching Qt kit and its vendor SDK. No consumer source tree or
-renderer is needed. The plugin switch enables its owning widget/adapter
-(and vendor SDK implementation where required). Theme installation remains
-consumer-owned.
+renderer is needed. The plugin switch enables its owning adapter and vendor SDK
+implementation. The package has no theme dependency.
 
 ```sh
 cmake -S C++ -B build/plugin -DCMAKE_PREFIX_PATH="<PluginSDK>;<Qt-prefix>" -DCMAKE_CONFIGURATION_TYPES=Release -DCMAKE_BUILD_TYPE=Release -DFRAMEGRABBER_BUILD_PLAYGROUND_PLUGIN=ON -DFRAMEGRABBER_BUILD_TESTS=ON
@@ -179,37 +168,9 @@ cmake --build build/loopback --config Release --target FramegrabberParameterLoop
 
 Set `CMAKE_BUILD_TYPE=Release` for a single-configuration generator.
 
-## Qt presentation
-
-`C++/Utility/Qt` provides the SDK-independent `FramegrabberPresentation` target.
-The runtime Qt widget and isolated presentation consumers use the same
-`FramegrabberControlUi` composition; device discovery, feature access and
-acquisition remain in the runtime widget. The presentation target does not
-install an application theme.
-
-The Setup tab contains:
-
-- a loadable-applet selector with refresh, load and release commands;
-- file-based loading of an applet or `.mcf` file, and configuration saving;
-- the applet feature tree for each DMA.
-
-Applet and camera numeric features use native spin editors that preserve signed
-and unsigned integer widths and floating-point round trips. Applet bounds and
-increments come from `getAppletParameterLimits`; camera bounds come from the live
-`Sgc_getIntegerValueLimits` / `Sgc_getFloatValueLimits` calls through
-`getCameraFeatureLimits`. Missing limits remain unspecified (the scalar type's
-representable range still applies). Positive increments are enforced relative to
-a reported minimum. Invalid or off-grid input restores the previous value without
-a write. Writes run asynchronously, disable the editor while pending, and restore
-the accepted value and refresh the tree on rejection. Read-only editors are
-disabled. Commands use Execute buttons, including write-only commands; only
-string features use free-text editors. Unknown types are shown as unsupported.
-
-On creation the widget loads the board's active applet (or else its power-up applet). Every lifecycle command takes the module control gate. While another surface holds the gate the commands are disabled, but Live can still be stopped. `setFileDialogPresenter()` lets a consumer supply themed file dialogs. Without one, the widget uses plain Qt dialogs.
-
 ## Declared device and parameter contracts
 
-`FramegrabberSourceController` implements `IDeviceConnectionControl/1.0`, `IToolProvider/1.0` and `IDeviceParameterControl/1.0` over the same `Framegrabber` authority as the widget.
+`FramegrabberSourceController` implements `IDeviceConnectionControl/1.0`, `IToolProvider/1.0` and `IDeviceParameterControl/1.0` over the same `Framegrabber` authority; the host's common device panel is the session UI.
 
 Playground declares the standard `device.*` lifecycle tools from `IDeviceConnectionControl`:
 
@@ -218,7 +179,9 @@ Playground declares the standard `device.*` lifecycle tools from `IDeviceConnect
 | `device.connection` | Canonical state; `targetId` is the loaded board and `displayName` names board and applet |
 | `device.disconnect` | Stops acquisition and releases the board (`Fg_FreeGrabber`) |
 | `device.single` | Waits up to 30 s for one frame on every DMA |
-| `device.targets`, `device.discover`, `device.connect` | Unavailable: a connection is made by loading an applet |
+| `device.targets` | Lists the cached boards as connection targets |
+| `device.discover` | Unavailable: board discovery runs when the session is created |
+| `device.connect` | Loads the selected board's active, else power-up, applet as the opening action |
 | `device.live-start`, `device.live-stop` | Unavailable: Live uses the common `source.*` tools |
 
 The module declares its own board and applet tools. Observe tools complete synchronously:
@@ -255,4 +218,4 @@ Applet parameters use the scope `Applet:<dma>` and their SDK access names (for e
 - Each write is revalidated against a fresh observation and reports the actual readback and effect.
 - Commands are executed from the parameter's declared SDK type, so write-only commands work.
 
-CXP camera features remain available through the widget and the C++ API. They are not part of the parameter contract.
+CXP camera features remain available through the C++ API and the `Camera:<transport>:<dma>` parameter scope. Arbitrary applet-file selection was GUI-only and is no longer part of the package now that the widget is retired.
