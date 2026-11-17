@@ -212,7 +212,6 @@ if(FRAMEGRABBER_BUILD_PLAYGROUND_PLUGIN)
         "${CMAKE_CURRENT_SOURCE_DIR}"
         "${CMAKE_CURRENT_SOURCE_DIR}/Utility/PlaygroundAdapter/Source"
         "${CMAKE_CURRENT_SOURCE_DIR}/Utility/PlaygroundAdapter/Plugin"
-        "${PlaygroundPluginSDK_WIDGET_INCLUDE_DIR}"
     )
     target_link_libraries(FramegrabberPlugin PRIVATE
         Playground::DeviceRuntimeContract
@@ -233,7 +232,7 @@ if(FRAMEGRABBER_BUILD_PLAYGROUND_PLUGIN)
         endif()
         playground_sdk_package_plugin(FramegrabberPlugin
             PACKAGE_FILE "${CMAKE_CURRENT_SOURCE_DIR}/Utility/PlaygroundAdapter/Package/Package.cmake"
-            ICON "${PlaygroundPluginSDK_ICON_DIR}/network-card-48.png")
+            ICON "${CMAKE_CURRENT_SOURCE_DIR}/Utility/PlaygroundAdapter/Package/icon.png")
     endif()
     message(STATUS "[Framegrabber] FramegrabberPlugin enabled.")
     if(FRAMEGRABBER_BUILD_TESTS)

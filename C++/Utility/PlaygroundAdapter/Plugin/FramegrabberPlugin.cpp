@@ -1,4 +1,4 @@
-#include "DevicePluginSession.h"
+#include "DeviceRuntime/Contract/DevicePluginSession.h"
 
 #include "FramegrabberSourceController.h"
 #include "Framegrabber.h"
