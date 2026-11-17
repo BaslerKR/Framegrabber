@@ -73,10 +73,18 @@ function(framegrabber_prepare_playground_plugin_runtime target_name)
             endif()
         endforeach()
 
-        # Names loaded after process start stay in this directory, so the
-        # installed bin is copied whole instead of enumerated.
-        file(COPY "${PLAYGROUND_LOCAL_FRAMEGRABBER_RUNTIME_DIR}/"
-            DESTINATION "${payload_dir}/bin")
+        # Names loaded after process start stay in this directory, so the installed bin is copied
+        # whole instead of enumerated. Qt is Core-owned: a private Qt in the package can shadow the
+        # worker's Qt and break the plugin's ABI, so exclude the SDK's Qt runtime and its plugins.
+        file(INSTALL "${PLAYGROUND_LOCAL_FRAMEGRABBER_RUNTIME_DIR}/"
+            DESTINATION "${payload_dir}/bin"
+            USE_SOURCE_PERMISSIONS
+            PATTERN "Qt5*" EXCLUDE
+            PATTERN "Qt6*" EXCLUDE
+            PATTERN "qt.conf" EXCLUDE
+            PATTERN "icu*" EXCLUDE
+            PATTERN "qt5" EXCLUDE
+            PATTERN "qt6" EXCLUDE)
         file(COPY "${logging_config}" DESTINATION "${payload_dir}/bin")
 
         get_filename_component(framegrabber_sdk_root
