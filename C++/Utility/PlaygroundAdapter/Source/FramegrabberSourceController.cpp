@@ -871,7 +871,7 @@ ApiResult<void> FramegrabberSourceController::admitControl(
     }
     if (_backend.isGrabbing && _backend.isGrabbing() && name != kDisconnect)
         return Admission::failure(ApiErrorCode::Busy, "Stop acquisition explicitly first.");
-    // The same gate serializes the control panel; it never implicitly stops acquisition.
+    // The same gate serializes the host device panel; it never implicitly stops acquisition.
     if (!_backend.tryBeginControl || !_backend.tryBeginControl())
         return Admission::failure(ApiErrorCode::Busy, "Another frame grabber control operation is active.");
 

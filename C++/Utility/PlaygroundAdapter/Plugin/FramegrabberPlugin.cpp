@@ -1,13 +1,10 @@
-#include "DevicePluginTemplate.h"
+#include "DevicePluginSession.h"
 
 #include "FramegrabberSourceController.h"
 #include "Framegrabber.h"
 #include "FramegrabberSystem.h"
-#include "Utility/Qt/QFramegrabberWidget.h"
-#include "Chrome/ThemedFileDialog.h"
 
 #include <QDebug>
-#include <QPointer>
 
 #include <atomic>
 #include <memory>
@@ -131,26 +128,12 @@ public:
     {
         _titleState->deactivate();
         if (_framegrabber && _statusCallback != 0) _framegrabber->deregisterStatusCallback(_statusCallback);
-        if (_widget) _widget->prepareForShutdown();
         _controller.reset();
         if (_system && _framegrabber) _system->removeFramegrabber(_framegrabber);
     }
 
     QString title() const override { return _titleState->title(); }
-    std::vector<DevicePluginDock> createDockWidgets(QWidget* parent) override
-    {
-        if (!_widget) {
-            _widget = new QFramegrabberWidget(parent, _framegrabber);
-            // Consumer-owned file dialogs keep the host chrome; the widget has no Resources dependency.
-            _widget->setFileDialogPresenter([parent](bool save, const QString& title,
-                                                     const QString& directory, const QString& filter) {
-                return save ? ThemedFileDialog::getSaveFileName(parent, title, directory, filter)
-                            : ThemedFileDialog::getOpenFileName(parent, title, directory, filter);
-            });
-        }
-        return {{QStringLiteral("device-controls"), QStringLiteral("Device Controls"),
-                 Qt::LeftDockWidgetArea, _widget, true}};
-    }
+    std::vector<DevicePluginDock> createDockWidgets(QWidget*) override { return {}; }
     AbstractSourceController* sourceController() const override { return _controller.get(); }
     unsigned int capabilities() const noexcept override
     {
@@ -163,12 +146,12 @@ private:
     std::unique_ptr<FramegrabberSystem> _system;
     Framegrabber* _framegrabber = nullptr;
     std::unique_ptr<FramegrabberSourceController> _controller;
-    QPointer<QFramegrabberWidget> _widget;
     Framegrabber::CallbackId _statusCallback = 0;
     std::shared_ptr<FramegrabberPluginTitleState> _titleState = std::make_shared<FramegrabberPluginTitleState>();
 };
 
-class FramegrabberPlugin final : public DevicePluginTemplate,
+class FramegrabberPlugin final : public QObject,
+                                 public IDeviceRuntime,
                                  public IDevicePluginResourceClaimsReceiver {
     Q_OBJECT
     Q_PLUGIN_METADATA(IID PlaygroundDeviceRuntime_iid)

@@ -75,7 +75,10 @@ function(framegrabber_prepare_playground_plugin_runtime target_name)
 
         # Names loaded after process start stay in this directory, so the installed bin is copied
         # whole instead of enumerated. Qt is Core-owned: a private Qt in the package can shadow the
-        # worker's Qt and break the plugin's ABI, so exclude the SDK's Qt runtime and its plugins.
+        # worker's Qt and break the plugin's ABI, so exclude the SDK's Qt runtime and qt4/OpenGL
+        # payloads. microDiagnostics is a standalone Qt Widgets GUI tool and siso_gpudirect is a
+        # standalone GPUDirect helper that imports the system opengl32.dll; neither is part of the
+        # curated capture runtime, and no staged capture payload imports or names siso_gpudirect.dll.
         file(INSTALL "${PLAYGROUND_LOCAL_FRAMEGRABBER_RUNTIME_DIR}/"
             DESTINATION "${payload_dir}/bin"
             USE_SOURCE_PERMISSIONS
@@ -93,7 +96,8 @@ function(framegrabber_prepare_playground_plugin_runtime target_name)
             PATTERN "networkinformation" EXCLUDE
             PATTERN "generic" EXCLUDE
             PATTERN "sqldrivers" EXCLUDE
-            PATTERN "qt*" EXCLUDE)
+            PATTERN "qt*" EXCLUDE
+            REGEX "(qt4|opengl32sw|siso_gpudirect|[Mm]icro[Dd]iagnostics)" EXCLUDE)
         file(COPY "${logging_config}" DESTINATION "${payload_dir}/bin")
 
         get_filename_component(framegrabber_sdk_root
