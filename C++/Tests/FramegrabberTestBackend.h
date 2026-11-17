@@ -49,6 +49,8 @@ struct FramegrabberTestState
     bool acceptAnyAppletFile = false;
     /** @brief Let an opt-in test apply a non-catalog MCF path without changing the fake catalog. */
     bool acceptAnyConfiguration = false;
+    /** @brief Let an opt-in test make an MCF reference an applet outside the catalog. */
+    bool mcfReferencesOutsideApplet = false;
     bool extendedCameraXml = false;
     bool cameraXmlEmpty = false;
 
@@ -333,6 +335,8 @@ struct FramegrabberTestBackend
         };
         result.appletPathFromConfiguration = [shared](const std::string& configuration, const std::string&) {
             std::lock_guard<std::mutex> lock(shared->mutex);
+            if (shared->mcfReferencesOutsideApplet && !configuration.empty())
+                return shared->outsideMcfApplet;
             if (shared->acceptAnyConfiguration && !configuration.empty()
                 && !shared->catalog.empty())
                 return shared->catalog.front().path;

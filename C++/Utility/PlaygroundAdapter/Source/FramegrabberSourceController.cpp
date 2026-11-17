@@ -91,7 +91,7 @@ std::string sdkFilePath(const QString& value, QString& reason)
 #ifdef Q_OS_WIN
     const QByteArray local = value.toLocal8Bit();
     if (QString::fromLocal8Bit(local) != value) {
-        reason = QStringLiteral("The applet path cannot be represented in the current Windows code page; use an ASCII-only directory.");
+        reason = QStringLiteral("The file path cannot be represented in the current Windows code page; use an ASCII-only directory.");
         return {};
     }
     return std::string(local.constData(), static_cast<std::size_t>(local.size()));
@@ -835,7 +835,16 @@ ApiResult<void> FramegrabberSourceController::requestToolInternal(
     }
     if (name == QLatin1String("framegrabber.configuration-load") && !arguments.contains("applet"))
     {
-        const std::string configuration = arguments.value("configuration").toString().toStdString();
+        const QString configurationText = arguments.value("configuration").toString();
+        QString configReason;
+        const std::string configuration = sdkFilePath(configurationText, configReason);
+        if (!configReason.isEmpty())
+            return Admission::failure(ApiErrorCode::InvalidArgument, configReason);
+        std::error_code configError;
+        if (QFileInfo(configurationText).isAbsolute()
+            && !std::filesystem::is_regular_file(nativeFileSystemPath(configurationText), configError))
+            return Admission::failure(ApiErrorCode::InvalidArgument,
+                QStringLiteral("The configuration file does not exist: %1.").arg(configurationText));
         const QString board = arguments.value("board").toString();
         std::string boardName;
         if (_backend.boards)

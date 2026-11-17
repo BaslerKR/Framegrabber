@@ -1310,7 +1310,8 @@ std::vector<Framegrabber::AppletInfo> Framegrabber::appletCatalog() const
 }
 
 Framegrabber::AppletInfo Framegrabber::catalogEntry(const std::string& appletPath,
-                                                    const std::string& boardName) const
+    const std::string& boardName,
+    const std::function<FramegrabberSystem::AppletMetadata(const std::string&, const std::string&)>& lookup) const
 {
     {
         std::lock_guard<std::mutex> lock(_stateMutex);
@@ -1328,16 +1329,15 @@ Framegrabber::AppletInfo Framegrabber::catalogEntry(const std::string& appletPat
     // tags so a CoaXPress file can initialize camera control exactly as a catalog entry does.
     AppletInfo applet;
     applet.path = appletPath;
-    if (_system)
-    {
-        const FramegrabberSystem::AppletMetadata metadata =
-            _system->getAppletMetadata(boardName, appletPath);
-        applet.version = metadata.version;
-        applet.supportsCameraControl = metadata.supportsCameraControl;
-        if (!metadata.supportsCameraControl)
-            log("No SDK camera-control tag is available for an applet outside the installed "
-                "catalog; CoaXPress cameras are not initialized for this file.", true);
-    }
+    const FramegrabberSystem::AppletMetadata metadata = lookup
+        ? lookup(boardName, appletPath)
+        : (_system ? _system->getAppletMetadata(boardName, appletPath)
+                   : FramegrabberSystem::AppletMetadata{});
+    applet.version = metadata.version;
+    applet.supportsCameraControl = metadata.supportsCameraControl;
+    if (!metadata.supportsCameraControl)
+        log("No SDK camera-control tag is available for an applet outside the installed "
+            "catalog; CoaXPress cameras are not initialized for this file.", true);
     return applet;
 }
 

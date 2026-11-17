@@ -12,6 +12,7 @@
 
 #include <atomic>
 #include <condition_variable>
+#include <functional>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -29,6 +30,7 @@ private slots:
     void hostSelectedAppletFileLoadsAndValidatesPath();
     void hostSelectedUnicodePathUsesNativeEncoding();
     void hostSelectedNonAsciiConfigurationPath();
+    void nonCatalogAppletMetadataGatesCameraControl();
     void boardlessLoadsUseTheSessionBoard();
     void parameterTreeCoversAppletAndCameraScopes();
     void parameterChangesDeliverSnapshotAndDelta();
@@ -142,6 +144,17 @@ std::string expectedSdkPath(const QString& path)
 }
 
 } // namespace
+
+/** @brief Calls the private catalog lookup with an injected metadata result. */
+struct FramegrabberCatalogTestAccess
+{
+    static Framegrabber::AppletInfo entry(Framegrabber& instance, const std::string& path,
+        const std::string& board,
+        const std::function<FramegrabberSystem::AppletMetadata(const std::string&, const std::string&)>& lookup)
+    {
+        return instance.catalogEntry(path, board, lookup);
+    }
+};
 
 void FramegrabberControllerTests::declaresHierarchicalBoardConnection()
 {
@@ -620,6 +633,56 @@ void FramegrabberControllerTests::hostSelectedNonAsciiConfigurationPath()
         std::lock_guard<std::mutex> lock(fake.state.mutex);
         QCOMPARE(fake.state.savedConfiguration, expectedSdkPath(mcfPath));
     }
+
+    // A non-catalog applet named by the non-ASCII MCF must still offer the enum prompt.
+    {
+        std::lock_guard<std::mutex> lock(fake.state.mutex);
+        fake.state.mcfReferencesOutsideApplet = true;
+    }
+    auto outside = invoke(QStringLiteral("framegrabber.configuration-load"), mcfPath, connection);
+    QVERIFY(outside.result.has_value());
+    QVERIFY(!outside.result->succeeded());
+    QCOMPARE(outside.result->error()->code, ApiErrorCode::ArgumentRequired);
+    QCOMPARE(outside.result->error()->details.value(QStringLiteral("argumentRequired")).toObject()
+                 .value(QStringLiteral("argument")).toString(), QStringLiteral("applet"));
+
+#ifdef Q_OS_WIN
+    for (const QChar candidate : candidates) {
+        if (roundTrips(candidate)) continue;
+        const QString unsupported = QDir::toNativeSeparators(directory.filePath(
+            QStringLiteral("reject-") + candidate + QStringLiteral(".mcf")));
+        QFile file(unsupported);
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        file.close();
+        auto refused = invoke(QStringLiteral("framegrabber.configuration-load"), unsupported);
+        QVERIFY(refused.result.has_value());
+        QVERIFY(!refused.result->succeeded());
+        QCOMPARE(refused.result->error()->code, ApiErrorCode::InvalidArgument);
+        QVERIFY(refused.result->error()->message.contains(QStringLiteral("file path cannot be represented")));
+        break;
+    }
+#endif
+}
+
+void FramegrabberControllerTests::nonCatalogAppletMetadataGatesCameraControl()
+{
+    Framegrabber framegrabber(nullptr);
+    const std::string path = "C:/custom/chosen.hap";
+    const std::string board = "Test Board (SN1)";
+    const auto hit = FramegrabberCatalogTestAccess::entry(framegrabber, path, board,
+        [](const std::string&, const std::string&) {
+            FramegrabberSystem::AppletMetadata metadata;
+            metadata.supportsCameraControl = true;
+            metadata.version = "9.9";
+            return metadata;
+        });
+    QCOMPARE(hit.path, path);
+    QVERIFY(hit.supportsCameraControl); // gates Sgc_initBoard in adoptBoard
+    QCOMPARE(hit.version, std::string("9.9"));
+    const auto miss = FramegrabberCatalogTestAccess::entry(framegrabber, path, board,
+        [](const std::string&, const std::string&) { return FramegrabberSystem::AppletMetadata{}; });
+    QVERIFY(!miss.supportsCameraControl);
+    QVERIFY(miss.version.empty());
 }
 
 void FramegrabberControllerTests::boardlessLoadsUseTheSessionBoard()

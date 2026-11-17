@@ -187,7 +187,8 @@ Other tools, and the lifecycle disconnect and Single, run on one worker and hold
 | --- | --- |
 | `framegrabber.applets-refresh` | Re-enumerates applets and replaces the cached catalog; only while released (device) |
 | `framegrabber.applet-load` | Loads `{applet, connectionId?, board?}` (device); an omitted board uses the session's connected board |
-| `framegrabber.configuration-load` | Loads `{configuration, applet?, connectionId?, board?}` (device); an omitted board uses the session's connected board |
+| `framegrabber.applet-load-file` | Loads `{appletFile, connectionId?, board?}` from a Host-chosen file (device, panel-only); the plugin validates the path before `Fg_Init` |
+| `framegrabber.configuration-load` | Loads `{configuration, applet?, connectionId?, board?}` (device, panel-only); the `file-open` path is chosen in the Host dialog and cannot be supplied through `tools.invoke` |
 | `framegrabber.configuration-save` | Writes `{connectionId, configuration}` to a host file (device) |
 | `framegrabber.cameras-refresh` | Restarts CXP discovery (device) |
 
