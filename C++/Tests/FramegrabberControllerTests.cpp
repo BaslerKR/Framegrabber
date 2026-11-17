@@ -655,10 +655,10 @@ void FramegrabberControllerTests::hostSelectedNonAsciiConfigurationPath()
         QVERIFY(file.open(QIODevice::WriteOnly));
         file.close();
         auto refused = invoke(QStringLiteral("framegrabber.configuration-load"), unsupported);
-        QVERIFY(refused.result.has_value());
-        QVERIFY(!refused.result->succeeded());
-        QCOMPARE(refused.result->error()->code, ApiErrorCode::InvalidArgument);
-        QVERIFY(refused.result->error()->message.contains(QStringLiteral("file path cannot be represented")));
+        QVERIFY(refused.admission.has_value());
+        QVERIFY(!refused.admission->succeeded());
+        QCOMPARE(refused.admission->error()->code, ApiErrorCode::InvalidArgument);
+        QVERIFY(refused.admission->error()->message.contains(QStringLiteral("file path cannot be represented")));
         break;
     }
 #endif
