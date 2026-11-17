@@ -420,7 +420,11 @@ void FramegrabberControllerTests::hostSelectedAppletFileLoadsAndValidatesPath()
 
     std::fprintf(stderr, "host-file: missing path\n"); std::fflush(stderr);
     auto missing = invoke(QStringLiteral("C:/missing/nowhere.hap"));
-    QVERIFY2(missing.admission->succeeded(), missing.admission->error()
+    std::fprintf(stderr, "host-file: missing admission=%d result=%d succeeded=%d\n",
+        missing.admission && missing.admission->succeeded(), int(missing.result.has_value()),
+        missing.result.has_value() && missing.result->succeeded());
+    std::fflush(stderr);
+    QVERIFY2(missing.admission && missing.admission->succeeded(), missing.admission->error()
         ? qPrintable(missing.admission->error()->message) : "");
     QVERIFY(missing.result.has_value());
     QVERIFY(!missing.result->succeeded());
