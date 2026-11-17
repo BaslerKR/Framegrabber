@@ -27,6 +27,7 @@ private slots:
     void declaredActionsCarryPresentationAndPromptKinds();
     void typedArgumentRequiredPrompts();
     void hostSelectedAppletFileLoadsAndValidatesPath();
+    void hostSelectedUnicodePathUsesNativeEncoding();
     void boardlessLoadsUseTheSessionBoard();
     void parameterTreeCoversAppletAndCameraScopes();
     void parameterChangesDeliverSnapshotAndDelta();
@@ -126,6 +127,17 @@ const DeviceParameterDescriptor* findParameter(
     for (const auto& parameter : parameters)
         if (parameter.target.scope == scope && parameter.target.name == name) return &parameter;
     return nullptr;
+}
+
+/** @brief The narrow SDK path is local 8-bit on Windows and UTF-8 elsewhere. */
+std::string expectedSdkPath(const QString& path)
+{
+#ifdef Q_OS_WIN
+    const QByteArray local = path.toLocal8Bit();
+    return std::string(local.constData(), static_cast<std::size_t>(local.size()));
+#else
+    return path.toStdString();
+#endif
 }
 
 } // namespace
@@ -442,13 +454,10 @@ void FramegrabberControllerTests::hostSelectedAppletFileLoadsAndValidatesPath()
     QVERIFY(loadFailure.result->error()->message.contains(
         QStringLiteral("Failed to load the applet from")));
 
+    // An existing file outside the catalog reaches the backend without being cataloged.
     {
         std::lock_guard<std::mutex> lock(fake.state.mutex);
-        Framegrabber::AppletInfo chosen;
-        chosen.name = "Chosen";
-        chosen.file = QFileInfo(hapPath).fileName().toStdString();
-        chosen.path = hapPath.toStdString();
-        fake.state.catalog.push_back(chosen);
+        fake.state.acceptAnyAppletFile = true;
     }
     auto loaded = invoke(hapPath);
     QVERIFY2(loaded.admission->succeeded(), loaded.admission->error()
@@ -458,7 +467,60 @@ void FramegrabberControllerTests::hostSelectedAppletFileLoadsAndValidatesPath()
         ? qPrintable(loaded.result->error()->message) : "");
     {
         std::lock_guard<std::mutex> lock(fake.state.mutex);
-        QCOMPARE(fake.state.appletPath, hapPath.toStdString());
+        QCOMPARE(fake.state.appletPath, expectedSdkPath(hapPath));
+    }
+}
+
+void FramegrabberControllerTests::hostSelectedUnicodePathUsesNativeEncoding()
+{
+    const QString templatePath = QDir::tempPath() + QStringLiteral("/applet-")
+        + QChar(0x00E9) + QStringLiteral("-XXXXXX"); // U+00E9 is representable in common ANSI code pages
+    QTemporaryDir directory(templatePath);
+    QVERIFY2(directory.isValid(), qPrintable(directory.errorString()));
+    const QString hapPath = QDir::toNativeSeparators(directory.filePath(QStringLiteral("unicode.hap")));
+    QFile hap(hapPath);
+    QVERIFY(hap.open(QIODevice::WriteOnly));
+    hap.close();
+
+    FramegrabberTestBackend fake;
+    FramegrabberSourceController controller(nullptr);
+    FramegrabberControllerTestAccess::install(controller, fake);
+    {
+        std::lock_guard<std::mutex> lock(fake.state.mutex);
+        fake.state.acceptAnyAppletFile = true;
+    }
+    struct ToolRun
+    {
+        std::optional<ApiResult<void>> admission;
+        std::optional<ApiResult<QJsonValue>> result;
+    };
+    const auto invoke = [&controller](const QString& path) {
+        ToolRun run;
+        Sink<ApiResult<QJsonValue>> sink;
+        run.admission = controller.requestTool(QStringLiteral("framegrabber.applet-load-file"), 1,
+            QJsonObject{{QStringLiteral("board"), QStringLiteral("Test Board (SN1)")},
+                        {QStringLiteral("appletFile"), path}}, sink.completion());
+        if (run.admission->succeeded() && sink.wait()) run.result = sink.take();
+        return run;
+    };
+
+    auto run = invoke(hapPath);
+    QVERIFY2(run.admission->succeeded(), run.admission->error()
+        ? qPrintable(run.admission->error()->message) : "");
+    QVERIFY(run.result.has_value());
+#ifdef Q_OS_WIN
+    if (QString::fromLocal8Bit(hapPath.toLocal8Bit()) != hapPath) {
+        QVERIFY(!run.result->succeeded());
+        QCOMPARE(run.result->error()->code, ApiErrorCode::InvalidArgument);
+        QVERIFY(run.result->error()->message.contains(QStringLiteral("Windows code page")));
+        return;
+    }
+#endif
+    QVERIFY2(run.result->succeeded(), run.result->error()
+        ? qPrintable(run.result->error()->message) : "");
+    {
+        std::lock_guard<std::mutex> lock(fake.state.mutex);
+        QCOMPARE(fake.state.appletPath, expectedSdkPath(hapPath));
     }
 }
 

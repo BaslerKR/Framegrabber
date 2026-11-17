@@ -72,6 +72,34 @@ bool isAllowedAppletFile(const std::filesystem::path& path)
     return extension == ".hap" || extension == ".dll" || extension == ".so";
 }
 
+/** @brief Filesystem checks need the native wide path on Windows; QString::toStdString() is UTF-8. */
+std::filesystem::path nativeFileSystemPath(const QString& value)
+{
+#ifdef Q_OS_WIN
+    return std::filesystem::path(value.toStdWString());
+#else
+    return std::filesystem::path(value.toStdString());
+#endif
+}
+
+/** @brief The narrow Fg_Init(const char*) path uses the process ANSI code page on Windows.
+ *  @return Empty with an actionable reason when the path cannot be represented losslessly.
+ */
+std::string sdkAppletPath(const QString& value, QString& reason)
+{
+#ifdef Q_OS_WIN
+    const QByteArray local = value.toLocal8Bit();
+    if (QString::fromLocal8Bit(local) != value) {
+        reason = QStringLiteral("The applet path cannot be represented in the current Windows code page; use an ASCII-only directory.");
+        return {};
+    }
+    return std::string(local.constData(), static_cast<std::size_t>(local.size()));
+#else
+    Q_UNUSED(reason);
+    return value.toStdString();
+#endif
+}
+
 QJsonObject enumText(const QStringList& values)
 {
     QJsonArray allowed;
@@ -937,16 +965,20 @@ ApiResult<void> FramegrabberSourceController::admitControl(
             } else if (name == "framegrabber.applet-load-file") {
                 const QString appletFile = arguments.value("appletFile").toString();
                 report({loadPhase(name), loadMessage(name, appletFile), 0, 1, false});
-                const std::filesystem::path path(appletFile.toStdString());
+                const std::filesystem::path path = nativeFileSystemPath(appletFile);
                 std::error_code existsError;
                 const bool exists = std::filesystem::is_regular_file(path, existsError) && !existsError;
+                QString sdkReason;
+                const std::string sdkPath = sdkAppletPath(appletFile, sdkReason);
                 if (!isAllowedAppletFile(path)) {
                     failure = Result::failure(ApiErrorCode::InvalidArgument,
                         QStringLiteral("Unsupported applet file extension: use .hap, .dll or .so."));
                 } else if (!exists) {
                     failure = Result::failure(ApiErrorCode::InvalidArgument,
                         QStringLiteral("The applet file does not exist: %1.").arg(appletFile));
-                } else if (backend->loadApplet && backend->loadApplet(appletFile.toStdString(), boardName)) {
+                } else if (!sdkReason.isEmpty()) {
+                    failure = Result::failure(ApiErrorCode::InvalidArgument, sdkReason);
+                } else if (backend->loadApplet && backend->loadApplet(sdkPath, boardName)) {
                     payload = Payload::State;
                 } else failure = failed(QStringLiteral("Failed to load the applet from '%1'.").arg(appletFile));
             } else if (name == "framegrabber.configuration-load") {

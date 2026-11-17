@@ -45,6 +45,8 @@ struct FramegrabberTestState
     std::string configuration;
     std::string savedConfiguration;
     std::string outsideMcfApplet = "C:/outside/legacy.hap";
+    /** @brief Let an opt-in test accept an existing external applet file without cataloging it. */
+    bool acceptAnyAppletFile = false;
     bool extendedCameraXml = false;
     bool cameraXmlEmpty = false;
 
@@ -301,6 +303,17 @@ struct FramegrabberTestBackend
         };
         result.loadApplet = [shared](const std::string& reference, const std::string& board) {
             std::lock_guard<std::mutex> lock(shared->mutex);
+            if (shared->acceptAnyAppletFile && !reference.empty())
+            {
+                shared->opened = true;
+                shared->grabbing = false;
+                ++shared->generation;
+                shared->appletName = reference;
+                shared->appletPath = reference;
+                shared->loadedBoard = board;
+                shared->configuration.clear();
+                return true;
+            }
             for (const auto& applet : shared->catalog)
             {
                 if (applet.name != reference && applet.file != reference && applet.path != reference)
