@@ -218,4 +218,4 @@ Applet parameters use the scope `Applet:<dma>` and their SDK access names (for e
 - Each write is revalidated against a fresh observation and reports the actual readback and effect.
 - Commands are executed from the parameter's declared SDK type, so write-only commands work.
 
-CXP camera features remain available through the C++ API and the `Camera:<transport>:<dma>` parameter scope. Arbitrary applet-file selection was GUI-only and is no longer part of the package now that the widget is retired.
+CXP camera features remain available through the C++ API and the `Camera:<transport>:<dma>` parameter scope. Arbitrary applet-file selection was GUI-only and is no longer part of the package now that the widget is retired. This regression is accepted: arbitrary applet files return later through a host-provided file-selection API (a follow-up, after the refactor's features).
