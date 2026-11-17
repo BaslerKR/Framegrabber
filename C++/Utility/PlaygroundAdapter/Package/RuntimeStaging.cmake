@@ -84,7 +84,16 @@ function(framegrabber_prepare_playground_plugin_runtime target_name)
             PATTERN "qt.conf" EXCLUDE
             PATTERN "icu*" EXCLUDE
             PATTERN "qt5" EXCLUDE
-            PATTERN "qt6" EXCLUDE)
+            PATTERN "qt6" EXCLUDE
+            PATTERN "platforms" EXCLUDE
+            PATTERN "imageformats" EXCLUDE
+            PATTERN "styles" EXCLUDE
+            PATTERN "iconengines" EXCLUDE
+            PATTERN "tls" EXCLUDE
+            PATTERN "networkinformation" EXCLUDE
+            PATTERN "generic" EXCLUDE
+            PATTERN "sqldrivers" EXCLUDE
+            PATTERN "qt*" EXCLUDE)
         file(COPY "${logging_config}" DESTINATION "${payload_dir}/bin")
 
         get_filename_component(framegrabber_sdk_root
