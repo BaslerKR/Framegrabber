@@ -135,6 +135,7 @@ public:
     QString title() const override { return _titleState->title(); }
     DeviceSessionMetadata sessionMetadata() const override
     {
+        // Reproduces the retired camera tree's UI/FeatureTrees/<base64url(JSON([objectName]))>/Favorites namespace.
         return {QStringLiteral("UI/FeatureTrees/WyJGcmFtZWdyYWJiZXJDYW1lcmFGZWF0dXJlc1RyZWUiXQ==/Favorites")};
     }
     std::vector<DevicePluginDock> createDockWidgets(QWidget*) override { return {}; }
