@@ -1199,7 +1199,7 @@ void Framegrabber::adoptBoard(Fg_Struct* handle,
                               const std::string& appletPath,
                               const std::string& configurationPath)
 {
-    const AppletInfo applet = catalogEntry(appletPath);
+    const AppletInfo applet = catalogEntry(appletPath, board.displayName());
     SgcBoardHandle* cxpBoard = nullptr;
     if (applet.supportsCameraControl)
     {
@@ -1309,21 +1309,35 @@ std::vector<Framegrabber::AppletInfo> Framegrabber::appletCatalog() const
     return _appletCatalog;
 }
 
-Framegrabber::AppletInfo Framegrabber::catalogEntry(const std::string& appletPath) const
+Framegrabber::AppletInfo Framegrabber::catalogEntry(const std::string& appletPath,
+                                                    const std::string& boardName) const
 {
-    std::lock_guard<std::mutex> lock(_stateMutex);
-    for (const AppletInfo& applet : _appletCatalog)
     {
-        std::error_code error;
-        if (applet.path == appletPath
-            || (std::filesystem::equivalent(applet.path, appletPath, error) && !error))
+        std::lock_guard<std::mutex> lock(_stateMutex);
+        for (const AppletInfo& applet : _appletCatalog)
         {
-            return applet;
+            std::error_code error;
+            if (applet.path == appletPath
+                || (std::filesystem::equivalent(applet.path, appletPath, error) && !error))
+            {
+                return applet;
+            }
         }
     }
-    // A HAP outside the standard locations is loadable but not enumerated.
+    // A HAP outside the standard locations is loadable but not enumerated. Ask the SDK for its
+    // tags so a CoaXPress file can initialize camera control exactly as a catalog entry does.
     AppletInfo applet;
     applet.path = appletPath;
+    if (_system)
+    {
+        const FramegrabberSystem::AppletMetadata metadata =
+            _system->getAppletMetadata(boardName, appletPath);
+        applet.version = metadata.version;
+        applet.supportsCameraControl = metadata.supportsCameraControl;
+        if (!metadata.supportsCameraControl)
+            log("No SDK camera-control tag is available for an applet outside the installed "
+                "catalog; CoaXPress cameras are not initialized for this file.", true);
+    }
     return applet;
 }
 

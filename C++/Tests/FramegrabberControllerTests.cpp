@@ -28,6 +28,7 @@ private slots:
     void typedArgumentRequiredPrompts();
     void hostSelectedAppletFileLoadsAndValidatesPath();
     void hostSelectedUnicodePathUsesNativeEncoding();
+    void hostSelectedNonAsciiConfigurationPath();
     void boardlessLoadsUseTheSessionBoard();
     void parameterTreeCoversAppletAndCameraScopes();
     void parameterChangesDeliverSnapshotAndDelta();
@@ -473,8 +474,24 @@ void FramegrabberControllerTests::hostSelectedAppletFileLoadsAndValidatesPath()
 
 void FramegrabberControllerTests::hostSelectedUnicodePathUsesNativeEncoding()
 {
+    // Pick a character the active code page can encode: Hangul on CP949, U+00E9 on CP1252.
+    const QList<QChar> candidates{QChar(0xD55C), QChar(0x00E9), QChar(0x4E2D), QChar(0x0416)};
+    const auto roundTrips = [](const QChar character) {
+        const QString value = QStringLiteral("applet-") + character;
+        return QString::fromLocal8Bit(value.toLocal8Bit()) == value;
+    };
+    QChar chosen;
+    for (const QChar candidate : candidates) {
+#ifndef Q_OS_WIN
+        chosen = candidate;
+        break;
+#else
+        if (roundTrips(candidate)) { chosen = candidate; break; }
+#endif
+    }
+    QVERIFY(!chosen.isNull());
     const QString templatePath = QDir::tempPath() + QStringLiteral("/applet-")
-        + QChar(0x00E9) + QStringLiteral("-XXXXXX"); // U+00E9 is representable in common ANSI code pages
+        + chosen + QStringLiteral("-XXXXXX");
     QTemporaryDir directory(templatePath);
     QVERIFY2(directory.isValid(), qPrintable(directory.errorString()));
     const QString hapPath = QDir::toNativeSeparators(directory.filePath(QStringLiteral("unicode.hap")));
@@ -508,19 +525,100 @@ void FramegrabberControllerTests::hostSelectedUnicodePathUsesNativeEncoding()
     QVERIFY2(run.admission->succeeded(), run.admission->error()
         ? qPrintable(run.admission->error()->message) : "");
     QVERIFY(run.result.has_value());
-#ifdef Q_OS_WIN
-    if (QString::fromLocal8Bit(hapPath.toLocal8Bit()) != hapPath) {
-        QVERIFY(!run.result->succeeded());
-        QCOMPARE(run.result->error()->code, ApiErrorCode::InvalidArgument);
-        QVERIFY(run.result->error()->message.contains(QStringLiteral("Windows code page")));
-        return;
-    }
-#endif
     QVERIFY2(run.result->succeeded(), run.result->error()
         ? qPrintable(run.result->error()->message) : "");
     {
         std::lock_guard<std::mutex> lock(fake.state.mutex);
         QCOMPARE(fake.state.appletPath, expectedSdkPath(hapPath));
+    }
+#ifdef Q_OS_WIN
+    for (const QChar candidate : candidates) {
+        if (roundTrips(candidate)) continue;
+        const QString unsupported = QDir::toNativeSeparators(directory.filePath(
+            QStringLiteral("reject-") + candidate + QStringLiteral(".hap")));
+        QFile file(unsupported);
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        file.close();
+        auto refused = invoke(unsupported);
+        QVERIFY(refused.result.has_value());
+        QVERIFY(!refused.result->succeeded());
+        QCOMPARE(refused.result->error()->code, ApiErrorCode::InvalidArgument);
+        QVERIFY(refused.result->error()->message.contains(QStringLiteral("Windows code page")));
+        break;
+    }
+#endif
+}
+
+void FramegrabberControllerTests::hostSelectedNonAsciiConfigurationPath()
+{
+    const QList<QChar> candidates{QChar(0xD55C), QChar(0x00E9), QChar(0x4E2D), QChar(0x0416)};
+    const auto roundTrips = [](const QChar character) {
+        const QString value = QStringLiteral("mcf-") + character;
+        return QString::fromLocal8Bit(value.toLocal8Bit()) == value;
+    };
+    QChar chosen;
+    for (const QChar candidate : candidates) {
+#ifndef Q_OS_WIN
+        chosen = candidate;
+        break;
+#else
+        if (roundTrips(candidate)) { chosen = candidate; break; }
+#endif
+    }
+    QVERIFY(!chosen.isNull());
+    QTemporaryDir directory(QDir::tempPath() + QStringLiteral("/mcf-") + chosen + QStringLiteral("-XXXXXX"));
+    QVERIFY2(directory.isValid(), qPrintable(directory.errorString()));
+    const QString mcfPath = QDir::toNativeSeparators(directory.filePath(QStringLiteral("unicode.mcf")));
+    QFile mcf(mcfPath);
+    QVERIFY(mcf.open(QIODevice::WriteOnly));
+    mcf.close();
+
+    FramegrabberTestBackend fake;
+    FramegrabberSourceController controller(nullptr);
+    FramegrabberControllerTestAccess::install(controller, fake);
+    {
+        std::lock_guard<std::mutex> lock(fake.state.mutex);
+        fake.state.acceptAnyConfiguration = true;
+    }
+    struct ToolRun
+    {
+        std::optional<ApiResult<void>> admission;
+        std::optional<ApiResult<QJsonValue>> result;
+    };
+    const auto invoke = [&controller](const QString& name, const QString& path,
+                                      const QString& connection = {}) {
+        QJsonObject arguments{{QStringLiteral("board"), QStringLiteral("Test Board (SN1)")},
+                              {QStringLiteral("configuration"), path}};
+        if (!connection.isEmpty()) arguments.insert(QStringLiteral("connectionId"), connection);
+        ToolRun run;
+        Sink<ApiResult<QJsonValue>> sink;
+        run.admission = controller.requestTool(name, 1, std::move(arguments), sink.completion());
+        if (run.admission->succeeded() && sink.wait()) run.result = sink.take();
+        return run;
+    };
+
+    auto load = invoke(QStringLiteral("framegrabber.configuration-load"), mcfPath);
+    QVERIFY2(load.admission->succeeded(), load.admission->error()
+        ? qPrintable(load.admission->error()->message) : "");
+    QVERIFY(load.result.has_value());
+    QVERIFY2(load.result->succeeded(), load.result->error()
+        ? qPrintable(load.result->error()->message) : "");
+    {
+        std::lock_guard<std::mutex> lock(fake.state.mutex);
+        QCOMPARE(fake.state.configuration, expectedSdkPath(mcfPath));
+    }
+    const QString connection = load.result->value().toObject()
+        .value(QStringLiteral("connectionId")).toString();
+    QVERIFY(!connection.isEmpty());
+    auto save = invoke(QStringLiteral("framegrabber.configuration-save"), mcfPath, connection);
+    QVERIFY2(save.admission->succeeded(), save.admission->error()
+        ? qPrintable(save.admission->error()->message) : "");
+    QVERIFY(save.result.has_value());
+    QVERIFY2(save.result->succeeded(), save.result->error()
+        ? qPrintable(save.result->error()->message) : "");
+    {
+        std::lock_guard<std::mutex> lock(fake.state.mutex);
+        QCOMPARE(fake.state.savedConfiguration, expectedSdkPath(mcfPath));
     }
 }
 

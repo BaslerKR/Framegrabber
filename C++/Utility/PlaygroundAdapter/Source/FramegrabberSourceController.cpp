@@ -4,6 +4,7 @@
 #include "DeviceRuntime/Contract/SessionFrame.h"
 
 #include <QDebug>
+#include <QFileInfo>
 #include <QJsonArray>
 #include <QMetaObject>
 #include <QPointer>
@@ -85,7 +86,7 @@ std::filesystem::path nativeFileSystemPath(const QString& value)
 /** @brief The narrow Fg_Init(const char*) path uses the process ANSI code page on Windows.
  *  @return Empty with an actionable reason when the path cannot be represented losslessly.
  */
-std::string sdkAppletPath(const QString& value, QString& reason)
+std::string sdkFilePath(const QString& value, QString& reason)
 {
 #ifdef Q_OS_WIN
     const QByteArray local = value.toLocal8Bit();
@@ -299,9 +300,11 @@ QString loadPhase(const QString& name)
 
 QString loadMessage(const QString& name, const QString& argument)
 {
-    return name == QLatin1String("framegrabber.configuration-load")
+    // ApiProgress bounds messages to 256 characters; a longer report is dropped. Keep the full
+    // path in the result error, but bound the progress detail so the panel always updates.
+    return (name == QLatin1String("framegrabber.configuration-load")
         ? QStringLiteral("Applying configuration '%1'.").arg(argument)
-        : QStringLiteral("Loading applet '%1'.").arg(argument);
+        : QStringLiteral("Loading applet '%1'.").arg(argument)).left(256);
 }
 }
 
@@ -969,7 +972,7 @@ ApiResult<void> FramegrabberSourceController::admitControl(
                 std::error_code existsError;
                 const bool exists = std::filesystem::is_regular_file(path, existsError) && !existsError;
                 QString sdkReason;
-                const std::string sdkPath = sdkAppletPath(appletFile, sdkReason);
+                const std::string sdkPath = sdkFilePath(appletFile, sdkReason);
                 if (!isAllowedAppletFile(path)) {
                     failure = Result::failure(ApiErrorCode::InvalidArgument,
                         QStringLiteral("Unsupported applet file extension: use .hap, .dll or .so."));
@@ -982,13 +985,23 @@ ApiResult<void> FramegrabberSourceController::admitControl(
                     payload = Payload::State;
                 } else failure = failed(QStringLiteral("Failed to load the applet from '%1'.").arg(appletFile));
             } else if (name == "framegrabber.configuration-load") {
-                const std::string configuration = arguments.value("configuration").toString().toStdString();
+                const QString configurationText = arguments.value("configuration").toString();
+                QString configReason;
+                const std::string configuration = sdkFilePath(configurationText, configReason);
                 const std::string applet = arguments.value("applet").toString().toStdString();
-                report({loadPhase(name), loadMessage(name, QString::fromStdString(configuration)), 0, 1, false});
+                report({loadPhase(name), loadMessage(name, configurationText), 0, 1, false});
+                std::error_code configError;
+                const bool missing = QFileInfo(configurationText).isAbsolute()
+                    && !std::filesystem::is_regular_file(nativeFileSystemPath(configurationText), configError);
                 // The MCF names its own applet; apply the same catalog restriction to it.
                 const std::string configured = applet.empty() && backend->appletPathFromConfiguration
                     ? backend->appletPathFromConfiguration(configuration, boardName) : applet;
-                if (catalogApplet(*backend, configured).empty())
+                if (!configReason.isEmpty())
+                    failure = Result::failure(ApiErrorCode::InvalidArgument, configReason);
+                else if (missing)
+                    failure = Result::failure(ApiErrorCode::InvalidArgument,
+                        QStringLiteral("The configuration file does not exist: %1.").arg(configurationText));
+                else if (catalogApplet(*backend, configured).empty())
                     failure = Result::failure(ApiErrorCode::PermissionDenied,
                         "The configuration does not reference an applet listed by framegrabber.applets; pass one as applet.");
                 else if (backend->loadAppletConfiguration
@@ -996,8 +1009,12 @@ ApiResult<void> FramegrabberSourceController::admitControl(
                     payload = Payload::State;
                 else failure = failed("Failed to apply the configuration.");
             } else if (name == "framegrabber.configuration-save") {
-                if (backend->saveConfiguration
-                    && backend->saveConfiguration(arguments.value("configuration").toString().toStdString()))
+                const QString saveText = arguments.value("configuration").toString();
+                QString saveReason;
+                const std::string savePath = sdkFilePath(saveText, saveReason);
+                if (!saveReason.isEmpty())
+                    failure = Result::failure(ApiErrorCode::InvalidArgument, saveReason);
+                else if (backend->saveConfiguration && backend->saveConfiguration(savePath))
                     payload = Payload::State;
                 else failure = failed("Failed to save the configuration.");
             } else if (name == kDisconnect) {

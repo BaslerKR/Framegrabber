@@ -541,7 +541,8 @@ private:
     bool openUnlocked(const std::string& boardName);
     bool loadConfigurationUnlocked(const std::string& path);
     bool refreshAppletCatalogUnlocked(const FramegrabberSystem::BoardInfo& board);
-    [[nodiscard]] AppletInfo catalogEntry(const std::string& appletPath) const;
+    [[nodiscard]] AppletInfo catalogEntry(const std::string& appletPath,
+                                          const std::string& boardName) const;
     [[nodiscard]] std::string findCatalogApplet(const std::string& reference) const;
     [[nodiscard]] PreviousApplet capturePreviousApplet() const;
     void restorePreviousApplet(const PreviousApplet& previous);
