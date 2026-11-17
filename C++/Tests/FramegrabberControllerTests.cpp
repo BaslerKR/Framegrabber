@@ -12,6 +12,7 @@
 
 #include <atomic>
 #include <condition_variable>
+#include <cstdio>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -390,6 +391,7 @@ void FramegrabberControllerTests::typedArgumentRequiredPrompts()
 
 void FramegrabberControllerTests::hostSelectedAppletFileLoadsAndValidatesPath()
 {
+    std::fprintf(stderr, "host-file: enter\n"); std::fflush(stderr);
     QTemporaryDir directory;
     QVERIFY(directory.isValid());
     const QString hapPath = QDir::toNativeSeparators(directory.filePath(QStringLiteral("chosen.hap")));
@@ -416,7 +418,7 @@ void FramegrabberControllerTests::hostSelectedAppletFileLoadsAndValidatesPath()
         return run;
     };
 
-    qInfo() << "host-file: missing path";
+    std::fprintf(stderr, "host-file: missing path\n"); std::fflush(stderr);
     auto missing = invoke(QStringLiteral("C:/missing/nowhere.hap"));
     QVERIFY2(missing.admission->succeeded(), missing.admission->error()
         ? qPrintable(missing.admission->error()->message) : "");
@@ -425,7 +427,7 @@ void FramegrabberControllerTests::hostSelectedAppletFileLoadsAndValidatesPath()
     QCOMPARE(missing.result->error()->code, ApiErrorCode::InvalidArgument);
     QVERIFY(missing.result->error()->message.contains(QStringLiteral("does not exist")));
 
-    qInfo() << "host-file: wrong extension";
+    std::fprintf(stderr, "host-file: wrong extension\n"); std::fflush(stderr);
     auto wrongExtension = invoke(QStringLiteral("C:/missing/nowhere.txt"));
     QVERIFY(wrongExtension.result.has_value());
     QVERIFY(!wrongExtension.result->succeeded());
@@ -434,7 +436,7 @@ void FramegrabberControllerTests::hostSelectedAppletFileLoadsAndValidatesPath()
         QStringLiteral("Unsupported applet file extension")));
 
     // A valid path outside the installed catalog reaches Fg_Init and reports its load reason.
-    qInfo() << "host-file: load failure" << hapPath;
+    std::fprintf(stderr, "host-file: load failure\n"); std::fflush(stderr);
     auto loadFailure = invoke(hapPath);
     QVERIFY(loadFailure.result.has_value());
     QVERIFY(!loadFailure.result->succeeded());
@@ -450,7 +452,7 @@ void FramegrabberControllerTests::hostSelectedAppletFileLoadsAndValidatesPath()
         chosen.path = hapPath.toStdString();
         fake.state.catalog.push_back(chosen);
     }
-    qInfo() << "host-file: successful load";
+    std::fprintf(stderr, "host-file: successful load\n"); std::fflush(stderr);
     auto loaded = invoke(hapPath);
     QVERIFY2(loaded.admission->succeeded(), loaded.admission->error()
         ? qPrintable(loaded.admission->error()->message) : "");
