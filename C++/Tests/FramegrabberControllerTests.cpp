@@ -829,6 +829,7 @@ void FramegrabberControllerTests::boardlessLoadsUseTheSessionBoard()
 
 void FramegrabberControllerTests::parameterTreeCoversAppletAndCameraScopes()
 {
+    std::fprintf(stderr, "P1\n"); std::fflush(stderr);
     FramegrabberTestBackend fake;
     FramegrabberSourceController controller(nullptr);
     FramegrabberControllerTestAccess::install(controller, fake);
@@ -988,6 +989,7 @@ void FramegrabberControllerTests::parameterTreeCoversAppletAndCameraScopes()
 
 void FramegrabberControllerTests::parameterChangesDeliverSnapshotAndDelta()
 {
+    std::fprintf(stderr, "P2\n"); std::fflush(stderr);
     FramegrabberTestBackend fake;
     FramegrabberSourceController controller(nullptr);
     FramegrabberControllerTestAccess::install(controller, fake);
@@ -1092,6 +1094,7 @@ void FramegrabberControllerTests::parameterChangesDeliverSnapshotAndDelta()
 
 void FramegrabberControllerTests::parameterAdmissionsStayAvailableDuringObservation()
 {
+    std::fprintf(stderr, "P3\n"); std::fflush(stderr);
     FramegrabberTestBackend fake;
     FramegrabberSourceController controller(nullptr);
     FramegrabberControllerTestAccess::install(controller, fake);
@@ -1145,6 +1148,7 @@ void FramegrabberControllerTests::parameterAdmissionsStayAvailableDuringObservat
 
 void FramegrabberControllerTests::cameraRefreshReplacesTheCachedFeatureTree()
 {
+    std::fprintf(stderr, "P4\n"); std::fflush(stderr);
     FramegrabberTestBackend fake;
     FramegrabberSourceController controller(nullptr);
     FramegrabberControllerTestAccess::install(controller, fake);
@@ -1199,6 +1203,7 @@ void FramegrabberControllerTests::cameraRefreshReplacesTheCachedFeatureTree()
 }
 void FramegrabberControllerTests::notificationQueueOverflowsToResync()
 {
+    std::fprintf(stderr, "P5\n"); std::fflush(stderr);
     framegrabber::ParameterNotificationHub hub(
         [](const std::string& connection, const std::string& subscription) {
             DeviceParameterChange change;
