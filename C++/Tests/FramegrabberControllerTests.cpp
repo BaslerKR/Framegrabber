@@ -670,6 +670,7 @@ void FramegrabberControllerTests::hostSelectedNonAsciiConfigurationPath()
         break;
     }
 #endif
+    std::fprintf(stderr, "C7\n"); std::fflush(stderr);
 }
 
 void FramegrabberControllerTests::nonCatalogAppletMetadataGatesCameraControl()
@@ -692,11 +693,14 @@ void FramegrabberControllerTests::nonCatalogAppletMetadataGatesCameraControl()
         [](const std::string&, const std::string&) { return FramegrabberSystem::AppletMetadata{}; });
     std::fprintf(stderr, "M2\n"); std::fflush(stderr);
     QVERIFY(!miss.supportsCameraControl);
+    std::fprintf(stderr, "M3\n"); std::fflush(stderr);
     QVERIFY(miss.version.empty());
+    std::fprintf(stderr, "M4\n"); std::fflush(stderr);
 }
 
 void FramegrabberControllerTests::boardlessLoadsUseTheSessionBoard()
 {
+    std::fprintf(stderr, "B1\n"); std::fflush(stderr);
     FramegrabberTestBackend fake;
     FramegrabberSourceController controller(nullptr);
     FramegrabberControllerTestAccess::install(controller, fake);
