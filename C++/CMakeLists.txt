@@ -260,7 +260,7 @@ if(FRAMEGRABBER_BUILD_PLAYGROUND_PLUGIN)
             Qt6::Concurrent
             Qt6::Xml
         )
-        add_test(NAME FramegrabberControllerTests COMMAND FramegrabberControllerTests -o ../logs/controller-results.txt,txt)
+        add_test(NAME FramegrabberControllerTests COMMAND FramegrabberControllerTests)
         set_tests_properties(FramegrabberControllerTests PROPERTIES
             ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 

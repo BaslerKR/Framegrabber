@@ -524,12 +524,14 @@ void FramegrabberControllerTests::hostSelectedUnicodePathUsesNativeEncoding()
         std::optional<ApiResult<void>> admission;
         std::optional<ApiResult<QJsonValue>> result;
     };
-    const auto invoke = [&controller](const QString& path) {
+    const auto invoke = [&controller](const QString& path, const QString& connection = {}) {
+        QJsonObject arguments{{QStringLiteral("board"), QStringLiteral("Test Board (SN1)")},
+                              {QStringLiteral("appletFile"), path}};
+        if (!connection.isEmpty()) arguments.insert(QStringLiteral("connectionId"), connection);
         ToolRun run;
         Sink<ApiResult<QJsonValue>> sink;
         run.admission = controller.requestTool(QStringLiteral("framegrabber.applet-load-file"), 1,
-            QJsonObject{{QStringLiteral("board"), QStringLiteral("Test Board (SN1)")},
-                        {QStringLiteral("appletFile"), path}}, sink.completion());
+                                               std::move(arguments), sink.completion());
         if (run.admission->succeeded() && sink.wait()) run.result = sink.take();
         return run;
     };
@@ -552,7 +554,10 @@ void FramegrabberControllerTests::hostSelectedUnicodePathUsesNativeEncoding()
         QFile file(unsupported);
         QVERIFY(file.open(QIODevice::WriteOnly));
         file.close();
-        auto refused = invoke(unsupported);
+        const QString connection = run.result->value().toObject()
+            .value(QStringLiteral("connectionId")).toString();
+        QVERIFY(!connection.isEmpty());
+        auto refused = invoke(unsupported, connection);
         QVERIFY(refused.result.has_value());
         QVERIFY(!refused.result->succeeded());
         QCOMPARE(refused.result->error()->code, ApiErrorCode::InvalidArgument);
