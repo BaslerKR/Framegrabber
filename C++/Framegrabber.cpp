@@ -1199,7 +1199,7 @@ void Framegrabber::adoptBoard(Fg_Struct* handle,
                               const std::string& appletPath,
                               const std::string& configurationPath)
 {
-    const AppletInfo applet = catalogEntry(appletPath);
+    const AppletInfo applet = catalogEntry(appletPath, board.displayName());
     SgcBoardHandle* cxpBoard = nullptr;
     if (applet.supportsCameraControl)
     {
@@ -1309,10 +1309,28 @@ std::vector<Framegrabber::AppletInfo> Framegrabber::appletCatalog() const
     return _appletCatalog;
 }
 
-Framegrabber::AppletInfo Framegrabber::catalogEntry(const std::string& appletPath) const
+Framegrabber::AppletInfo Framegrabber::catalogEntry(const std::string& appletPath,
+                                                    const std::string& boardName) const
 {
-    std::lock_guard<std::mutex> lock(_stateMutex);
-    for (const AppletInfo& applet : _appletCatalog)
+    std::vector<AppletInfo> catalog;
+    {
+        std::lock_guard<std::mutex> lock(_stateMutex);
+        catalog = _appletCatalog;
+    }
+    return resolveCatalogEntry(catalog, appletPath, boardName,
+        [this](const std::string& board, const std::string& path) {
+            return _system ? _system->getAppletMetadata(board, path)
+                           : FramegrabberSystem::AppletMetadata{};
+        },
+        [this](const std::string& message, const bool warning) { log(message, warning); });
+}
+
+Framegrabber::AppletInfo Framegrabber::resolveCatalogEntry(const std::vector<AppletInfo>& catalog,
+    const std::string& appletPath, const std::string& boardName,
+    const std::function<FramegrabberSystem::AppletMetadata(const std::string&, const std::string&)>& lookup,
+    const std::function<void(const std::string&, bool)>& log)
+{
+    for (const AppletInfo& applet : catalog)
     {
         std::error_code error;
         if (applet.path == appletPath
@@ -1321,9 +1339,18 @@ Framegrabber::AppletInfo Framegrabber::catalogEntry(const std::string& appletPat
             return applet;
         }
     }
-    // A HAP outside the standard locations is loadable but not enumerated.
+    // A HAP outside the standard locations is loadable but not enumerated. Ask the SDK for its
+    // tags so a CoaXPress file can initialize camera control exactly as a catalog entry does.
     AppletInfo applet;
     applet.path = appletPath;
+    const FramegrabberSystem::AppletMetadata metadata = lookup
+        ? lookup(boardName, appletPath)
+        : FramegrabberSystem::AppletMetadata{};
+    applet.version = metadata.version;
+    applet.supportsCameraControl = metadata.supportsCameraControl;
+    if (!metadata.supportsCameraControl && log)
+        log("No SDK camera-control tag is available for an applet outside the installed "
+            "catalog; CoaXPress cameras are not initialized for this file.", true);
     return applet;
 }
 

@@ -44,19 +44,7 @@ The optional Playground device plugin is a separate MODULE. Enable `FRAMEGRABBER
   active, else the power-up applet. The connected state carries the stable
   `dma.<index>` source ids. Board discovery remains a session-creation step, and
   Live stays on `source.start`/`source.stop`.
-- **Declared actions.** `framegrabber.applets-refresh`,
-  `framegrabber.applet-load`, `framegrabber.configuration-load`,
-  `framegrabber.configuration-save` and `framegrabber.cameras-refresh` publish
-  semantic action and icon ids from the shared Resources set. Applet load
-  declares an enum prompt over the installed catalog; duplicated applet names
-  fall back to their exact catalog paths so every option loads. A missing or
-  non-catalog applet returns the typed `argument_required` prompt without
-  effects. The callable route never loads a native library from an arbitrary
-  path, which stays a GUI choice. Configuration load declares a file-open prompt and offers
-  only installed applets when the MCF reference is outside the catalog;
-  configuration save declares a file-save prompt. Load actions report bounded
-  progress and answer cancellation with an explicit unsupported reason because
-  `Fg_Init`/`Fg_InitConfig` cannot be cancelled.
+- **Declared actions.** `framegrabber.applets-refresh`, `framegrabber.applet-load`, `framegrabber.applet-load-file`, `framegrabber.configuration-load`, `framegrabber.configuration-save` and `framegrabber.cameras-refresh` publish semantic action and icon ids from the shared Resources set. Applet load declares an enum prompt over the installed catalog; duplicated applet names fall back to their exact catalog paths so every option loads. A missing or non-catalog applet returns the typed `argument_required` prompt without effects. `framegrabber.applet-load-file` declares a Host-provided `file-open` input with applet name filters; the Host dialog supplies the path and the module validates it before `Fg_Init`. Both `file-open` actions (`applet-load-file` and `configuration-load`) are panel-only: MCP, scripts and `tools.invoke` refuse a path with an explicit reason, while the catalog route remains callable. Configuration load offers only installed applets when the MCF reference is outside the catalog; configuration save declares a file-save prompt. Load actions report bounded progress and answer cancellation with an explicit unsupported reason because `Fg_Init`/`Fg_InitConfig` cannot be cancelled.
 - **Parameter scopes.** `Applet:<dma>` exposes the applet access names and
   `Camera:<transport>:<dma>` exposes CoaXPress GenICam features. Descriptors
   carry category paths, display text, units, visibility, representation,
@@ -199,7 +187,8 @@ Other tools, and the lifecycle disconnect and Single, run on one worker and hold
 | --- | --- |
 | `framegrabber.applets-refresh` | Re-enumerates applets and replaces the cached catalog; only while released (device) |
 | `framegrabber.applet-load` | Loads `{applet, connectionId?, board?}` (device); an omitted board uses the session's connected board |
-| `framegrabber.configuration-load` | Loads `{configuration, applet?, connectionId?, board?}` (device); an omitted board uses the session's connected board |
+| `framegrabber.applet-load-file` | Loads `{appletFile, connectionId?, board?}` from a Host-chosen file (device, panel-only); the plugin validates the path before `Fg_Init` |
+| `framegrabber.configuration-load` | Loads `{configuration, applet?, connectionId?, board?}` (device, panel-only); the `file-open` path is chosen in the Host dialog and cannot be supplied through `tools.invoke` |
 | `framegrabber.configuration-save` | Writes `{connectionId, configuration}` to a host file (device) |
 | `framegrabber.cameras-refresh` | Restarts CXP discovery (device) |
 
@@ -218,4 +207,4 @@ Applet parameters use the scope `Applet:<dma>` and their SDK access names (for e
 - Each write is revalidated against a fresh observation and reports the actual readback and effect.
 - Commands are executed from the parameter's declared SDK type, so write-only commands work.
 
-CXP camera features remain available through the C++ API and the `Camera:<transport>:<dma>` parameter scope. Arbitrary applet-file selection was GUI-only and is no longer part of the package now that the widget is retired. This regression is accepted: arbitrary applet files return later through a host-provided file-selection API (a follow-up, after the refactor's features).
+CXP camera features remain available through the C++ API and the `Camera:<transport>:<dma>` parameter scope. A CoaXPress applet loaded from a custom file initializes camera control when the SDK reports its tag; when no tag is available the board opens without CXP discovery and the module logs that limitation.

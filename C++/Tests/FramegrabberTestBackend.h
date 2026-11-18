@@ -45,6 +45,12 @@ struct FramegrabberTestState
     std::string configuration;
     std::string savedConfiguration;
     std::string outsideMcfApplet = "C:/outside/legacy.hap";
+    /** @brief Let an opt-in test accept an existing external applet file without cataloging it. */
+    bool acceptAnyAppletFile = false;
+    /** @brief Let an opt-in test apply a non-catalog MCF path without changing the fake catalog. */
+    bool acceptAnyConfiguration = false;
+    /** @brief Let an opt-in test make an MCF reference an applet outside the catalog. */
+    bool mcfReferencesOutsideApplet = false;
     bool extendedCameraXml = false;
     bool cameraXmlEmpty = false;
 
@@ -301,6 +307,17 @@ struct FramegrabberTestBackend
         };
         result.loadApplet = [shared](const std::string& reference, const std::string& board) {
             std::lock_guard<std::mutex> lock(shared->mutex);
+            if (shared->acceptAnyAppletFile && !reference.empty())
+            {
+                shared->opened = true;
+                shared->grabbing = false;
+                ++shared->generation;
+                shared->appletName = reference;
+                shared->appletPath = reference;
+                shared->loadedBoard = board;
+                shared->configuration.clear();
+                return true;
+            }
             for (const auto& applet : shared->catalog)
             {
                 if (applet.name != reference && applet.file != reference && applet.path != reference)
@@ -318,6 +335,11 @@ struct FramegrabberTestBackend
         };
         result.appletPathFromConfiguration = [shared](const std::string& configuration, const std::string&) {
             std::lock_guard<std::mutex> lock(shared->mutex);
+            if (shared->mcfReferencesOutsideApplet && !configuration.empty())
+                return shared->outsideMcfApplet;
+            if (shared->acceptAnyConfiguration && !configuration.empty()
+                && !shared->catalog.empty())
+                return shared->catalog.front().path;
             if (configuration == "outside.mcf") return shared->outsideMcfApplet;
             if (configuration == "installed.mcf" && !shared->catalog.empty())
                 return shared->catalog.front().path;
@@ -328,7 +350,8 @@ struct FramegrabberTestBackend
                 std::lock_guard<std::mutex> lock(shared->mutex);
                 std::string path = applet;
                 if (path.empty())
-                    path = configuration == "installed.mcf" && !shared->catalog.empty()
+                    path = (shared->acceptAnyConfiguration || configuration == "installed.mcf")
+                        && !shared->catalog.empty()
                         ? shared->catalog.front().path
                         : shared->outsideMcfApplet;
                 shared->opened = true;

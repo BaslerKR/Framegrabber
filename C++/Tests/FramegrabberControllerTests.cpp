@@ -3,11 +3,16 @@
 #include "FramegrabberSourceController.h"
 #include "FramegrabberTestBackend.h"
 
+#include <QDir>
+#include <QFile>
+#include <QFileInfo>
 #include <QJsonArray>
 #include <QJsonObject>
+#include <QTemporaryDir>
 
 #include <atomic>
 #include <condition_variable>
+#include <functional>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -22,6 +27,10 @@ private slots:
     void connectLoadsOpeningAppletAndOwnsDmaSources();
     void declaredActionsCarryPresentationAndPromptKinds();
     void typedArgumentRequiredPrompts();
+    void hostSelectedAppletFileLoadsAndValidatesPath();
+    void hostSelectedUnicodePathUsesNativeEncoding();
+    void hostSelectedNonAsciiConfigurationPath();
+    void nonCatalogAppletMetadataGatesCameraControl();
     void boardlessLoadsUseTheSessionBoard();
     void parameterTreeCoversAppletAndCameraScopes();
     void parameterChangesDeliverSnapshotAndDelta();
@@ -123,7 +132,29 @@ const DeviceParameterDescriptor* findParameter(
     return nullptr;
 }
 
+/** @brief The narrow SDK path is local 8-bit on Windows and UTF-8 elsewhere. */
+std::string expectedSdkPath(const QString& path)
+{
+#ifdef Q_OS_WIN
+    const QByteArray local = path.toLocal8Bit();
+    return std::string(local.constData(), static_cast<std::size_t>(local.size()));
+#else
+    return path.toStdString();
+#endif
+}
+
 } // namespace
+
+/** @brief Calls the pure catalog/metadata resolution with an injected metadata result. */
+struct FramegrabberCatalogTestAccess
+{
+    static Framegrabber::AppletInfo entry(const std::string& path, const std::string& board,
+        const std::function<FramegrabberSystem::AppletMetadata(const std::string&, const std::string&)>& lookup,
+        const std::function<void(const std::string&, bool)>& log = {})
+    {
+        return Framegrabber::resolveCatalogEntry({}, path, board, lookup, log);
+    }
+};
 
 void FramegrabberControllerTests::declaresHierarchicalBoardConnection()
 {
@@ -227,8 +258,8 @@ void FramegrabberControllerTests::declaredActionsCarryPresentationAndPromptKinds
 
     const auto descriptors = controller.toolDescriptors();
     const QStringList actions{"framegrabber.applets-refresh", "framegrabber.applet-load",
-        "framegrabber.configuration-load", "framegrabber.configuration-save",
-        "framegrabber.cameras-refresh"};
+        "framegrabber.applet-load-file", "framegrabber.configuration-load",
+        "framegrabber.configuration-save", "framegrabber.cameras-refresh"};
     for (const auto* name : {"framegrabber.state", "framegrabber.boards", "framegrabber.applets",
              "framegrabber.cameras"})
     {
@@ -264,6 +295,21 @@ void FramegrabberControllerTests::declaredActionsCarryPresentationAndPromptKinds
     // A duplicated applet name falls back to the exact catalog path so the option can load.
     QVERIFY(values.contains(QStringLiteral("C:/applets/Second.hap")));
     QVERIFY(values.contains(QStringLiteral("C:/applets/Second-alt.hap")));
+
+    const auto* fileLoad = findDescriptor(descriptors, "framegrabber.applet-load-file");
+    QVERIFY(fileLoad != nullptr);
+    QCOMPARE(fileLoad->inputSchema.value("required").toArray(),
+        QJsonArray{QStringLiteral("appletFile")});
+    QVERIFY(fileLoad->inputSchema.value("properties").toObject().contains(QStringLiteral("board")));
+    QVERIFY(fileLoad->inputSchema.value("properties").toObject()
+        .contains(QStringLiteral("connectionId")));
+    const auto appletFile = fileLoad->inputSchema.value("properties").toObject()
+        .value("appletFile").toObject();
+    QCOMPARE(appletFile.value("format").toString(), QStringLiteral("file-open"));
+    QCOMPARE(appletFile.value("maxLength").toInt(), 4096);
+    QCOMPARE(appletFile.value("title").toString(), QStringLiteral("Applet file"));
+    QVERIFY(appletFile.value("nameFilters").toArray().contains(
+        QStringLiteral("Applet libraries (*.hap *.dll *.so)")));
 
     const auto* configuration = findDescriptor(descriptors, "framegrabber.configuration-load");
     QVERIFY(configuration != nullptr);
@@ -369,6 +415,285 @@ void FramegrabberControllerTests::typedArgumentRequiredPrompts()
         QVERIFY(fake.state.opened);
         QCOMPARE(fake.state.appletName, std::string("Acquisition"));
     }
+}
+
+void FramegrabberControllerTests::hostSelectedAppletFileLoadsAndValidatesPath()
+{
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const QString hapPath = QDir::toNativeSeparators(directory.filePath(QStringLiteral("chosen.hap")));
+    QFile hap(hapPath);
+    QVERIFY(hap.open(QIODevice::WriteOnly));
+    hap.close();
+
+    FramegrabberTestBackend fake;
+    FramegrabberSourceController controller(nullptr);
+    FramegrabberControllerTestAccess::install(controller, fake);
+
+    struct ToolRun
+    {
+        std::optional<ApiResult<void>> admission;
+        std::optional<ApiResult<QJsonValue>> result;
+    };
+    const auto invoke = [&controller](const QString& path) {
+        ToolRun run;
+        Sink<ApiResult<QJsonValue>> sink;
+        run.admission = controller.requestTool(QStringLiteral("framegrabber.applet-load-file"), 1,
+            QJsonObject{{QStringLiteral("board"), QStringLiteral("Test Board (SN1)")},
+                        {QStringLiteral("appletFile"), path}}, sink.completion());
+        if (run.admission->succeeded() && sink.wait()) run.result = sink.take();
+        return run;
+    };
+
+    auto missing = invoke(QStringLiteral("C:/missing/nowhere.hap"));
+    QVERIFY2(missing.admission && missing.admission->succeeded(), missing.admission->error()
+        ? qPrintable(missing.admission->error()->message) : "");
+    QVERIFY(missing.result.has_value());
+    QVERIFY(!missing.result->succeeded());
+    QCOMPARE(missing.result->error()->code, ApiErrorCode::InvalidArgument);
+    QVERIFY(missing.result->error()->message.contains(QStringLiteral("does not exist")));
+
+    auto wrongExtension = invoke(QStringLiteral("C:/missing/nowhere.txt"));
+    QVERIFY(wrongExtension.result.has_value());
+    QVERIFY(!wrongExtension.result->succeeded());
+    QCOMPARE(wrongExtension.result->error()->code, ApiErrorCode::InvalidArgument);
+    QVERIFY(wrongExtension.result->error()->message.contains(
+        QStringLiteral("Unsupported applet file extension")));
+
+    // A valid path outside the installed catalog reaches Fg_Init and reports its load reason.
+    auto loadFailure = invoke(hapPath);
+    QVERIFY(loadFailure.result.has_value());
+    QVERIFY(!loadFailure.result->succeeded());
+    QCOMPARE(loadFailure.result->error()->code, ApiErrorCode::Unavailable);
+    QVERIFY(loadFailure.result->error()->message.contains(
+        QStringLiteral("Failed to load the applet from")));
+
+    // An existing file outside the catalog reaches the backend without being cataloged.
+    {
+        std::lock_guard<std::mutex> lock(fake.state.mutex);
+        fake.state.acceptAnyAppletFile = true;
+    }
+    auto loaded = invoke(hapPath);
+    QVERIFY2(loaded.admission->succeeded(), loaded.admission->error()
+        ? qPrintable(loaded.admission->error()->message) : "");
+    QVERIFY(loaded.result.has_value());
+    QVERIFY2(loaded.result->succeeded(), loaded.result->error()
+        ? qPrintable(loaded.result->error()->message) : "");
+    {
+        std::lock_guard<std::mutex> lock(fake.state.mutex);
+        QCOMPARE(fake.state.appletPath, expectedSdkPath(hapPath));
+    }
+}
+
+void FramegrabberControllerTests::hostSelectedUnicodePathUsesNativeEncoding()
+{
+    // Pick a character the active code page can encode: Hangul on CP949, U+00E9 on CP1252.
+    const QList<QChar> candidates{QChar(0xD55C), QChar(0x00E9), QChar(0x4E2D), QChar(0x0416)};
+    const auto roundTrips = [](const QChar character) {
+        const QString value = QStringLiteral("applet-") + character;
+        return QString::fromLocal8Bit(value.toLocal8Bit()) == value;
+    };
+    QChar chosen;
+    for (const QChar candidate : candidates) {
+#ifndef Q_OS_WIN
+        chosen = candidate;
+        break;
+#else
+        if (roundTrips(candidate)) { chosen = candidate; break; }
+#endif
+    }
+    QVERIFY(!chosen.isNull());
+    const QString templatePath = QDir::tempPath() + QStringLiteral("/applet-")
+        + chosen + QStringLiteral("-XXXXXX");
+    QTemporaryDir directory(templatePath);
+    QVERIFY2(directory.isValid(), qPrintable(directory.errorString()));
+    const QString hapPath = QDir::toNativeSeparators(directory.filePath(QStringLiteral("unicode.hap")));
+    QFile hap(hapPath);
+    QVERIFY(hap.open(QIODevice::WriteOnly));
+    hap.close();
+
+    FramegrabberTestBackend fake;
+    FramegrabberSourceController controller(nullptr);
+    FramegrabberControllerTestAccess::install(controller, fake);
+    {
+        std::lock_guard<std::mutex> lock(fake.state.mutex);
+        fake.state.acceptAnyAppletFile = true;
+    }
+    struct ToolRun
+    {
+        std::optional<ApiResult<void>> admission;
+        std::optional<ApiResult<QJsonValue>> result;
+    };
+    const auto invoke = [&controller](const QString& path, const QString& connection = {}) {
+        QJsonObject arguments{{QStringLiteral("board"), QStringLiteral("Test Board (SN1)")},
+                              {QStringLiteral("appletFile"), path}};
+        if (!connection.isEmpty()) arguments.insert(QStringLiteral("connectionId"), connection);
+        ToolRun run;
+        Sink<ApiResult<QJsonValue>> sink;
+        run.admission = controller.requestTool(QStringLiteral("framegrabber.applet-load-file"), 1,
+                                               std::move(arguments), sink.completion());
+        if (run.admission->succeeded() && sink.wait()) run.result = sink.take();
+        return run;
+    };
+
+    auto run = invoke(hapPath);
+    QVERIFY2(run.admission->succeeded(), run.admission->error()
+        ? qPrintable(run.admission->error()->message) : "");
+    QVERIFY(run.result.has_value());
+    QVERIFY2(run.result->succeeded(), run.result->error()
+        ? qPrintable(run.result->error()->message) : "");
+    {
+        std::lock_guard<std::mutex> lock(fake.state.mutex);
+        QCOMPARE(fake.state.appletPath, expectedSdkPath(hapPath));
+    }
+#ifdef Q_OS_WIN
+    for (const QChar candidate : candidates) {
+        if (roundTrips(candidate)) continue;
+        const QString unsupported = QDir::toNativeSeparators(directory.filePath(
+            QStringLiteral("reject-") + candidate + QStringLiteral(".hap")));
+        QFile file(unsupported);
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        file.close();
+        const QString connection = run.result->value().toObject()
+            .value(QStringLiteral("connectionId")).toString();
+        QVERIFY(!connection.isEmpty());
+        auto refused = invoke(unsupported, connection);
+        QVERIFY(refused.result.has_value());
+        QVERIFY(!refused.result->succeeded());
+        QCOMPARE(refused.result->error()->code, ApiErrorCode::InvalidArgument);
+        QVERIFY(refused.result->error()->message.contains(QStringLiteral("Windows code page")));
+        break;
+    }
+#endif
+}
+
+void FramegrabberControllerTests::hostSelectedNonAsciiConfigurationPath()
+{
+    const QList<QChar> candidates{QChar(0xD55C), QChar(0x00E9), QChar(0x4E2D), QChar(0x0416)};
+    const auto roundTrips = [](const QChar character) {
+        const QString value = QStringLiteral("mcf-") + character;
+        return QString::fromLocal8Bit(value.toLocal8Bit()) == value;
+    };
+    QChar chosen;
+    for (const QChar candidate : candidates) {
+#ifndef Q_OS_WIN
+        chosen = candidate;
+        break;
+#else
+        if (roundTrips(candidate)) { chosen = candidate; break; }
+#endif
+    }
+    QVERIFY(!chosen.isNull());
+    QTemporaryDir directory(QDir::tempPath() + QStringLiteral("/mcf-") + chosen + QStringLiteral("-XXXXXX"));
+    QVERIFY2(directory.isValid(), qPrintable(directory.errorString()));
+    const QString mcfPath = QDir::toNativeSeparators(directory.filePath(QStringLiteral("unicode.mcf")));
+    QFile mcf(mcfPath);
+    QVERIFY(mcf.open(QIODevice::WriteOnly));
+    mcf.close();
+
+    FramegrabberTestBackend fake;
+    FramegrabberSourceController controller(nullptr);
+    FramegrabberControllerTestAccess::install(controller, fake);
+    {
+        std::lock_guard<std::mutex> lock(fake.state.mutex);
+        fake.state.acceptAnyConfiguration = true;
+    }
+    struct ToolRun
+    {
+        std::optional<ApiResult<void>> admission;
+        std::optional<ApiResult<QJsonValue>> result;
+    };
+    const auto invoke = [&controller](const QString& name, const QString& path,
+                                      const QString& connection = {}) {
+        QJsonObject arguments{{QStringLiteral("configuration"), path}};
+        if (name == QLatin1String("framegrabber.configuration-load"))
+            arguments.insert(QStringLiteral("board"), QStringLiteral("Test Board (SN1)"));
+        if (!connection.isEmpty()) arguments.insert(QStringLiteral("connectionId"), connection);
+        ToolRun run;
+        Sink<ApiResult<QJsonValue>> sink;
+        run.admission = controller.requestTool(name, 1, std::move(arguments), sink.completion());
+        if (run.admission->succeeded() && sink.wait()) run.result = sink.take();
+        return run;
+    };
+
+    auto load = invoke(QStringLiteral("framegrabber.configuration-load"), mcfPath);
+    QVERIFY2(load.admission->succeeded(), load.admission->error()
+        ? qPrintable(load.admission->error()->message) : "");
+    QVERIFY(load.result.has_value());
+    QVERIFY2(load.result->succeeded(), load.result->error()
+        ? qPrintable(load.result->error()->message) : "");
+    {
+        std::lock_guard<std::mutex> lock(fake.state.mutex);
+        QCOMPARE(fake.state.configuration, expectedSdkPath(mcfPath));
+    }
+    const QString connection = load.result->value().toObject()
+        .value(QStringLiteral("connectionId")).toString();
+    QVERIFY(!connection.isEmpty());
+    auto save = invoke(QStringLiteral("framegrabber.configuration-save"), mcfPath, connection);
+    QVERIFY2(save.admission->succeeded(), save.admission->error()
+        ? qPrintable(save.admission->error()->message) : "");
+    QVERIFY(save.result.has_value());
+    QVERIFY2(save.result->succeeded(), save.result->error()
+        ? qPrintable(save.result->error()->message) : "");
+    {
+        std::lock_guard<std::mutex> lock(fake.state.mutex);
+        QCOMPARE(fake.state.savedConfiguration, expectedSdkPath(mcfPath));
+    }
+
+    // A non-catalog applet named by the non-ASCII MCF must still offer the enum prompt.
+    {
+        std::lock_guard<std::mutex> lock(fake.state.mutex);
+        fake.state.mcfReferencesOutsideApplet = true;
+    }
+    auto outside = invoke(QStringLiteral("framegrabber.configuration-load"), mcfPath, connection);
+    QVERIFY(outside.result.has_value());
+    QVERIFY(!outside.result->succeeded());
+    QCOMPARE(outside.result->error()->code, ApiErrorCode::ArgumentRequired);
+    QCOMPARE(outside.result->error()->details.value(QStringLiteral("argumentRequired")).toObject()
+                 .value(QStringLiteral("argument")).toString(), QStringLiteral("applet"));
+
+#ifdef Q_OS_WIN
+    for (const QChar candidate : candidates) {
+        if (roundTrips(candidate)) continue;
+        const QString unsupported = QDir::toNativeSeparators(directory.filePath(
+            QStringLiteral("reject-") + candidate + QStringLiteral(".mcf")));
+        QFile file(unsupported);
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        file.close();
+        auto refused = invoke(QStringLiteral("framegrabber.configuration-load"), unsupported);
+        QVERIFY(refused.admission.has_value());
+        QVERIFY(!refused.admission->succeeded());
+        QCOMPARE(refused.admission->error()->code, ApiErrorCode::InvalidArgument);
+        QVERIFY(refused.admission->error()->message.contains(QStringLiteral("file path cannot be represented")));
+        break;
+    }
+#endif
+}
+
+void FramegrabberControllerTests::nonCatalogAppletMetadataGatesCameraControl()
+{
+    const std::string path = "C:/custom/chosen.hap";
+    const std::string board = "Test Board (SN1)";
+    QString loggedLimitation;
+    const auto log = [&loggedLimitation](const std::string& message, bool warning) {
+        QVERIFY(warning);
+        loggedLimitation = QString::fromStdString(message);
+    };
+    const auto hit = FramegrabberCatalogTestAccess::entry(path, board,
+        [](const std::string&, const std::string&) {
+            FramegrabberSystem::AppletMetadata metadata;
+            metadata.supportsCameraControl = true;
+            metadata.version = "9.9";
+            return metadata;
+        });
+    QCOMPARE(hit.path, path);
+    QVERIFY(hit.supportsCameraControl); // gates Sgc_initBoard in adoptBoard
+    QCOMPARE(hit.version, std::string("9.9"));
+    const auto miss = FramegrabberCatalogTestAccess::entry(path, board,
+        [](const std::string&, const std::string&) { return FramegrabberSystem::AppletMetadata{}; }, log);
+    QVERIFY(!miss.supportsCameraControl);
+    QVERIFY(miss.version.empty());
+    QVERIFY(loggedLimitation.contains(QStringLiteral("No SDK camera-control tag")));
 }
 
 void FramegrabberControllerTests::boardlessLoadsUseTheSessionBoard()
