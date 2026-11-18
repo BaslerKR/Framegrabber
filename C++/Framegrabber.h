@@ -542,12 +542,15 @@ private:
     bool openUnlocked(const std::string& boardName);
     bool loadConfigurationUnlocked(const std::string& path);
     bool refreshAppletCatalogUnlocked(const FramegrabberSystem::BoardInfo& board);
-    /** @brief Resolves catalog metadata, falling back to SDK tags for an external applet file.
-     *  @param lookup Optional seam for tests; production uses FramegrabberSystem::getAppletMetadata.
-     */
+    /** @brief Resolves catalog metadata, falling back to SDK tags for an external applet file. */
     [[nodiscard]] AppletInfo catalogEntry(const std::string& appletPath,
-        const std::string& boardName,
-        const std::function<FramegrabberSystem::AppletMetadata(const std::string&, const std::string&)>& lookup = {}) const;
+                                          const std::string& boardName) const;
+
+    /** @brief Pure catalog/metadata resolution used by catalogEntry and its focused test. */
+    static AppletInfo resolveCatalogEntry(const std::vector<AppletInfo>& catalog,
+        const std::string& appletPath, const std::string& boardName,
+        const std::function<FramegrabberSystem::AppletMetadata(const std::string&, const std::string&)>& lookup,
+        const std::function<void(const std::string&, bool)>& log);
     [[nodiscard]] std::string findCatalogApplet(const std::string& reference) const;
     [[nodiscard]] PreviousApplet capturePreviousApplet() const;
     void restorePreviousApplet(const PreviousApplet& previous);

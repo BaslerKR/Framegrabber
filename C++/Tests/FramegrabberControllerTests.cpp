@@ -12,7 +12,6 @@
 
 #include <atomic>
 #include <condition_variable>
-#include <cstdio>
 #include <functional>
 #include <mutex>
 #include <optional>
@@ -146,14 +145,14 @@ std::string expectedSdkPath(const QString& path)
 
 } // namespace
 
-/** @brief Calls the private catalog lookup with an injected metadata result. */
+/** @brief Calls the pure catalog/metadata resolution with an injected metadata result. */
 struct FramegrabberCatalogTestAccess
 {
-    static Framegrabber::AppletInfo entry(Framegrabber& instance, const std::string& path,
-        const std::string& board,
-        const std::function<FramegrabberSystem::AppletMetadata(const std::string&, const std::string&)>& lookup)
+    static Framegrabber::AppletInfo entry(const std::string& path, const std::string& board,
+        const std::function<FramegrabberSystem::AppletMetadata(const std::string&, const std::string&)>& lookup,
+        const std::function<void(const std::string&, bool)>& log = {})
     {
-        return instance.catalogEntry(path, board, lookup);
+        return Framegrabber::resolveCatalogEntry({}, path, board, lookup, log);
     }
 };
 
@@ -565,7 +564,6 @@ void FramegrabberControllerTests::hostSelectedUnicodePathUsesNativeEncoding()
 
 void FramegrabberControllerTests::hostSelectedNonAsciiConfigurationPath()
 {
-    std::fprintf(stderr, "C1\n"); std::fflush(stderr);
     const QList<QChar> candidates{QChar(0xD55C), QChar(0x00E9), QChar(0x4E2D), QChar(0x0416)};
     const auto roundTrips = [](const QChar character) {
         const QString value = QStringLiteral("mcf-") + character;
@@ -613,7 +611,6 @@ void FramegrabberControllerTests::hostSelectedNonAsciiConfigurationPath()
         return run;
     };
 
-    std::fprintf(stderr, "C2\n"); std::fflush(stderr);
     auto load = invoke(QStringLiteral("framegrabber.configuration-load"), mcfPath);
     QVERIFY2(load.admission->succeeded(), load.admission->error()
         ? qPrintable(load.admission->error()->message) : "");
@@ -624,11 +621,9 @@ void FramegrabberControllerTests::hostSelectedNonAsciiConfigurationPath()
         std::lock_guard<std::mutex> lock(fake.state.mutex);
         QCOMPARE(fake.state.configuration, expectedSdkPath(mcfPath));
     }
-    std::fprintf(stderr, "C3\n"); std::fflush(stderr);
     const QString connection = load.result->value().toObject()
         .value(QStringLiteral("connectionId")).toString();
     QVERIFY(!connection.isEmpty());
-    std::fprintf(stderr, "C4\n"); std::fflush(stderr);
     auto save = invoke(QStringLiteral("framegrabber.configuration-save"), mcfPath, connection);
     QVERIFY2(save.admission->succeeded(), save.admission->error()
         ? qPrintable(save.admission->error()->message) : "");
@@ -645,7 +640,6 @@ void FramegrabberControllerTests::hostSelectedNonAsciiConfigurationPath()
         std::lock_guard<std::mutex> lock(fake.state.mutex);
         fake.state.mcfReferencesOutsideApplet = true;
     }
-    std::fprintf(stderr, "C5\n"); std::fflush(stderr);
     auto outside = invoke(QStringLiteral("framegrabber.configuration-load"), mcfPath, connection);
     QVERIFY(outside.result.has_value());
     QVERIFY(!outside.result->succeeded());
@@ -661,7 +655,6 @@ void FramegrabberControllerTests::hostSelectedNonAsciiConfigurationPath()
         QFile file(unsupported);
         QVERIFY(file.open(QIODevice::WriteOnly));
         file.close();
-        std::fprintf(stderr, "C6\n"); std::fflush(stderr);
         auto refused = invoke(QStringLiteral("framegrabber.configuration-load"), unsupported);
         QVERIFY(refused.admission.has_value());
         QVERIFY(!refused.admission->succeeded());
@@ -670,16 +663,18 @@ void FramegrabberControllerTests::hostSelectedNonAsciiConfigurationPath()
         break;
     }
 #endif
-    std::fprintf(stderr, "C7\n"); std::fflush(stderr);
 }
 
 void FramegrabberControllerTests::nonCatalogAppletMetadataGatesCameraControl()
 {
-    std::fprintf(stderr, "M1\n"); std::fflush(stderr);
-    Framegrabber framegrabber(nullptr);
     const std::string path = "C:/custom/chosen.hap";
     const std::string board = "Test Board (SN1)";
-    const auto hit = FramegrabberCatalogTestAccess::entry(framegrabber, path, board,
+    QString loggedLimitation;
+    const auto log = [&loggedLimitation](const std::string& message, bool warning) {
+        QVERIFY(warning);
+        loggedLimitation = QString::fromStdString(message);
+    };
+    const auto hit = FramegrabberCatalogTestAccess::entry(path, board,
         [](const std::string&, const std::string&) {
             FramegrabberSystem::AppletMetadata metadata;
             metadata.supportsCameraControl = true;
@@ -689,18 +684,15 @@ void FramegrabberControllerTests::nonCatalogAppletMetadataGatesCameraControl()
     QCOMPARE(hit.path, path);
     QVERIFY(hit.supportsCameraControl); // gates Sgc_initBoard in adoptBoard
     QCOMPARE(hit.version, std::string("9.9"));
-    const auto miss = FramegrabberCatalogTestAccess::entry(framegrabber, path, board,
-        [](const std::string&, const std::string&) { return FramegrabberSystem::AppletMetadata{}; });
-    std::fprintf(stderr, "M2\n"); std::fflush(stderr);
+    const auto miss = FramegrabberCatalogTestAccess::entry(path, board,
+        [](const std::string&, const std::string&) { return FramegrabberSystem::AppletMetadata{}; }, log);
     QVERIFY(!miss.supportsCameraControl);
-    std::fprintf(stderr, "M3\n"); std::fflush(stderr);
     QVERIFY(miss.version.empty());
-    std::fprintf(stderr, "M4\n"); std::fflush(stderr);
+    QVERIFY(loggedLimitation.contains(QStringLiteral("No SDK camera-control tag")));
 }
 
 void FramegrabberControllerTests::boardlessLoadsUseTheSessionBoard()
 {
-    std::fprintf(stderr, "B1\n"); std::fflush(stderr);
     FramegrabberTestBackend fake;
     FramegrabberSourceController controller(nullptr);
     FramegrabberControllerTestAccess::install(controller, fake);
@@ -829,7 +821,6 @@ void FramegrabberControllerTests::boardlessLoadsUseTheSessionBoard()
 
 void FramegrabberControllerTests::parameterTreeCoversAppletAndCameraScopes()
 {
-    std::fprintf(stderr, "P1\n"); std::fflush(stderr);
     FramegrabberTestBackend fake;
     FramegrabberSourceController controller(nullptr);
     FramegrabberControllerTestAccess::install(controller, fake);
@@ -989,7 +980,6 @@ void FramegrabberControllerTests::parameterTreeCoversAppletAndCameraScopes()
 
 void FramegrabberControllerTests::parameterChangesDeliverSnapshotAndDelta()
 {
-    std::fprintf(stderr, "P2\n"); std::fflush(stderr);
     FramegrabberTestBackend fake;
     FramegrabberSourceController controller(nullptr);
     FramegrabberControllerTestAccess::install(controller, fake);
@@ -1094,7 +1084,6 @@ void FramegrabberControllerTests::parameterChangesDeliverSnapshotAndDelta()
 
 void FramegrabberControllerTests::parameterAdmissionsStayAvailableDuringObservation()
 {
-    std::fprintf(stderr, "P3\n"); std::fflush(stderr);
     FramegrabberTestBackend fake;
     FramegrabberSourceController controller(nullptr);
     FramegrabberControllerTestAccess::install(controller, fake);
@@ -1148,7 +1137,6 @@ void FramegrabberControllerTests::parameterAdmissionsStayAvailableDuringObservat
 
 void FramegrabberControllerTests::cameraRefreshReplacesTheCachedFeatureTree()
 {
-    std::fprintf(stderr, "P4\n"); std::fflush(stderr);
     FramegrabberTestBackend fake;
     FramegrabberSourceController controller(nullptr);
     FramegrabberControllerTestAccess::install(controller, fake);
@@ -1203,7 +1191,6 @@ void FramegrabberControllerTests::cameraRefreshReplacesTheCachedFeatureTree()
 }
 void FramegrabberControllerTests::notificationQueueOverflowsToResync()
 {
-    std::fprintf(stderr, "P5\n"); std::fflush(stderr);
     framegrabber::ParameterNotificationHub hub(
         [](const std::string& connection, const std::string& subscription) {
             DeviceParameterChange change;

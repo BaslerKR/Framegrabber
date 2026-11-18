@@ -1310,19 +1310,33 @@ std::vector<Framegrabber::AppletInfo> Framegrabber::appletCatalog() const
 }
 
 Framegrabber::AppletInfo Framegrabber::catalogEntry(const std::string& appletPath,
-    const std::string& boardName,
-    const std::function<FramegrabberSystem::AppletMetadata(const std::string&, const std::string&)>& lookup) const
+                                                    const std::string& boardName) const
 {
+    std::vector<AppletInfo> catalog;
     {
         std::lock_guard<std::mutex> lock(_stateMutex);
-        for (const AppletInfo& applet : _appletCatalog)
+        catalog = _appletCatalog;
+    }
+    return resolveCatalogEntry(catalog, appletPath, boardName,
+        [this](const std::string& board, const std::string& path) {
+            return _system ? _system->getAppletMetadata(board, path)
+                           : FramegrabberSystem::AppletMetadata{};
+        },
+        [this](const std::string& message, const bool warning) { log(message, warning); });
+}
+
+Framegrabber::AppletInfo Framegrabber::resolveCatalogEntry(const std::vector<AppletInfo>& catalog,
+    const std::string& appletPath, const std::string& boardName,
+    const std::function<FramegrabberSystem::AppletMetadata(const std::string&, const std::string&)>& lookup,
+    const std::function<void(const std::string&, bool)>& log)
+{
+    for (const AppletInfo& applet : catalog)
+    {
+        std::error_code error;
+        if (applet.path == appletPath
+            || (std::filesystem::equivalent(applet.path, appletPath, error) && !error))
         {
-            std::error_code error;
-            if (applet.path == appletPath
-                || (std::filesystem::equivalent(applet.path, appletPath, error) && !error))
-            {
-                return applet;
-            }
+            return applet;
         }
     }
     // A HAP outside the standard locations is loadable but not enumerated. Ask the SDK for its
@@ -1331,11 +1345,10 @@ Framegrabber::AppletInfo Framegrabber::catalogEntry(const std::string& appletPat
     applet.path = appletPath;
     const FramegrabberSystem::AppletMetadata metadata = lookup
         ? lookup(boardName, appletPath)
-        : (_system ? _system->getAppletMetadata(boardName, appletPath)
-                   : FramegrabberSystem::AppletMetadata{});
+        : FramegrabberSystem::AppletMetadata{};
     applet.version = metadata.version;
     applet.supportsCameraControl = metadata.supportsCameraControl;
-    if (!metadata.supportsCameraControl)
+    if (!metadata.supportsCameraControl && log)
         log("No SDK camera-control tag is available for an applet outside the installed "
             "catalog; CoaXPress cameras are not initialized for this file.", true);
     return applet;
