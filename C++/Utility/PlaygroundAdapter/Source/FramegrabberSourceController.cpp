@@ -613,8 +613,8 @@ void FramegrabberSourceController::reportImageRejection(
     observation.height = image.height > 0 ? static_cast<std::uint32_t>(image.height) : 0;
     observation.frameSequence = image.frameSequence;
     observation.pixelFormat = static_cast<std::uint32_t>(image.sourceFormat);
-    observation.reportedStride = image.stride > 0 ? static_cast<std::uint64_t>(image.stride) : 0;
-    observation.effectiveStride = observation.reportedStride;
+    // The DMA producer derives stride from transfer length and delivered height.
+    observation.effectiveStride = image.stride > 0 ? static_cast<std::uint64_t>(image.stride) : 0;
     observation.minimumRowBytes = GraphicsImageValidation::minimumRowBytes(image.pixelFormat, image.width);
     observation.readableBytes = image.data() ? image.size : 0;
     observation.requiredBytes = observation.effectiveStride * observation.height;
