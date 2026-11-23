@@ -37,9 +37,17 @@ private slots:
     void parameterAdmissionsStayAvailableDuringObservation();
     void cameraRefreshReplacesTheCachedFeatureTree();
     void notificationQueueOverflowsToResync();
+    void samplesImageRejectionsPerSourceAndRun();
 };
 
 namespace {
+
+std::vector<DeviceImageRejectionObservation> imageRejections;
+
+void recordImageRejection(const DeviceImageRejectionObservation& observation) noexcept
+{
+    try { imageRejections.push_back(observation); } catch (...) {}
+}
 
 template<class Value>
 struct Sink
@@ -1258,6 +1266,45 @@ void FramegrabberControllerTests::notificationQueueOverflowsToResync()
     QVERIFY(resync);
     QCOMPARE(hub.pending("watch"), std::size_t(0));
     hub.close();
+}
+
+void FramegrabberControllerTests::samplesImageRejectionsPerSourceAndRun()
+{
+    using Access = FramegrabberControllerTestAccess;
+    imageRejections.clear();
+    FramegrabberSourceController controller(nullptr, nullptr, &recordImageRejection);
+    GraphicsImage image;
+    image.width = 4;
+    image.height = 2;
+    image.stride = 4;
+    image.size = 7;
+    image.pixelFormat = GraphicsImagePixelFormat::Mono8;
+    Access::beginImageRejectionRun(controller, false);
+    const auto truncated = GraphicsImageFailure::TruncatedBytes;
+    for (std::uint64_t sequence = 1; sequence <= 101; ++sequence) {
+        image.frameSequence = sequence;
+        Access::reportImageRejection(controller, image, 2U, truncated);
+    }
+    QCOMPARE(imageRejections.size(), std::size_t{2});
+    QCOMPARE(imageRejections[0].frameSequence, std::uint64_t{1});
+    QCOMPARE(imageRejections[1].frameSequence, std::uint64_t{100});
+    QCOMPARE(imageRejections.front().sourceIndex, std::uint32_t{2});
+    QCOMPARE(imageRejections.front().reason, DeviceImageRejection::TruncatedBytes);
+    QCOMPARE(imageRejections.front().requiredBytes, std::uint64_t{8});
+    QCOMPARE(imageRejections.front().reportedStride, std::uint64_t{0});
+
+    Access::reportImageRejection(controller, image, 3U, truncated);
+    Access::reportImageRejection(controller, image, 2U, GraphicsImageFailure::MissingBytes);
+    Access::reportImageRejection(controller, image, 2U, GraphicsImageFailure::None);
+    QCOMPARE(imageRejections.size(), std::size_t{4});
+
+    Access::beginImageRejectionRun(controller, false);
+    Access::reportImageRejection(controller, image, 2U, truncated);
+    QCOMPARE(imageRejections.size(), std::size_t{5});
+    Access::beginImageRejectionRun(controller, true);
+    Access::reportImageRejection(controller, image, 2U, truncated);
+    Access::reportImageRejection(controller, image, 2U, truncated);
+    QCOMPARE(imageRejections.size(), std::size_t{7});
 }
 
 QTEST_GUILESS_MAIN(FramegrabberControllerTests)

@@ -429,11 +429,7 @@ void FramegrabberSourceController::bindBackend()
         return framegrabber->runtimeDiagnostics(dma);
     };
     _backend.grab = [this, framegrabber](const std::size_t frames) {
-        if (_imageRejectionSink && !framegrabber->isGrabbing()) {
-            std::lock_guard lock(_imageRejectionMutex);
-            _imageRejections.clear();
-            _singleImageAcquisition = frames == 1;
-        }
+        if (_imageRejectionSink && !framegrabber->isGrabbing()) beginImageRejectionRun(frames == 1);
         framegrabber->grab(frames);
     };
     _backend.stop = [framegrabber] { framegrabber->stop(); };
@@ -589,6 +585,13 @@ void FramegrabberSourceController::registerCallbacks()
         {
             reportImageRejection(image, dma, failure);
         });
+}
+
+void FramegrabberSourceController::beginImageRejectionRun(const bool single)
+{
+    std::lock_guard lock(_imageRejectionMutex);
+    _imageRejections.clear();
+    _singleImageAcquisition = single;
 }
 
 void FramegrabberSourceController::reportImageRejection(

@@ -580,6 +580,17 @@ struct FramegrabberTestBackend
 /** @brief Installs a synthetic backend into a controller created without a Framegrabber. */
 struct FramegrabberControllerTestAccess
 {
+    static void beginImageRejectionRun(FramegrabberSourceController& controller, bool single)
+    {
+        controller.beginImageRejectionRun(single);
+    }
+
+    static void reportImageRejection(FramegrabberSourceController& controller, const GraphicsImage& image,
+                                     unsigned int dma, GraphicsImageFailure failure)
+    {
+        controller.reportImageRejection(image, dma, failure);
+    }
+
     static void install(FramegrabberSourceController& controller, FramegrabberTestBackend& backend)
     {
         controller._backend = backend.backend();

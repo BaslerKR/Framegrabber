@@ -239,6 +239,7 @@ private:
                             const Observation& observation);
     void reportImageRejection(const GraphicsImage& image, unsigned int dma,
                               GraphicsImageFailure failure);
+    void beginImageRejectionRun(bool single);
 
     Framegrabber* _framegrabber = nullptr;
     Backend _backend;
