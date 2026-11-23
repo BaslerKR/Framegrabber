@@ -7,6 +7,7 @@
 
 #include "engine/GraphicsFrameAdapter.h"
 
+#include <functional>
 #include <memory>
 
 class Framegrabber;
@@ -15,7 +16,10 @@ class Framegrabber;
 class FramegrabberGraphicsFrameStream final
 {
 public:
-    FramegrabberGraphicsFrameStream(Framegrabber* framegrabber, GraphicsFrameCallback callback);
+    using RejectedImage = std::function<void(const GraphicsImage&, unsigned int, GraphicsImageFailure)>;
+
+    FramegrabberGraphicsFrameStream(Framegrabber* framegrabber, GraphicsFrameCallback callback,
+                                   RejectedImage rejectedImage = {});
     ~FramegrabberGraphicsFrameStream();
 
     FramegrabberGraphicsFrameStream(const FramegrabberGraphicsFrameStream&) = delete;

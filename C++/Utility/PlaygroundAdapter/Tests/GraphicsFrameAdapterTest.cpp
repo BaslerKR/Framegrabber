@@ -26,6 +26,16 @@ int main()
     assert(image.frameSequence == 9U);
     assert(image.data() == storage->data());
     assert(image.data()[3] == 4U);
+    assert(FramegrabberGraphicsFrameAdapter::imageFailure(image) == GraphicsImageFailure::None);
+
+    auto rejected = image;
+    rejected.stride = 1;
+    assert(FramegrabberGraphicsFrameAdapter::imageFailure(rejected) == GraphicsImageFailure::StrideBelowMinimum);
+    rejected.stride = 2;
+    rejected.size = 3;
+    assert(FramegrabberGraphicsFrameAdapter::imageFailure(rejected) == GraphicsImageFailure::TruncatedBytes);
+    rejected.storage.reset();
+    assert(FramegrabberGraphicsFrameAdapter::imageFailure(rejected) == GraphicsImageFailure::MissingBytes);
 
     auto wrapNative = [](const Framegrabber::PixelFormat pixelFormat,
                          const GraphicsImagePixelFormat expected,

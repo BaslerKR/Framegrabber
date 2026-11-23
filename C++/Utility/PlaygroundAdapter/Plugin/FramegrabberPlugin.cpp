@@ -66,9 +66,10 @@ private:
 
 class FramegrabberPluginSession final : public IDevicePluginSession {
 public:
-    FramegrabberPluginSession(std::unique_ptr<FramegrabberSystem> system, Framegrabber* framegrabber)
+    FramegrabberPluginSession(std::unique_ptr<FramegrabberSystem> system, Framegrabber* framegrabber,
+                              DeviceImageRejectionSink imageRejectionSink)
         : _system(std::move(system)), _framegrabber(framegrabber),
-          _controller(std::make_unique<FramegrabberSourceController>(_framegrabber))
+          _controller(std::make_unique<FramegrabberSourceController>(_framegrabber, nullptr, imageRejectionSink))
     {
         std::weak_ptr<FramegrabberPluginTitleState> titleState = _titleState;
         Framegrabber* const framegrabberForCallback = _framegrabber;
@@ -111,12 +112,18 @@ private:
 
 class FramegrabberPlugin final : public QObject,
                                  public IDeviceRuntime,
-                                 public IDevicePluginResourceClaimsReceiver {
+                                 public IDevicePluginResourceClaimsReceiver,
+                                 public IDeviceImageDiagnostics {
     Q_OBJECT
     Q_PLUGIN_METADATA(IID PlaygroundDeviceRuntime_iid)
-    Q_INTERFACES(IDeviceRuntime IDevicePluginResourceClaimsReceiver)
+    Q_INTERFACES(IDeviceRuntime IDevicePluginResourceClaimsReceiver IDeviceImageDiagnostics)
 
 public:
+    void setImageRejectionSink(DeviceImageRejectionSink sink) noexcept override
+    {
+        _imageRejectionSink.store(sink, std::memory_order_release);
+    }
+
     DevicePluginDescriptor descriptor() const override
     {
         return {QStringLiteral("framegrabber"), playgroundDevicePluginDisplayName(), playgroundDevicePluginVersion(), false};
@@ -178,7 +185,8 @@ public:
             } catch (...) {
                 qWarning() << "[Framegrabber] Applet enumeration failed.";
             }
-            return std::make_unique<FramegrabberPluginSession>(std::move(system), framegrabber);
+            return std::make_unique<FramegrabberPluginSession>(
+                std::move(system), framegrabber, _imageRejectionSink.load(std::memory_order_acquire));
         } catch (const std::exception& error) {
             if (errorMessage) *errorMessage = QString::fromLocal8Bit(error.what());
             return {};
@@ -208,6 +216,7 @@ private:
     }
 
     std::atomic<IDevicePluginResourceClaims*> _claims{nullptr};
+    std::atomic<DeviceImageRejectionSink> _imageRejectionSink{nullptr};
     std::mutex _discoveredBoardsMutex;
     std::vector<FramegrabberSystem::BoardInfo> _discoveredBoards;
 };

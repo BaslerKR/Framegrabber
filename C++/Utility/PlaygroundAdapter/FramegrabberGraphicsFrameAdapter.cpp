@@ -119,4 +119,11 @@ GraphicsImage wrapImage(
     frame.frameSequence = frameSeq;
     return frame;
 }
+
+GraphicsImageFailure imageFailure(const GraphicsImage& image) noexcept
+{
+    if (!image.data()) return GraphicsImageFailure::MissingBytes;
+    return GraphicsImageValidation::layoutFailure(
+        image.pixelFormat, image.width, image.height, image.stride, image.size);
+}
 }

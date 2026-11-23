@@ -1,5 +1,7 @@
 ## Unreleased
 
+- Report rejected DMA image layouts through the optional image diagnostic sink, with the failed rule and numeric input layout.
+
 - Ship the package icon from this repository (`C++/Utility/PlaygroundAdapter/Package/icon.png`) instead of the SDK-installed Resources brand asset. Include `DeviceRuntime/Contract/DevicePluginSession.h` from the contract include root; the SDK no longer installs a `PlaygroundWidget` header path or vendor icons.
 
 - Restore arbitrary applet loading through a Host-provided file selection: declare `framegrabber.applet-load-file` with a Host-owned `file-open` input (title and applet name filters) beside the installed-catalog route. The Host shows the native dialog on the GUI thread and passes the chosen absolute path; the plugin opens no dialog and validates that the file exists and ends in `.hap`, `.dll` or `.so`, reporting SDK load failures with their reason. On Windows the existence check uses the native wide path while the path handed to the narrow `Fg_Init` API uses the process code page; a path that cannot be represented is refused with an explicit reason. Configuration load and save use the same encoding rule. A non-catalog applet's SDK tags are queried after load so CoaXPress camera control is initialized when the SDK reports it; otherwise the module logs the limitation. Automation routes are refused by the Host before the worker call, preserving the GUI-only native-library posture.

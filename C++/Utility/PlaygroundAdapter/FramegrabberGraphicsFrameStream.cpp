@@ -9,7 +9,7 @@
 class FramegrabberGraphicsFrameStream::Impl final
 {
 public:
-    Impl(Framegrabber* framegrabber, GraphicsFrameCallback callback);
+    Impl(Framegrabber* framegrabber, GraphicsFrameCallback callback, RejectedImage rejectedImage);
     ~Impl();
 
     Impl(const Impl&) = delete;
@@ -24,7 +24,8 @@ private:
 
 FramegrabberGraphicsFrameStream::Impl::Impl(
     Framegrabber* framegrabber,
-    GraphicsFrameCallback callback)
+    GraphicsFrameCallback callback,
+    RejectedImage rejectedImage)
     : _framegrabber(framegrabber), _callback(std::move(callback))
 {
     if (!_framegrabber || !_callback)
@@ -34,12 +35,17 @@ FramegrabberGraphicsFrameStream::Impl::Impl(
 
     const auto callbackToken = _callbackGate.token();
     _grabCallbackId = _framegrabber->registerGrabCallback(
-        [this, callbackToken](const Framegrabber::Image& image, const std::size_t sequence) {
+        [this, callbackToken, rejectedImage = std::move(rejectedImage)](
+            const Framegrabber::Image& image, const std::size_t sequence) {
             GraphicsFrameCallbackGate::Lease lease(callbackToken);
             if (!lease) return;
             // The DMA callback boundary counts and logs any conversion/consumer failure once.
             GraphicsImage graphicsImage = FramegrabberGraphicsFrameAdapter::wrapImage(image, sequence);
-            if (!graphicsImage.isValid()) throw std::runtime_error("Invalid GraphicsImage conversion.");
+            const auto failure = FramegrabberGraphicsFrameAdapter::imageFailure(graphicsImage);
+            if (failure != GraphicsImageFailure::None) {
+                if (rejectedImage) rejectedImage(graphicsImage, image.dmaIndex, failure);
+                throw std::runtime_error("Invalid GraphicsImage conversion.");
+            }
 
             GraphicsFrame frame;
             frame.addImage("image", std::move(graphicsImage), "Image");
@@ -61,8 +67,9 @@ FramegrabberGraphicsFrameStream::Impl::~Impl()
 
 FramegrabberGraphicsFrameStream::FramegrabberGraphicsFrameStream(
     Framegrabber* framegrabber,
-    GraphicsFrameCallback callback)
-    : _impl(std::make_unique<Impl>(framegrabber, std::move(callback)))
+    GraphicsFrameCallback callback,
+    RejectedImage rejectedImage)
+    : _impl(std::make_unique<Impl>(framegrabber, std::move(callback), std::move(rejectedImage)))
 {
 }
 

@@ -2,6 +2,7 @@
 
 #include "DeviceRuntime/Contract/AbstractSourceController.h"
 #include "DeviceRuntime/Contract/DeviceConnectionControl.h"
+#include "DeviceRuntime/Contract/DeviceImageDiagnostics.h"
 #include "DeviceRuntime/Contract/DeviceParameterControl.h"
 #include "DeviceRuntime/Contract/FrameStorage.h"
 #include "Framegrabber.h"
@@ -22,6 +23,7 @@
 #include <optional>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 class FramegrabberGraphicsFrameStream;
@@ -70,7 +72,8 @@ public:
     using TargetsCompletion = IDeviceConnectionControl::TargetsCompletion;
     using ChangeListener = IDeviceParameterControl::ChangeListener;
     explicit FramegrabberSourceController(Framegrabber* framegrabber,
-                                           QObject* parent = nullptr);
+                                           QObject* parent = nullptr,
+                                           DeviceImageRejectionSink imageRejectionSink = nullptr);
     ~FramegrabberSourceController() override;
 
     /** @brief Copies producer diagnostics for the selected DMA channel. */
@@ -234,6 +237,8 @@ private:
     /** @brief Publishes differences or a snapshot for the current connection. */
     void publishObservation(const std::string& connection, bool snapshot,
                             const Observation& observation);
+    void reportImageRejection(const GraphicsImage& image, unsigned int dma,
+                              GraphicsImageFailure failure);
 
     Framegrabber* _framegrabber = nullptr;
     Backend _backend;
@@ -245,6 +250,10 @@ private:
     Framegrabber::CallbackId _statusCallbackId = 0;
     Framegrabber::CallbackId _nodeCallbackId = 0;
     std::unique_ptr<FramegrabberGraphicsFrameStream> _graphicsStream;
+    const DeviceImageRejectionSink _imageRejectionSink;
+    std::mutex _imageRejectionMutex;
+    std::map<std::pair<unsigned int, DeviceImageRejection>, std::uint64_t> _imageRejections;
+    bool _singleImageAcquisition = false;
 
     QFuture<void> _work;
     mutable std::mutex _observationMutex;

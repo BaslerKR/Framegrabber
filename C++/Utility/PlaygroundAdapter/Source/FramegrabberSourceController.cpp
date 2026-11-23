@@ -24,6 +24,27 @@ namespace
 {
 // Single acquisition waits for one frame per DMA; a trigger source may be idle.
 constexpr auto kSingleAcquisitionTimeout = std::chrono::seconds(30);
+
+std::optional<DeviceImageRejection> imageRejection(const GraphicsImageFailure failure)
+{
+    switch (failure)
+    {
+    case GraphicsImageFailure::MissingBytes: return DeviceImageRejection::MissingBytes;
+    case GraphicsImageFailure::InvalidDimensions: return DeviceImageRejection::InvalidDimensions;
+    case GraphicsImageFailure::UnsupportedFormat: return DeviceImageRejection::UnsupportedFormat;
+    case GraphicsImageFailure::InvalidStride: return DeviceImageRejection::InvalidStride;
+    case GraphicsImageFailure::StrideBelowMinimum: return DeviceImageRejection::StrideBelowMinimum;
+    case GraphicsImageFailure::ExtentOverflow: return DeviceImageRejection::ExtentOverflow;
+    case GraphicsImageFailure::TruncatedBytes: return DeviceImageRejection::TruncatedBytes;
+    case GraphicsImageFailure::OddWidth: return DeviceImageRejection::OddWidth;
+    case GraphicsImageFailure::None:
+    case GraphicsImageFailure::UnsupportedConversion:
+    case GraphicsImageFailure::ExcessBytes:
+    case GraphicsImageFailure::StorageRefused: return std::nullopt;
+    }
+    return std::nullopt;
+}
+
 // Host-declared lifecycle operations routed through the module's shared control path; not tool names.
 const QLatin1String kDisconnect("lifecycle.disconnect");
 const QLatin1String kSingle("lifecycle.single");
@@ -328,13 +349,15 @@ void FramegrabberSourceController::setFrameStorageProvider(
 
 FramegrabberSourceController::FramegrabberSourceController(
     Framegrabber* framegrabber,
-    QObject* parent)
+    QObject* parent,
+    DeviceImageRejectionSink imageRejectionSink)
     : AbstractSourceController(parent),
       _framegrabber(framegrabber),
       _notifications([this](const std::string& connectionId, const std::string& subscriptionId) {
           return snapshotChange(connectionId, subscriptionId);
       }),
-      _instanceId(QUuid::createUuid().toString(QUuid::WithoutBraces))
+      _instanceId(QUuid::createUuid().toString(QUuid::WithoutBraces)),
+      _imageRejectionSink(imageRejectionSink)
 {
     bindBackend();
     _sessionAvailable.store(_framegrabber != nullptr, std::memory_order_release);
@@ -405,7 +428,14 @@ void FramegrabberSourceController::bindBackend()
     _backend.runtimeDiagnostics = [framegrabber](const std::optional<unsigned> dma) {
         return framegrabber->runtimeDiagnostics(dma);
     };
-    _backend.grab = [framegrabber](const std::size_t frames) { framegrabber->grab(frames); };
+    _backend.grab = [this, framegrabber](const std::size_t frames) {
+        if (_imageRejectionSink && !framegrabber->isGrabbing()) {
+            std::lock_guard lock(_imageRejectionMutex);
+            _imageRejections.clear();
+            _singleImageAcquisition = frames == 1;
+        }
+        framegrabber->grab(frames);
+    };
     _backend.stop = [framegrabber] { framegrabber->stop(); };
     _backend.appletFeatureModel = [framegrabber](const unsigned dma) {
         return framegrabber->getAppletFeatureModel(dma);
@@ -554,7 +584,41 @@ void FramegrabberSourceController::registerCallbacks()
             frame.payload = std::move(payload);
             frame.frameSeq = frame.payload.metadata.frameIndex;
             _frameConsumer(std::move(frame), sourceIndex);
+        },
+        [this](const GraphicsImage& image, const unsigned int dma, const GraphicsImageFailure failure)
+        {
+            reportImageRejection(image, dma, failure);
         });
+}
+
+void FramegrabberSourceController::reportImageRejection(
+    const GraphicsImage& image, const unsigned int dma, const GraphicsImageFailure failure)
+{
+    if (!_imageRejectionSink) return;
+    const auto reason = imageRejection(failure);
+    if (!reason) return;
+    {
+        std::lock_guard lock(_imageRejectionMutex);
+        if (!_singleImageAcquisition) {
+            const auto count = ++_imageRejections[{dma, *reason}];
+            if (count != 1 && count % 100 != 0) return;
+        }
+    }
+
+    DeviceImageRejectionObservation observation;
+    observation.reason = *reason;
+    observation.conversion = DeviceImageConversion::Borrow;
+    observation.sourceIndex = dma;
+    observation.width = image.width > 0 ? static_cast<std::uint32_t>(image.width) : 0;
+    observation.height = image.height > 0 ? static_cast<std::uint32_t>(image.height) : 0;
+    observation.frameSequence = image.frameSequence;
+    observation.pixelFormat = static_cast<std::uint32_t>(image.sourceFormat);
+    observation.reportedStride = image.stride > 0 ? static_cast<std::uint64_t>(image.stride) : 0;
+    observation.effectiveStride = observation.reportedStride;
+    observation.minimumRowBytes = GraphicsImageValidation::minimumRowBytes(image.pixelFormat, image.width);
+    observation.readableBytes = image.data() ? image.size : 0;
+    observation.requiredBytes = observation.effectiveStride * observation.height;
+    _imageRejectionSink(observation);
 }
 
 void FramegrabberSourceController::deregisterCallbacks()
