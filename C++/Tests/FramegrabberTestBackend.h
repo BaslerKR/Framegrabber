@@ -54,6 +54,8 @@ struct FramegrabberTestState
     bool extendedCameraXml = false;
     bool cameraXmlEmpty = false;
     bool failCameraGateReads = false;
+    bool failCameraAvailabilityReads = false;
+    bool widthPrototypeMissing = false;
     std::optional<Framegrabber::ParameterValue> widthPrototypeOverride;
     std::vector<std::pair<std::int64_t, Framegrabber::ParameterValue>> parameterWrites;
 
@@ -79,10 +81,17 @@ struct FramegrabberTestState
       <Unit>px</Unit>
       <Visibility>Beginner</Visibility>
       <pValue>WidthReg</pValue>
+      <pIsAvailable>WidthAvailable</pIsAvailable>
     </Integer>
     <Integer Name="WidthReg">
       <AccessMode>RW</AccessMode>
     </Integer>
+    <Boolean Name="WidthAvailable">
+      <pValue>WidthAvailableReg</pValue>
+    </Boolean>
+    <Boolean Name="WidthAvailableReg">
+      <AccessMode>RW</AccessMode>
+    </Boolean>
     <Enumeration Name="PixelFormat">
       <DisplayName>Pixel format</DisplayName>
       <Visibility>Expert</Visibility>
@@ -480,6 +489,7 @@ struct FramegrabberTestBackend
             if (id == 1)
             {
                 std::lock_guard<std::mutex> lock(shared->mutex);
+                if (shared->widthPrototypeMissing) return std::nullopt;
                 if (shared->widthPrototypeOverride) return shared->widthPrototypeOverride;
             }
             switch (id)
@@ -539,6 +549,12 @@ struct FramegrabberTestBackend
             if (name == "GainLocked")
             {
                 if (shared->failCameraGateReads) return false;
+                value = std::int64_t{1};
+                return true;
+            }
+            if (name == "WidthAvailable")
+            {
+                if (shared->failCameraAvailabilityReads) return false;
                 value = std::int64_t{1};
                 return true;
             }

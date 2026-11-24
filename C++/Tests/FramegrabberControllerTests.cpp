@@ -961,11 +961,41 @@ void FramegrabberControllerTests::parameterTreeCoversAppletAndCameraScopes()
     QCOMPARE(parameters.result.error, DeviceParameterError::None);
     const auto* gateFailureGain = findParameter(parameters.parameters, "Camera:cxp:0", "Gain");
     QVERIFY(gateFailureGain != nullptr);
+    QVERIFY(gateFailureGain->readable);
+    QVERIFY(gateFailureGain->available);
     QVERIFY(!gateFailureGain->writable);
-    QVERIFY(!gateFailureGain->observationError.empty());
+    QVERIFY(gateFailureGain->observationError.empty());
+    QVERIFY(gateFailureGain->value.has_value());
+    Sink<DeviceParameterResult> gateFailureRead;
+    QCOMPARE(controller.requestReadParameter(gateFailureGain->target,
+        gateFailureRead.completion()).error, DeviceParameterError::None);
+    QVERIFY(gateFailureRead.wait());
+    QCOMPARE(gateFailureRead.take().error, DeviceParameterError::None);
     {
         std::lock_guard<std::mutex> lock(fake.state.mutex);
         fake.state.failCameraGateReads = false;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(fake.state.mutex);
+        fake.state.failCameraAvailabilityReads = true;
+    }
+    parameters = inventory();
+    const auto* availabilityFailureWidth = findParameter(parameters.parameters, "Camera:cxp:0", "Width");
+    QVERIFY(availabilityFailureWidth != nullptr);
+    QVERIFY(availabilityFailureWidth->readable);
+    QVERIFY(availabilityFailureWidth->available);
+    QVERIFY(!availabilityFailureWidth->writable);
+    QVERIFY(availabilityFailureWidth->observationError.empty());
+    QVERIFY(availabilityFailureWidth->value.has_value());
+    Sink<DeviceParameterResult> availabilityFailureRead;
+    QCOMPARE(controller.requestReadParameter(availabilityFailureWidth->target,
+        availabilityFailureRead.completion()).error, DeviceParameterError::None);
+    QVERIFY(availabilityFailureRead.wait());
+    QCOMPARE(availabilityFailureRead.take().error, DeviceParameterError::None);
+    {
+        std::lock_guard<std::mutex> lock(fake.state.mutex);
+        fake.state.failCameraAvailabilityReads = false;
     }
 
     {
@@ -1079,6 +1109,21 @@ void FramegrabberControllerTests::parameterWriteRefusesUnrepresentableSdkType()
     QCOMPARE(result.error, DeviceParameterError::InvalidArgument);
     QCOMPARE(result.effect, DeviceParameterEffect::None);
     QVERIFY(result.message.find("not representable") != std::string::npos);
+    {
+        std::lock_guard<std::mutex> lock(fake.state.mutex);
+        QVERIFY(fake.state.parameterWrites.empty());
+        QCOMPARE(fake.state.integers[1], std::int64_t(640));
+        fake.state.widthPrototypeOverride.reset();
+        fake.state.widthPrototypeMissing = true;
+    }
+    Sink<DeviceParameterResult> unsupportedSink;
+    QCOMPARE(controller.requestWriteParameter(width->target, std::int64_t(800), width->revision,
+        unsupportedSink.completion()).error, DeviceParameterError::None);
+    QVERIFY(unsupportedSink.wait());
+    const auto unsupported = unsupportedSink.take();
+    QCOMPARE(unsupported.error, DeviceParameterError::Unsupported);
+    QCOMPARE(unsupported.effect, DeviceParameterEffect::None);
+    QVERIFY(unsupported.message.find("not supported") != std::string::npos);
     {
         std::lock_guard<std::mutex> lock(fake.state.mutex);
         QVERIFY(fake.state.parameterWrites.empty());

@@ -622,7 +622,6 @@ DeviceParameterDescriptor FramegrabberSourceController::observeCameraParameter(
         if (!readGate(declaration.lockedFeature, &locked))
         {
             writable = false;
-            addObservationError("The SDK could not read the camera lock state.");
         }
         else if (locked)
         {
@@ -634,9 +633,7 @@ DeviceParameterDescriptor FramegrabberSourceController::observeCameraParameter(
     {
         if (!readGate(declaration.availableFeature, &available))
         {
-            available = false;
             writable = false;
-            addObservationError("The SDK could not read the camera availability state.");
         }
         else if (!available)
         {
@@ -1139,7 +1136,13 @@ DeviceParameterResult FramegrabberSourceController::requestParameter(
                                 case Kind::Command: break;
                                 }
                             }
-                            if (!converted) {
+                            if (!prototype) {
+                                result.error = _backend.isOpened && !_backend.isOpened()
+                                    ? Error::Disconnected : Error::Unsupported;
+                                result.message = _backend.isOpened && !_backend.isOpened()
+                                    ? "The applet closed before the SDK parameter type was resolved."
+                                    : "The SDK parameter type is not supported.";
+                            } else if (!converted) {
                                 result.error = Error::InvalidArgument;
                                 result.message = "The value is not representable by the SDK parameter type.";
                             }

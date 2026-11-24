@@ -368,10 +368,11 @@ public:
 
     /**
      * @brief Serializes lifecycle commands from every control surface (GUI and API).
-     * @returns false when another lifecycle command already holds the gate.
+     * @returns false when another command holds the gate or the caller is a callback.
      */
     bool tryBeginControl();
-    void endControl();
+    /** @returns false when no gate is held or the caller is a callback. */
+    bool endControl();
     [[nodiscard]] bool controlBusy() const noexcept;
 
     void grab(std::size_t frames = 0);
@@ -394,7 +395,8 @@ public:
     /**
      * @brief Storage for one delivered frame: returns at least `bytes` writable bytes, or empty.
      *
-     * Must not wait and is called on acquisition threads. An empty result drops that frame.
+     * Must not wait and is called on acquisition threads. An empty result or exception drops
+     * that frame and increments the channel's poolExhausted counter.
      */
     using FrameStorage = std::function<std::shared_ptr<std::uint8_t>(std::size_t bytes)>;
     /**
@@ -530,6 +532,7 @@ private:
 
     std::atomic<bool> _controlBusy{false};
     std::atomic<bool> _isRunning{false};
+    std::atomic<bool> _grabbingStatusPublished{false};
     std::atomic<bool> _startingChannels{false};
     std::atomic<std::uint64_t> _frameSeq{0};
     std::atomic<unsigned int> _activeChannels{0};
@@ -591,6 +594,7 @@ private:
     void setLastSdkError(const std::string& context, int code);
     void clearLastError();
     [[nodiscard]] bool rejectLifecycleReentry(const char* operation);
+    void publishAcquisitionStopped();
     void requestStopChannels();
     [[nodiscard]] bool isAcquisitionThread() const;
     [[nodiscard]] bool isLifecycleThread() const noexcept;

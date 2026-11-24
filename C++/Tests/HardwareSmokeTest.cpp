@@ -51,6 +51,30 @@ struct Capture
     }
 };
 
+struct BoardCleanup
+{
+    explicit BoardCleanup(Framegrabber& board)
+        : board(board)
+    {
+    }
+
+    ~BoardCleanup()
+    {
+        board.clearGrabCallbacks();
+        board.clearStatusCallbacks();
+        board.clearNodeUpdatedCallbacks();
+        board.setFrameStorage({});
+        board.stop();
+        board.close();
+    }
+
+    BoardCleanup(const BoardCleanup&) = delete;
+    BoardCleanup& operator=(const BoardCleanup&) = delete;
+
+private:
+    Framegrabber& board;
+};
+
 bool waitForStop(Framegrabber& board, const std::chrono::seconds timeout = 10s)
 {
     const auto deadline = std::chrono::steady_clock::now() + timeout;
@@ -114,6 +138,37 @@ bool sdkVersionAtLeast(const char* version, const int major, const int minor, co
 
 int main()
 {
+    Capture capture;
+    Capture exceptionCapture;
+    std::atomic<bool> exceptionThrown{false};
+    std::atomic<bool> storageStopped{false};
+    std::atomic<bool> storageGateProbed{false};
+    std::atomic<bool> storageGateFinished{false};
+    std::atomic<bool> storageNestedBegin{true};
+    std::atomic<bool> grabGateProbed{false};
+    std::atomic<bool> grabGateFinished{false};
+    std::atomic<bool> grabNestedBegin{true};
+    std::mutex retainedMutex;
+    std::vector<std::shared_ptr<const std::uint8_t>> retained;
+    std::atomic<bool> callbackStopped{false};
+    std::mutex gateMutex;
+    std::condition_variable gate;
+    bool callbackEntered = false;
+    bool releaseCallback = false;
+    std::atomic<bool> reentryCalled{false};
+    std::atomic<bool> reentryResult{true};
+    std::mutex errorMutex;
+    std::string reentryError;
+    std::atomic<bool> nodeReentryCalled{false};
+    std::atomic<bool> nodeReentryResult{true};
+    std::mutex nodeErrorMutex;
+    std::string nodeReentryError;
+    std::atomic<int> recursiveNodeCalls{0};
+    std::atomic<int> grabStatusStarts{0};
+    std::atomic<int> grabStatusStops{0};
+    std::atomic<bool> stopModelReads{false};
+    std::atomic<std::size_t> modelReads{0};
+
     FramegrabberSystem system;
     if (!system.isInitialized() || !system.updateFramegrabberList()) return 1;
     const auto boards = system.getCachedBoardInfo();
@@ -134,6 +189,7 @@ int main()
 
     Framegrabber* board = system.addFramegrabber();
     if (!board || !board->loadApplet(applet->path)) return 2;
+    BoardCleanup cleanup(*board);
     if (board->getDMACount() <= 0) return 3;
     board->setDMABufferCount(0);
     if (board->dmaBufferCount() != 2) return 4;
@@ -149,7 +205,6 @@ int main()
     if (!board->setAppletParameter("FG_WIDTH", 0, width, false, true)) return 7;
     if (board->setAppletParameter("FG_WIDTH", 0, 1.5, false, true)) return 40;
 
-    Capture capture;
     const auto captureId = board->registerGrabCallback([&](const Framegrabber::Image& image,
         const std::size_t sequence) { capture.add(image, sequence); });
     if (captureId == 0) return 8;
@@ -162,8 +217,6 @@ int main()
         || single.front().consumerDelivered != 5 || single.front().failed != 0
         || single.front().rejected != 0) return 10;
 
-    Capture exceptionCapture;
-    std::atomic<bool> exceptionThrown{false};
     const auto throwingId = board->registerGrabCallback([&](const Framegrabber::Image&, std::size_t) {
         if (!exceptionThrown.exchange(true)) throw std::runtime_error("intentional callback failure");
     });
@@ -190,7 +243,6 @@ int main()
         || storageFailure.front().poolExhausted == 0) return 15;
     board->setFrameStorage({});
 
-    std::atomic<bool> storageStopped{false};
     board->setFrameStorage([&](const std::size_t bytes) -> std::shared_ptr<std::uint8_t> {
         if (!storageStopped.exchange(true)) board->stop();
         auto storage = std::make_shared<std::vector<std::uint8_t>>(bytes);
@@ -206,9 +258,6 @@ int main()
     board->setFrameStorage({});
 
     if (!board->tryBeginControl()) return 55;
-    std::atomic<bool> storageGateProbed{false};
-    std::atomic<bool> storageGateFinished{false};
-    std::atomic<bool> storageNestedBegin{true};
     board->setFrameStorage([&](const std::size_t bytes) -> std::shared_ptr<std::uint8_t> {
         storageGateProbed.store(true, std::memory_order_release);
         storageNestedBegin.store(board->tryBeginControl(), std::memory_order_release);
@@ -240,9 +289,6 @@ int main()
     board->setFrameStorage({});
 
     if (!board->tryBeginControl()) return 58;
-    std::atomic<bool> grabGateProbed{false};
-    std::atomic<bool> grabGateFinished{false};
-    std::atomic<bool> grabNestedBegin{true};
     const auto gateProbeId = board->registerGrabCallback([&](const Framegrabber::Image&, std::size_t) {
         grabGateProbed.store(true, std::memory_order_release);
         grabNestedBegin.store(board->tryBeginControl(), std::memory_order_release);
@@ -272,8 +318,6 @@ int main()
     if (board->controlBusy()) return 61;
     board->deregisterGrabCallback(gateProbeId);
 
-    std::mutex retainedMutex;
-    std::vector<std::shared_ptr<const std::uint8_t>> retained;
     const auto retentionId = board->registerGrabCallback([&](const Framegrabber::Image& image, std::size_t) {
         std::lock_guard<std::mutex> lock(retainedMutex);
         if (retained.size() < 2) retained.push_back(image.storage);
@@ -293,11 +337,16 @@ int main()
 
     capture.reset();
     board->grab(0);
-    std::this_thread::sleep_for(2s);
+    const auto sustainedObserved = waitFor([&] {
+        std::lock_guard<std::mutex> lock(capture.mutex);
+        return capture.count >= 10;
+    }, 5s);
+    bool sustainedValid = true;
     {
         std::lock_guard<std::mutex> lock(capture.mutex);
-        if (capture.count < 100 || capture.invalid != 0) return 52;
+        sustainedValid = capture.count >= 10 && capture.invalid == 0;
     }
+    if (!sustainedObserved || !sustainedValid) return 52;
     const auto sustainedStarted = std::chrono::steady_clock::now();
     board->stop();
     if (std::chrono::steady_clock::now() - sustainedStarted > 5s) return 53;
@@ -305,20 +354,21 @@ int main()
     if (sustained.size() != 1 || sustained.front().failed != 0
         || sustained.front().rejected != 0) return 54;
 
-    std::atomic<bool> callbackStopped{false};
     const auto stoppingId = board->registerGrabCallback([&](const Framegrabber::Image&, std::size_t) {
         if (!callbackStopped.exchange(true)) board->stop();
     });
     if (stoppingId == 0) return 16;
     capture.reset();
     board->grab(0);
-    if (!waitForStop(*board) || !callbackStopped.load() || capture.count == 0) return 17;
+    const auto callbackStopCompleted = waitForStop(*board);
+    bool captureDelivered = false;
+    {
+        std::lock_guard<std::mutex> lock(capture.mutex);
+        captureDelivered = capture.count != 0;
+    }
+    if (!callbackStopCompleted || !callbackStopped.load() || !captureDelivered) return 17;
     board->deregisterGrabCallback(stoppingId);
 
-    std::mutex gateMutex;
-    std::condition_variable gate;
-    bool callbackEntered = false;
-    bool releaseCallback = false;
     const auto concurrentId = board->registerGrabCallback([&](const Framegrabber::Image&, std::size_t) {
         std::unique_lock<std::mutex> lock(gateMutex);
         callbackEntered = true;
@@ -390,10 +440,6 @@ int main()
     if (board->isGrabbing()) return 23;
     board->clearStatusCallbacks();
 
-    std::atomic<bool> reentryCalled{false};
-    std::atomic<bool> reentryResult{true};
-    std::mutex errorMutex;
-    std::string reentryError;
     const auto reentryId = board->registerStatusCallback([&](const Framegrabber::Status status,
         const bool on) {
         if (status == Framegrabber::GrabbingStatus && on)
@@ -412,10 +458,6 @@ int main()
         || reentryError.find("callback") == std::string::npos) return 25;
     if (board->lastError().message.find("callback") == std::string::npos) return 35;
 
-    std::atomic<bool> nodeReentryCalled{false};
-    std::atomic<bool> nodeReentryResult{true};
-    std::mutex nodeErrorMutex;
-    std::string nodeReentryError;
     const auto nodeReentryId = board->registerNodeUpdatedCallback([&](Framegrabber::FeatureSource,
         Framegrabber::CameraTransport, unsigned int, const std::string&) {
         nodeReentryCalled.store(true, std::memory_order_release);
@@ -431,7 +473,6 @@ int main()
         || nodeReentryError.find("callback") == std::string::npos) return 34;
     if (board->lastError().message.find("callback") == std::string::npos) return 36;
 
-    std::atomic<int> recursiveNodeCalls{0};
     const auto recursiveNodeId = board->registerNodeUpdatedCallback([&](Framegrabber::FeatureSource,
         Framegrabber::CameraTransport, unsigned int, const std::string&) {
         if (recursiveNodeCalls.fetch_add(1, std::memory_order_relaxed) == 0)
@@ -453,6 +494,13 @@ int main()
     if (!board->isGrabbing() || board->connectionGeneration() != generationBeforeRefusal) return 48;
     board->stop();
 
+    const auto grabStatusId = board->registerStatusCallback([&](const Framegrabber::Status status,
+        const bool on) {
+        if (status != Framegrabber::GrabbingStatus) return;
+        if (on) grabStatusStarts.fetch_add(1, std::memory_order_relaxed);
+        else grabStatusStops.fetch_add(1, std::memory_order_relaxed);
+    });
+    if (grabStatusId == 0) return 65;
     for (int cycle = 0; cycle < 20; ++cycle)
     {
         capture.reset();
@@ -462,6 +510,9 @@ int main()
         if (statistics.size() != 1 || statistics.front().delivered != 3
             || statistics.front().failed != 0 || statistics.front().rejected != 0) return 27;
     }
+    board->clearStatusCallbacks();
+    if (grabStatusStarts.load(std::memory_order_relaxed) != 20
+        || grabStatusStops.load(std::memory_order_relaxed) != 20) return 66;
 
     for (int cycle = 0; cycle < 10; ++cycle)
     {
@@ -475,8 +526,6 @@ int main()
         if (capture.invalid != 0) return 29;
     }
 
-    std::atomic<bool> stopModelReads{false};
-    std::atomic<std::size_t> modelReads{0};
     std::thread modelReader([&] {
         while (!stopModelReads.load(std::memory_order_acquire))
         {

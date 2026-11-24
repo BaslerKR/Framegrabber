@@ -606,6 +606,7 @@ struct Framegrabber::DmaChannel
     unsigned int index = 0;
     dma_mem* memory = nullptr;
     std::thread thread;
+    std::thread::id workerThreadId;
     std::mutex resourceMutex;
     std::shared_ptr<OwnedBufferPool> ownedBufferPool;
     // Set instead of the pool when the consumer supplies the storage frames are copied into.
@@ -1505,27 +1506,36 @@ void Framegrabber::clearLastError()
 
 bool Framegrabber::tryBeginControl()
 {
-    if (isLifecycleThread()) return false;
+    if (isLifecycleThread())
+    {
+        setLastError(FG_ERROR, "The control gate cannot be acquired from a frame grabber callback.");
+        return false;
+    }
     bool expected = false;
     if (!_controlBusy.compare_exchange_strong(expected, true, std::memory_order_acq_rel))
     {
+        setLastError(FG_ERROR, "Another frame grabber control operation is active.");
         return false;
     }
     notifyStatus(ControlStatus, true);
     return true;
 }
 
-void Framegrabber::endControl()
+bool Framegrabber::endControl()
 {
     if (isLifecycleThread())
     {
+        setLastError(FG_ERROR, "The control gate cannot be released from a frame grabber callback.");
         log("A frame grabber callback cannot release another operation's control gate.", true);
-        return;
+        return false;
     }
-    if (_controlBusy.exchange(false, std::memory_order_acq_rel))
+    if (!_controlBusy.exchange(false, std::memory_order_acq_rel))
     {
-        notifyStatus(ControlStatus, false);
+        setLastError(FG_ERROR, "No frame grabber control operation is active.");
+        return false;
     }
+    notifyStatus(ControlStatus, false);
+    return true;
 }
 
 bool Framegrabber::controlBusy() const noexcept
@@ -1565,6 +1575,11 @@ void Framegrabber::close()
     if (isLifecycleThread() || isAcquisitionThread())
     {
         requestStopChannels();
+        if (isLifecycleThread())
+        {
+            setLastError(FG_ERROR,
+                "close() from a frame grabber callback only requests acquisition stop.");
+        }
         return;
     }
     LifecycleLock lifecycleLock(*this);
@@ -1742,8 +1757,12 @@ bool Framegrabber::saveConfiguration(const std::string& path)
 
 void Framegrabber::grab(const std::size_t frames)
 {
-    if (_isRunning.load(std::memory_order_acquire)
-        || isLifecycleThread() || isAcquisitionThread())
+    if (isLifecycleThread() || isAcquisitionThread())
+    {
+        static_cast<void>(rejectLifecycleReentry("Starting acquisition"));
+        return;
+    }
+    if (_isRunning.load(std::memory_order_acquire))
     {
         return;
     }
@@ -1790,11 +1809,12 @@ void Framegrabber::grab(const std::size_t frames)
         _lastStatistics.clear();
     }
 
+    _grabbingStatusPublished.store(true, std::memory_order_release);
     notifyStatus(GrabbingStatus, true);
     if (!_isRunning.load(std::memory_order_acquire))
     {
         _startingChannels.store(false, std::memory_order_release);
-        notifyStatus(GrabbingStatus, false);
+        publishAcquisitionStopped();
         return;
     }
     for (int dmaIndex = 0; dmaIndex < dmaCount; ++dmaIndex)
@@ -1807,7 +1827,7 @@ void Framegrabber::grab(const std::size_t frames)
     if (_activeChannels.load(std::memory_order_acquire) == 0)
     {
         _isRunning.store(false, std::memory_order_release);
-        notifyStatus(GrabbingStatus, false);
+        publishAcquisitionStopped();
     }
 }
 
@@ -2024,6 +2044,10 @@ void Framegrabber::startChannel(const unsigned int dmaIndex, const std::size_t f
              pixelBytes, bitAlignment, frameBytes, bufferCount]
             {
                 const unsigned int dmaIndex = channelPtr->index;
+                {
+                    std::lock_guard<std::mutex> lock(_stateMutex);
+                    channelPtr->workerThreadId = std::this_thread::get_id();
+                }
                 const int acquireResult =
                     Fg_AcquireEx(handle, static_cast<int>(dmaIndex), GRAB_INFINITE, ACQ_STANDARD,
                                  channelPtr->memory);
@@ -2324,11 +2348,14 @@ void Framegrabber::finishChannel(DmaChannel& channel)
     }
 
     const unsigned int previous = _activeChannels.fetch_sub(1, std::memory_order_acq_rel);
-    if (previous == 1
-        && !_startingChannels.load(std::memory_order_acquire))
+    if (previous == 1)
     {
+        while (_startingChannels.load(std::memory_order_acquire))
+        {
+            std::this_thread::yield();
+        }
         _isRunning.store(false, std::memory_order_release);
-        notifyStatus(GrabbingStatus, false);
+        publishAcquisitionStopped();
     }
 }
 
@@ -2421,9 +2448,18 @@ void Framegrabber::requestStop()
     requestStopChannels();
 }
 
+void Framegrabber::publishAcquisitionStopped()
+{
+    if (_grabbingStatusPublished.exchange(false, std::memory_order_acq_rel))
+    {
+        notifyStatus(GrabbingStatus, false);
+    }
+}
+
 void Framegrabber::requestStopChannels()
 {
     _isRunning.store(false, std::memory_order_release);
+    publishAcquisitionStopped();
 
     std::vector<DmaChannel*> channels;
     Fg_Struct* handle = nullptr;
@@ -2494,7 +2530,7 @@ bool Framegrabber::isAcquisitionThread() const
     std::lock_guard<std::mutex> lock(_stateMutex);
     for (const auto& channel : _channels)
     {
-        if (channel && channel->thread.get_id() == current)
+        if (channel && channel->workerThreadId == current)
         {
             return true;
         }
@@ -2504,22 +2540,22 @@ bool Framegrabber::isAcquisitionThread() const
 
 bool Framegrabber::joinStoppedChannels()
 {
-    std::vector<std::thread*> threads;
+    std::vector<std::pair<std::thread*, std::thread::id>> threads;
     {
         std::lock_guard<std::mutex> lock(_stateMutex);
         for (const auto& channel : _channels)
         {
             if (channel && channel->thread.joinable())
             {
-                threads.push_back(&channel->thread);
+                threads.emplace_back(&channel->thread, channel->workerThreadId);
             }
         }
     }
 
     bool allThreadsJoined = true;
-    for (std::thread* thread : threads)
+    for (const auto& [thread, threadId] : threads)
     {
-        if (thread->get_id() == std::this_thread::get_id())
+        if (threadId == std::this_thread::get_id())
         {
             allThreadsJoined = false;
             continue;
