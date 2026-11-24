@@ -2,6 +2,7 @@
 #include "FramegrabberRuntimeDiagnostics.h"
 
 #include "FramegrabberCameraGeometry.h"
+#include "FramegrabberImageLayout.h"
 #include "FramegrabberOwnedBufferPool.h"
 #include "FramegrabberSystem.h"
 
@@ -152,7 +153,8 @@ std::string readCameraXmlProperty(SgcCameraHandle* handle)
         nullptr,
         &propertyType,
         &xmlSize);
-    if (result != SGC_OK || xmlSize == 0)
+    if (result != SGC_OK || xmlSize == 0
+        || xmlSize == (std::numeric_limits<std::size_t>::max)())
     {
         return {};
     }
@@ -535,6 +537,70 @@ bool buildAppletFeatureNode(
 
 using FramegrabberDetail::OwnedBufferPool;
 
+namespace {
+
+struct LifecycleFrame
+{
+    const Framegrabber* owner;
+    const LifecycleFrame* previous;
+};
+
+thread_local const LifecycleFrame* lifecycleTop = nullptr;
+
+struct CallbackFrame
+{
+    const Framegrabber* owner;
+    CallbackFrame* previous;
+    bool nodeCallback;
+};
+
+thread_local CallbackFrame* callbackTop = nullptr;
+
+}
+
+struct Framegrabber::CallbackReentry
+{
+    explicit CallbackReentry(Framegrabber& owner, const bool nodeCallback = false)
+        : _frame{&owner, callbackTop, nodeCallback}
+    {
+        callbackTop = &_frame;
+    }
+
+    ~CallbackReentry()
+    {
+        callbackTop = _frame.previous;
+    }
+
+    CallbackReentry(const CallbackReentry&) = delete;
+    CallbackReentry& operator=(const CallbackReentry&) = delete;
+
+private:
+    CallbackFrame _frame;
+};
+
+struct Framegrabber::LifecycleLock
+{
+    explicit LifecycleLock(Framegrabber& owner)
+        : _owner(&owner), _frame{&owner, lifecycleTop}
+    {
+        owner._lifecycleMutex.lock();
+        lifecycleTop = &_frame;
+    }
+
+    ~LifecycleLock()
+    {
+        lifecycleTop = _frame.previous;
+        _owner->_lifecycleMutex.unlock();
+    }
+
+    LifecycleLock(const LifecycleLock&) = delete;
+    LifecycleLock& operator=(const LifecycleLock&) = delete;
+
+private:
+    Framegrabber* _owner;
+    LifecycleFrame _frame;
+};
+
 struct Framegrabber::DmaChannel
 {
     unsigned int index = 0;
@@ -626,6 +692,7 @@ bool Framegrabber::ensureResourceClaim(const FramegrabberSystem::BoardInfo& boar
 
     releaseResourceClaim();
     std::shared_ptr<void> claim;
+    CallbackReentry claimCallback(*this);
     try
     {
         claim = _resourceClaim(board.serial, error);
@@ -750,7 +817,9 @@ std::string Framegrabber::configurationPath() const
 
 bool Framegrabber::loadApplet(const std::string& path, const std::string& boardName)
 {
-    std::lock_guard<std::mutex> lifecycleLock(_lifecycleMutex);
+    if (isLifecycleThread() || isAcquisitionThread())
+        return rejectLifecycleReentry("Loading an applet");
+    LifecycleLock lifecycleLock(*this);
     return loadAppletUnlocked(path, boardName);
 }
 
@@ -878,7 +947,9 @@ bool Framegrabber::loadAppletConfiguration(const std::string& appletPath,
                                             const std::string& configurationPath,
                                             const std::string& boardName)
 {
-    std::lock_guard<std::mutex> lifecycleLock(_lifecycleMutex);
+    if (isLifecycleThread() || isAcquisitionThread())
+        return rejectLifecycleReentry("Loading a configuration");
+    LifecycleLock lifecycleLock(*this);
     clearLastError();
     if (configurationPath.empty()
         || lowerExtension(configurationPath) != ".mcf"
@@ -1109,7 +1180,9 @@ bool Framegrabber::loadAppletUnlocked(const std::string& reference, const std::s
 
 bool Framegrabber::open(const std::string& boardName)
 {
-    std::lock_guard<std::mutex> lifecycleLock(_lifecycleMutex);
+    if (isLifecycleThread() || isAcquisitionThread())
+        return rejectLifecycleReentry("Opening a board");
+    LifecycleLock lifecycleLock(*this);
     return openUnlocked(boardName);
 }
 
@@ -1236,6 +1309,7 @@ void Framegrabber::adoptBoard(Fg_Struct* handle,
 
     {
         std::lock_guard<std::mutex> lock(_stateMutex);
+        clearAppletFeatureModels();
         _handle = handle;
         _cxpBoard = cxpBoard;
         _cameraControlRequired = applet.supportsCameraControl;
@@ -1251,7 +1325,6 @@ void Framegrabber::adoptBoard(Fg_Struct* handle,
         _lastCameraDiscovery = {};
         ++_connectionGeneration;
     }
-    clearAppletFeatureModels();
 
     if (cxpBoard)
     {
@@ -1268,7 +1341,9 @@ void Framegrabber::adoptBoard(Fg_Struct* handle,
 
 bool Framegrabber::refreshAppletCatalog(const std::string& boardName)
 {
-    std::lock_guard<std::mutex> lifecycleLock(_lifecycleMutex);
+    if (isLifecycleThread() || isAcquisitionThread())
+        return rejectLifecycleReentry("Refreshing the applet catalog");
+    LifecycleLock lifecycleLock(*this);
     if (!_system)
     {
         return false;
@@ -1430,6 +1505,7 @@ void Framegrabber::clearLastError()
 
 bool Framegrabber::tryBeginControl()
 {
+    if (isLifecycleThread()) return false;
     bool expected = false;
     if (!_controlBusy.compare_exchange_strong(expected, true, std::memory_order_acq_rel))
     {
@@ -1441,6 +1517,11 @@ bool Framegrabber::tryBeginControl()
 
 void Framegrabber::endControl()
 {
+    if (isLifecycleThread())
+    {
+        log("A frame grabber callback cannot release another operation's control gate.", true);
+        return;
+    }
     if (_controlBusy.exchange(false, std::memory_order_acq_rel))
     {
         notifyStatus(ControlStatus, false);
@@ -1452,6 +1533,27 @@ bool Framegrabber::controlBusy() const noexcept
     return _controlBusy.load(std::memory_order_acquire);
 }
 
+bool Framegrabber::rejectLifecycleReentry(const char* operation)
+{
+    const std::string message = std::string(operation)
+        + " cannot be called from a frame grabber callback.";
+    setLastError(FG_ERROR, message);
+    return false;
+}
+
+bool Framegrabber::isLifecycleThread() const noexcept
+{
+    for (const LifecycleFrame* frame = lifecycleTop; frame; frame = frame->previous)
+    {
+        if (frame->owner == this) return true;
+    }
+    for (const CallbackFrame* frame = callbackTop; frame; frame = frame->previous)
+    {
+        if (frame->owner == this) return true;
+    }
+    return false;
+}
+
 bool Framegrabber::isOpened() const
 {
     std::lock_guard<std::mutex> lock(_stateMutex);
@@ -1460,7 +1562,12 @@ bool Framegrabber::isOpened() const
 
 void Framegrabber::close()
 {
-    std::lock_guard<std::mutex> lifecycleLock(_lifecycleMutex);
+    if (isLifecycleThread() || isAcquisitionThread())
+    {
+        requestStopChannels();
+        return;
+    }
+    LifecycleLock lifecycleLock(*this);
     if (closeUnlocked(true))
     {
         releaseResourceClaim();
@@ -1479,6 +1586,7 @@ bool Framegrabber::closeUnlocked(const bool notifyConnectionStatus)
     {
         std::lock_guard<std::mutex> lock(_stateMutex);
         wasOpened = _handle != nullptr;
+        clearAppletFeatureModels();
         releaseHandles();
         _connectedBoardName.clear();
         _loadedAppletName.clear();
@@ -1486,7 +1594,6 @@ bool Framegrabber::closeUnlocked(const bool notifyConnectionStatus)
         _channels.clear();
         _cxpCameras.clear();
     }
-    clearAppletFeatureModels();
 
     if (wasOpened && notifyConnectionStatus)
     {
@@ -1540,7 +1647,9 @@ std::string Framegrabber::getLoadedAppletVersion() const
 
 bool Framegrabber::loadConfiguration(const std::string& path)
 {
-    std::lock_guard<std::mutex> lifecycleLock(_lifecycleMutex);
+    if (isLifecycleThread() || isAcquisitionThread())
+        return rejectLifecycleReentry("Loading a configuration");
+    LifecycleLock lifecycleLock(*this);
     clearLastError();
     if (!loadConfigurationUnlocked(path))
     {
@@ -1592,7 +1701,9 @@ bool Framegrabber::loadConfigurationUnlocked(const std::string& path)
 
 bool Framegrabber::saveConfiguration(const std::string& path)
 {
-    std::lock_guard<std::mutex> lifecycleLock(_lifecycleMutex);
+    if (isLifecycleThread() || isAcquisitionThread())
+        return rejectLifecycleReentry("Saving a configuration");
+    LifecycleLock lifecycleLock(*this);
     clearLastError();
     // Fg_saveConfig writes the .mcf and, for field parameters, an .mfs with the same stem.
     if (path.empty() || lowerExtension(path) != ".mcf")
@@ -1631,12 +1742,13 @@ bool Framegrabber::saveConfiguration(const std::string& path)
 
 void Framegrabber::grab(const std::size_t frames)
 {
-    if (_isRunning.load(std::memory_order_acquire))
+    if (_isRunning.load(std::memory_order_acquire)
+        || isLifecycleThread() || isAcquisitionThread())
     {
         return;
     }
 
-    std::lock_guard<std::mutex> lifecycleLock(_lifecycleMutex);
+    LifecycleLock lifecycleLock(*this);
     if (_isRunning.load(std::memory_order_acquire))
     {
         return;
@@ -1679,8 +1791,15 @@ void Framegrabber::grab(const std::size_t frames)
     }
 
     notifyStatus(GrabbingStatus, true);
+    if (!_isRunning.load(std::memory_order_acquire))
+    {
+        _startingChannels.store(false, std::memory_order_release);
+        notifyStatus(GrabbingStatus, false);
+        return;
+    }
     for (int dmaIndex = 0; dmaIndex < dmaCount; ++dmaIndex)
     {
+        if (!_isRunning.load(std::memory_order_acquire)) break;
         startChannel(static_cast<unsigned int>(dmaIndex), frames);
     }
 
@@ -1701,7 +1820,7 @@ void Framegrabber::startChannel(const unsigned int dmaIndex, const std::size_t f
         handle = _handle;
         bufferCount = _dmaBufferCount;
     }
-    if (!handle)
+    if (!handle || !_isRunning.load(std::memory_order_acquire))
     {
         return;
     }
@@ -1826,6 +1945,12 @@ void Framegrabber::startChannel(const unsigned int dmaIndex, const std::size_t f
         return;
     }
 
+    if (static_cast<std::size_t>(width)
+        > (std::numeric_limits<std::size_t>::max)() / static_cast<std::size_t>(pixelBytes))
+    {
+        log("DMA(" + std::to_string(dmaIndex) + ") image row size overflows address space.", true);
+        return;
+    }
     const std::size_t rowBytes = static_cast<std::size_t>(width)
                                  * static_cast<std::size_t>(pixelBytes);
     if (static_cast<std::size_t>(height)
@@ -1835,7 +1960,8 @@ void Framegrabber::startChannel(const unsigned int dmaIndex, const std::size_t f
         return;
     }
     const std::size_t frameBytes = rowBytes * static_cast<std::size_t>(height);
-    if (bufferCount > (std::numeric_limits<std::size_t>::max)() / frameBytes)
+    if (bufferCount > static_cast<std::size_t>(FRAMEINDEX_MAX)
+        || bufferCount > (std::numeric_limits<std::size_t>::max)() / frameBytes)
     {
         log("DMA(" + std::to_string(dmaIndex) + ") buffer allocation is too large.", true);
         return;
@@ -1883,6 +2009,12 @@ void Framegrabber::startChannel(const unsigned int dmaIndex, const std::size_t f
     channel->frameStorage = std::move(frameStorage);
     DmaChannel* channelPtr = channel.get();
     std::unique_lock<std::mutex> registrationLock(_stateMutex);
+    if (!_isRunning.load(std::memory_order_acquire))
+    {
+        registrationLock.unlock();
+        Fg_FreeMemEx(handle, memory);
+        return;
+    }
     _channels[dmaIndex] = std::move(channel);
     _activeChannels.fetch_add(1, std::memory_order_acq_rel);
     try
@@ -1920,6 +2052,7 @@ void Framegrabber::startChannel(const unsigned int dmaIndex, const std::size_t f
                 frameindex_t lastPicture = 0;
                 std::size_t delivered = 0;
                 bool payloadGeometryWarningLogged = false;
+                bool storageWarningLogged = false;
                 while (!channelPtr->stopRequested.load(std::memory_order_acquire))
                 {
                     const frameindex_t nextPicture =
@@ -1975,49 +2108,42 @@ void Framegrabber::startChannel(const unsigned int dmaIndex, const std::size_t f
                         static_cast<int>(dmaIndex),
                         channelPtr->memory,
                         picture);
+                    FramegrabberDetail::PayloadLayout payloadLayout;
+                    const auto layoutError = FramegrabberDetail::resolvePayloadLayout(
+                        transferLength, height, pixelBits, width, frameBytes, payloadLayout);
                     if (transferResult != FG_OK
-                        || transferLength == 0U
-                        || transferLength > frameBytes
-                        || transferLength % static_cast<std::size_t>(height) != 0U)
+                        || layoutError != FramegrabberDetail::PayloadLayoutError::None)
                     {
-                        log("DMA(" + std::to_string(dmaIndex)
-                                + ") reported an invalid transfer length: length="
-                                + std::to_string(transferLength) + " frameBytes="
-                                + std::to_string(frameBytes) + " width=" + std::to_string(width)
-                                + " height=" + std::to_string(height) + " result="
-                                + std::to_string(transferResult) + ".",
-                            true);
+                        if (transferResult == FG_OK
+                            && layoutError == FramegrabberDetail::PayloadLayoutError::StrideTooLarge)
+                        {
+                            log("DMA(" + std::to_string(dmaIndex)
+                                    + ") image stride exceeds the supported range.",
+                                true);
+                        }
+                        else if (transferResult == FG_OK
+                                 && layoutError == FramegrabberDetail::PayloadLayoutError::RowTooSmall)
+                        {
+                            log("DMA(" + std::to_string(dmaIndex)
+                                    + ") transfer row is smaller than one pixel.",
+                                true);
+                        }
+                        else
+                        {
+                            log("DMA(" + std::to_string(dmaIndex)
+                                    + ") reported an invalid transfer length: length="
+                                    + std::to_string(transferLength) + " frameBytes="
+                                    + std::to_string(frameBytes) + " width=" + std::to_string(width)
+                                    + " height=" + std::to_string(height) + " result="
+                                    + std::to_string(transferResult) + ".",
+                                true);
+                        }
                         channelPtr->rejected.fetch_add(1, std::memory_order_relaxed);
                         continue;
                     }
-                    const std::size_t payloadBytes = transferLength;
-                    const std::size_t payloadStride = payloadBytes / static_cast<std::size_t>(height);
-                    if (payloadStride > static_cast<std::size_t>((std::numeric_limits<int>::max)()))
-                    {
-                        log("DMA(" + std::to_string(dmaIndex)
-                                + ") image stride exceeds the supported range.",
-                            true);
-                        continue;
-                    }
-
-                    // The applet may keep an ROI that is narrower than the camera's
-                    // current output. In that case FG_WIDTH still describes the camera
-                    // geometry while FG_TRANSFER_LEN describes the delivered DMA rows.
-                    // Preserve the image by publishing the width the DMA payload can
-                    // actually represent instead of forwarding an invalid stride to the
-                    // display backend.
-                    const std::size_t payloadBits = payloadStride * 8U;
-                    const std::size_t effectiveWidth = payloadBits
-                        / static_cast<std::size_t>(pixelBits);
-                    if (effectiveWidth == 0U)
-                    {
-                        log("DMA(" + std::to_string(dmaIndex)
-                                + ") transfer row is smaller than one pixel.",
-                            true);
-                        continue;
-                    }
-                    const int imageWidth = static_cast<int>(std::min<std::size_t>(
-                        static_cast<std::size_t>(width), effectiveWidth));
+                    const std::size_t payloadBytes = payloadLayout.bytes;
+                    const std::size_t payloadStride = payloadLayout.stride;
+                    const int imageWidth = payloadLayout.width;
                     if (imageWidth < width && !payloadGeometryWarningLogged)
                     {
                         log("DMA(" + std::to_string(dmaIndex)
@@ -2035,13 +2161,31 @@ void Framegrabber::startChannel(const unsigned int dmaIndex, const std::size_t f
                     {
                         break;
                     }
-                    OwnedBufferPool::Lease ownedBytes = channelPtr->frameStorage
-                        ? channelPtr->frameStorage(payloadBytes)
-                        : channelPtr->ownedBufferPool->acquire();
+                    std::string storageError;
+                    OwnedBufferPool::Lease ownedBytes;
+                    {
+                        CallbackReentry storageCallback(*this);
+                        ownedBytes = acquireFrameStorage(
+                            channelPtr->frameStorage,
+                            channelPtr->ownedBufferPool,
+                            payloadBytes,
+                            &storageError);
+                    }
                     if (!ownedBytes)
                     {
                         channelPtr->poolExhausted.fetch_add(1, std::memory_order_relaxed);
+                        if (!storageError.empty() && !storageWarningLogged)
+                        {
+                            log("DMA(" + std::to_string(dmaIndex)
+                                    + ") frame storage acquisition failed: " + storageError,
+                                true);
+                            storageWarningLogged = true;
+                        }
                         continue;
+                    }
+                    if (channelPtr->stopRequested.load(std::memory_order_acquire))
+                    {
+                        break;
                     }
                     std::memcpy(ownedBytes.get(), source, payloadBytes);
 
@@ -2089,6 +2233,7 @@ void Framegrabber::startChannel(const unsigned int dmaIndex, const std::size_t f
                     bool consumerDelivered = false;
                     for (const GrabCallback& callback : callbacks)
                     {
+                        CallbackReentry callbackScope(*this);
                         try
                         {
                             callback(image, image.frameSeq);
@@ -2267,7 +2412,12 @@ void Framegrabber::stopCameraAcquisitionForChannel(const unsigned int dmaIndex)
 
 void Framegrabber::requestStop()
 {
-    std::lock_guard<std::mutex> lifecycleLock(_lifecycleMutex);
+    if (isLifecycleThread() || isAcquisitionThread())
+    {
+        requestStopChannels();
+        return;
+    }
+    LifecycleLock lifecycleLock(*this);
     requestStopChannels();
 }
 
@@ -2328,9 +2478,28 @@ void Framegrabber::requestStopChannels()
 
 void Framegrabber::stop()
 {
-    std::lock_guard<std::mutex> lifecycleLock(_lifecycleMutex);
+    if (isLifecycleThread() || isAcquisitionThread())
+    {
+        requestStopChannels();
+        return;
+    }
+    LifecycleLock lifecycleLock(*this);
     requestStopChannels();
     joinStoppedChannels();
+}
+
+bool Framegrabber::isAcquisitionThread() const
+{
+    const auto current = std::this_thread::get_id();
+    std::lock_guard<std::mutex> lock(_stateMutex);
+    for (const auto& channel : _channels)
+    {
+        if (channel && channel->thread.get_id() == current)
+        {
+            return true;
+        }
+    }
+    return false;
 }
 
 bool Framegrabber::joinStoppedChannels()
@@ -2493,7 +2662,7 @@ std::string Framegrabber::getAppletFeatureXml(const unsigned int dmaIndex) const
 
     std::size_t size = 0;
     Fg_getParameterInfoXML(_handle, static_cast<int>(dmaIndex), nullptr, &size);
-    if (size == 0)
+    if (size == 0 || size == (std::numeric_limits<std::size_t>::max)())
     {
         return {};
     }
@@ -2513,6 +2682,12 @@ std::string Framegrabber::getAppletFeatureXml(const unsigned int dmaIndex) const
 std::vector<Framegrabber::AppletFeatureNode>
 Framegrabber::getAppletFeatureModel(const unsigned int dmaIndex) const
 {
+    std::uint64_t generation = 0;
+    {
+        std::lock_guard<std::mutex> lock(_stateMutex);
+        if (!_handle) return {};
+        generation = _connectionGeneration;
+    }
     std::vector<AppletFeatureNode> cachedModel;
     {
         std::lock_guard<std::mutex> lock(_appletFeatureModelMutex);
@@ -2524,8 +2699,13 @@ Framegrabber::getAppletFeatureModel(const unsigned int dmaIndex) const
     }
     if (!cachedModel.empty())
     {
+        {
+            std::lock_guard<std::mutex> lock(_stateMutex);
+            if (!_handle || _connectionGeneration != generation) return {};
+        }
         refreshAppletFeatureAccess(cachedModel, dmaIndex);
-        return cachedModel;
+        std::lock_guard<std::mutex> lock(_stateMutex);
+        return _handle && _connectionGeneration == generation ? cachedModel : std::vector<AppletFeatureNode>{};
     }
 
     const std::string xml = getAppletFeatureXml(dmaIndex);
@@ -2570,7 +2750,7 @@ Framegrabber::getAppletFeatureModel(const unsigned int dmaIndex) const
 
     {
         std::lock_guard<std::mutex> lock(_stateMutex);
-        if (!_handle)
+        if (!_handle || _connectionGeneration != generation)
         {
             return {};
         }
@@ -2627,7 +2807,12 @@ Framegrabber::getAppletFeatureModel(const unsigned int dmaIndex) const
 
     refreshAppletFeatureAccess(model, dmaIndex);
     {
-        std::lock_guard<std::mutex> lock(_appletFeatureModelMutex);
+        std::lock_guard<std::mutex> lock(_stateMutex);
+        if (!_handle || _connectionGeneration != generation)
+        {
+            return {};
+        }
+        std::lock_guard<std::mutex> modelLock(_appletFeatureModelMutex);
         _appletFeatureModels[dmaIndex] = model;
     }
     return model;
@@ -3181,11 +3366,13 @@ Framegrabber::cameraControlCapabilities() const
 
 bool Framegrabber::refreshCameras(const CameraTransport transport)
 {
+    if (isLifecycleThread() || isAcquisitionThread())
+        return rejectLifecycleReentry("Refreshing cameras");
     if (transport != CameraTransport::CoaXPress)
     {
         return false;
     }
-    std::lock_guard<std::mutex> lifecycleLock(_lifecycleMutex);
+    LifecycleLock lifecycleLock(*this);
     const bool refreshed = refreshCamerasUnlocked(true);
     // Synchronize every camera that connected even when another channel failed.
     // Acquisition running is already rejected by refreshCamerasUnlocked.
@@ -3491,9 +3678,11 @@ Framegrabber::getCachedCameraList(const CameraTransport transport) const
 bool Framegrabber::connectCamera(const CameraTransport transport,
                                  const unsigned int dmaIndex)
 {
+    if (isLifecycleThread() || isAcquisitionThread())
+        return rejectLifecycleReentry("Connecting a camera");
     // The lifecycle gate prevents a manual connect from racing grab(), close(),
     // refreshCameras() or configuration loading.
-    std::lock_guard<std::mutex> lifecycleLock(_lifecycleMutex);
+    LifecycleLock lifecycleLock(*this);
     clearLastError();
     if (_isRunning.load(std::memory_order_acquire))
     {
@@ -3540,9 +3729,14 @@ bool Framegrabber::connectCameraUnlocked(const CameraTransport transport,
 void Framegrabber::disconnectCamera(const CameraTransport transport,
                                     const unsigned int dmaIndex)
 {
+    if (isLifecycleThread() || isAcquisitionThread())
+    {
+        static_cast<void>(rejectLifecycleReentry("Disconnecting a camera"));
+        return;
+    }
     // Serialize a manual disconnect with startup, grab, close and refresh. A live
     // camera must be stopped explicitly before it can be disconnected.
-    std::lock_guard<std::mutex> lifecycleLock(_lifecycleMutex);
+    LifecycleLock lifecycleLock(*this);
     clearLastError();
     if (_isRunning.load(std::memory_order_acquire))
     {
@@ -4070,6 +4264,7 @@ int Framegrabber::bitsPerPixel(const PixelFormat pixelFormat)
 
 void Framegrabber::notifyStatus(const Status status, const bool on)
 {
+    CallbackReentry callbackReentry(*this);
     if (status == GrabbingStatus)
     {
         clearAppletFeatureModels();
@@ -4106,6 +4301,11 @@ void Framegrabber::notifyNode(const FeatureSource source,
                               const unsigned int dmaIndex,
                               const std::string& nodeName)
 {
+    for (const CallbackFrame* frame = callbackTop; frame; frame = frame->previous)
+    {
+        if (frame->owner == this && frame->nodeCallback) return;
+    }
+    CallbackReentry callbackReentry(*this, true);
     std::vector<NodeCallback> callbacks;
     {
         std::lock_guard<std::mutex> lock(_nodeCallbackMutex);

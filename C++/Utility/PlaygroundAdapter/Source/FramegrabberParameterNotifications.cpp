@@ -124,6 +124,24 @@ void ParameterNotificationHub::publishTerminal(const std::string& connectionId,
 {
     const auto watches = watchesFor(connectionId);
     for (const auto& watch : watches) {
+        bool needsSnapshot = false;
+        {
+            std::lock_guard<std::mutex> state(watch->stateMutex);
+            needsSnapshot = !watch->snapshotSent;
+        }
+        if (needsSnapshot) {
+            DeviceParameterChange snapshot;
+            if (_snapshot) snapshot = _snapshot(watch->connectionId, watch->subscriptionId);
+            snapshot.kind = DeviceParameterChangeKind::Snapshot;
+            snapshot.connectionId = watch->connectionId;
+            snapshot.subscriptionId = watch->subscriptionId;
+            snapshot.resync = false;
+            snapshot.invalidated.clear();
+            snapshot.overflowReason.clear();
+            snapshot.error = DeviceParameterError::None;
+            snapshot.message.clear();
+            push(watch, std::move(snapshot));
+        }
         DeviceParameterChange change;
         change.kind = DeviceParameterChangeKind::Delta;
         change.connectionId = watch->connectionId;

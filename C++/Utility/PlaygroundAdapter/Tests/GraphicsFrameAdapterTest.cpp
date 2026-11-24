@@ -1,6 +1,7 @@
 #include "FramegrabberGraphicsFrameAdapter.h"
 #include <cassert>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <vector>
 
@@ -27,6 +28,33 @@ int main()
     assert(image.data() == storage->data());
     assert(image.data()[3] == 4U);
     assert(FramegrabberGraphicsFrameAdapter::imageFailure(image) == GraphicsImageFailure::None);
+
+    auto truncated = source;
+    truncated.size = 3;
+    assert(!truncated.isValid());
+    truncated = source;
+    truncated.height = 0;
+    assert(!truncated.isValid());
+    truncated = source;
+    truncated.stride = 0;
+    assert(!truncated.isValid());
+    truncated = source;
+    truncated.storage.reset();
+    assert(!truncated.isValid());
+    truncated = source;
+    truncated.stride = 1;
+    truncated.size = 2;
+    assert(!truncated.isValid());
+    truncated = source;
+    truncated.bitsPerPixel = 0;
+    assert(!truncated.isValid());
+    truncated = source;
+    truncated.width = (std::numeric_limits<int>::max)();
+    truncated.height = (std::numeric_limits<int>::max)();
+    truncated.stride = (std::numeric_limits<int>::max)();
+    truncated.bitsPerPixel = (std::numeric_limits<int>::max)();
+    truncated.size = (std::numeric_limits<std::size_t>::max)();
+    assert(!truncated.isValid());
 
     auto rejected = image;
     rejected.stride = 1;
@@ -55,6 +83,7 @@ int main()
         input.bitsPerPixel = bitsPerPixel;
         input.pixelFormat = pixelFormat;
         input.bitAlignment = Framegrabber::BitAlignment::Packed;
+        assert(input.isValid());
 
         const GraphicsImage wrapped = FramegrabberGraphicsFrameAdapter::wrapImage(input, 3U);
         assert(wrapped.isValid());

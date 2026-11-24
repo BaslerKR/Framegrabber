@@ -612,11 +612,37 @@ DeviceParameterDescriptor FramegrabberSourceController::observeCameraParameter(
         *value = *boolean != 0;
         return true;
     };
+    const auto addObservationError = [&result](const std::string& message) {
+        if (!result.observationError.empty()) result.observationError += "; ";
+        result.observationError += message;
+    };
     bool locked = false;
-    if (readGate(declaration.lockedFeature, &locked) && locked) writable = false;
+    if (!declaration.lockedFeature.empty())
+    {
+        if (!readGate(declaration.lockedFeature, &locked))
+        {
+            writable = false;
+            addObservationError("The SDK could not read the camera lock state.");
+        }
+        else if (locked)
+        {
+            writable = false;
+        }
+    }
     bool available = true;
-    if (readGate(declaration.availableFeature, &available) && !available)
-        writable = false;
+    if (!declaration.availableFeature.empty())
+    {
+        if (!readGate(declaration.availableFeature, &available))
+        {
+            available = false;
+            writable = false;
+            addObservationError("The SDK could not read the camera availability state.");
+        }
+        else if (!available)
+        {
+            writable = false;
+        }
+    }
     result.readable = readable && result.kind != Kind::Command;
     result.writable = writable;
     result.available = available && (result.readable || result.writable);
@@ -638,7 +664,7 @@ DeviceParameterDescriptor FramegrabberSourceController::observeCameraParameter(
         else if (result.kind == Kind::Boolean) value = std::uint32_t{0};
         if (!_backend.getCameraFeature(transport, dmaIndex, declaration.name, value))
         {
-            result.observationError = "The SDK could not read the camera feature.";
+            addObservationError("The SDK could not read the camera feature.");
         }
         else
         {
@@ -1112,6 +1138,10 @@ DeviceParameterResult FramegrabberSourceController::requestParameter(
                                     break;
                                 case Kind::Command: break;
                                 }
+                            }
+                            if (!converted) {
+                                result.error = Error::InvalidArgument;
+                                result.message = "The value is not representable by the SDK parameter type.";
                             }
                         }
                         if (result.error == Error::None) {

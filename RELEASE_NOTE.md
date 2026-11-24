@@ -1,5 +1,8 @@
 ## Unreleased
 
+- Contain frame-storage exceptions on acquisition workers, count the dropped frames, and prevent callback/lifecycle re-entry from deadlocking stop or applet replacement, releasing another operation's control gate, or recursively delivering node updates.
+- Refuse parameter writes that cannot be represented by the SDK type, fail closed when camera lock/availability gates cannot be read, and preserve snapshot-before-terminal notification ordering.
+- Validate complete image rows in `Framegrabber::Image::isValid()`, count every refused DMA layout as rejected, and add an opt-in `FrameGrabberTest` hardware smoke target for DMA, lifecycle, failure and re-entry scenarios.
 - Report rejected DMA image layouts through the optional image diagnostic sink, with the failed rule and numeric input layout.
 
 - Ship the package icon from this repository (`C++/Utility/PlaygroundAdapter/Package/icon.png`) instead of the SDK-installed Resources brand asset. Include `DeviceRuntime/Contract/DevicePluginSession.h` from the contract include root; the SDK no longer installs a `PlaygroundWidget` header path or vendor icons.

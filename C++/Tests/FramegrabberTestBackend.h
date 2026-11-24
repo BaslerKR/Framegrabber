@@ -53,6 +53,9 @@ struct FramegrabberTestState
     bool mcfReferencesOutsideApplet = false;
     bool extendedCameraXml = false;
     bool cameraXmlEmpty = false;
+    bool failCameraGateReads = false;
+    std::optional<Framegrabber::ParameterValue> widthPrototypeOverride;
+    std::vector<std::pair<std::int64_t, Framegrabber::ParameterValue>> parameterWrites;
 
     [[nodiscard]] std::string cameraXml(const bool extended) const
     {
@@ -473,7 +476,12 @@ struct FramegrabberTestBackend
             default: return false;
             }
         };
-        result.appletParameterPrototype = [](std::int64_t id, unsigned) -> std::optional<Framegrabber::ParameterValue> {
+        result.appletParameterPrototype = [shared](std::int64_t id, unsigned) -> std::optional<Framegrabber::ParameterValue> {
+            if (id == 1)
+            {
+                std::lock_guard<std::mutex> lock(shared->mutex);
+                if (shared->widthPrototypeOverride) return shared->widthPrototypeOverride;
+            }
             switch (id)
             {
             case 1:
@@ -492,6 +500,7 @@ struct FramegrabberTestBackend
             if (const auto* number = std::get_if<std::int64_t>(&value)) shared->integers[key] = *number;
             else if (const auto* number = std::get_if<double>(&value)) shared->floats[key] = *number;
             else if (const auto* text = std::get_if<std::string>(&value)) shared->strings[key] = *text;
+            shared->parameterWrites.emplace_back(id, value);
             if (sdkResult) *sdkResult = 0;
             return true;
         };
@@ -529,6 +538,7 @@ struct FramegrabberTestBackend
             }
             if (name == "GainLocked")
             {
+                if (shared->failCameraGateReads) return false;
                 value = std::int64_t{1};
                 return true;
             }

@@ -30,13 +30,16 @@ private slots:
     void hostSelectedAppletFileLoadsAndValidatesPath();
     void hostSelectedUnicodePathUsesNativeEncoding();
     void hostSelectedNonAsciiConfigurationPath();
+    void configurationPathParserHandlesSdkFormatting();
     void nonCatalogAppletMetadataGatesCameraControl();
     void boardlessLoadsUseTheSessionBoard();
     void parameterTreeCoversAppletAndCameraScopes();
+    void parameterWriteRefusesUnrepresentableSdkType();
     void parameterChangesDeliverSnapshotAndDelta();
     void parameterAdmissionsStayAvailableDuringObservation();
     void cameraRefreshReplacesTheCachedFeatureTree();
     void notificationQueueOverflowsToResync();
+    void terminalChangeFollowsInitialSnapshot();
     void samplesImageRejectionsPerSourceAndRun();
 };
 
@@ -678,6 +681,49 @@ void FramegrabberControllerTests::hostSelectedNonAsciiConfigurationPath()
 #endif
 }
 
+void FramegrabberControllerTests::configurationPathParserHandlesSdkFormatting()
+{
+    QTemporaryDir directory;
+    QVERIFY2(directory.isValid(), qPrintable(directory.errorString()));
+    const auto writeFile = [&directory](const QString& name, const QByteArray& contents) {
+        QFile file(directory.filePath(name));
+        if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) return false;
+        if (file.write(contents) != contents.size()) return false;
+        file.close();
+        return true;
+    };
+    QVERIFY(writeFile(QStringLiteral("Acq_SingleCXP12Area"), "applet"));
+    QVERIFY(writeFile(QStringLiteral("First.hap"), "first"));
+    QVERIFY(writeFile(QStringLiteral("Second.hap"), "second"));
+
+    const auto sdkPath = [](const QString& path) { return expectedSdkPath(path); };
+    Framegrabber board(nullptr);
+
+    const QString sdkMcf = directory.filePath(QStringLiteral("sdk.mcf"));
+    QByteArray sdkContents("\xEF\xBB\xBF[fglib5]\r\n");
+    sdkContents += "  FileName = \"Acq_SingleCXP12Area\" ;  \r\n";
+    QVERIFY(writeFile(QStringLiteral("sdk.mcf"), sdkContents));
+    QCOMPARE(board.appletPathFromConfiguration(sdkPath(sdkMcf)),
+        sdkPath(QDir::toNativeSeparators(directory.filePath(QStringLiteral("Acq_SingleCXP12Area")))));
+
+    const QString precedenceMcf = directory.filePath(QStringLiteral("precedence.mcf"));
+    QVERIFY(writeFile(QStringLiteral("precedence.mcf"),
+        "[Other]\nHapName='Second.hap';\n[fglib5]\nFileName='First.hap';\n"));
+    QCOMPARE(board.appletPathFromConfiguration(sdkPath(precedenceMcf)),
+        sdkPath(QDir::toNativeSeparators(directory.filePath(QStringLiteral("Second.hap")))));
+
+    const QString relativeMcf = directory.filePath(QStringLiteral("relative.mcf"));
+    QVERIFY(writeFile(QStringLiteral("relative.mcf"),
+        "[fglib5]\nFileName='missing/../Second.hap';\n"));
+    QCOMPARE(board.appletPathFromConfiguration(sdkPath(relativeMcf)),
+        sdkPath(QDir::toNativeSeparators(directory.filePath(QStringLiteral("Second.hap")))));
+
+    const QString wrongExtension = directory.filePath(QStringLiteral("wrong.txt"));
+    QVERIFY(writeFile(QStringLiteral("wrong.txt"), "[fglib5]\nFileName='First.hap';\n"));
+    QVERIFY(board.appletPathFromConfiguration(sdkPath(wrongExtension)).empty());
+    QVERIFY(board.appletPathFromConfiguration(sdkPath(directory.filePath(QStringLiteral("missing.mcf")))).empty());
+}
+
 void FramegrabberControllerTests::nonCatalogAppletMetadataGatesCameraControl()
 {
     const std::string path = "C:/custom/chosen.hap";
@@ -909,6 +955,21 @@ void FramegrabberControllerTests::parameterTreeCoversAppletAndCameraScopes()
 
     {
         std::lock_guard<std::mutex> lock(fake.state.mutex);
+        fake.state.failCameraGateReads = true;
+    }
+    parameters = inventory();
+    QCOMPARE(parameters.result.error, DeviceParameterError::None);
+    const auto* gateFailureGain = findParameter(parameters.parameters, "Camera:cxp:0", "Gain");
+    QVERIFY(gateFailureGain != nullptr);
+    QVERIFY(!gateFailureGain->writable);
+    QVERIFY(!gateFailureGain->observationError.empty());
+    {
+        std::lock_guard<std::mutex> lock(fake.state.mutex);
+        fake.state.failCameraGateReads = false;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(fake.state.mutex);
         fake.state.grabbing = true;
     }
     parameters = inventory();
@@ -988,6 +1049,40 @@ void FramegrabberControllerTests::parameterTreeCoversAppletAndCameraScopes()
     {
         std::lock_guard<std::mutex> lock(fake.state.mutex);
         QCOMPARE(fake.state.cameraCommands, 1);
+    }
+}
+
+void FramegrabberControllerTests::parameterWriteRefusesUnrepresentableSdkType()
+{
+    FramegrabberTestBackend fake;
+    FramegrabberSourceController controller(nullptr);
+    FramegrabberControllerTestAccess::install(controller, fake);
+    const auto outcome = connectBoard(controller);
+    QVERIFY2(outcome.error.isEmpty(), qPrintable(outcome.error));
+
+    Sink<DeviceParameterInventory> inventorySink;
+    QCOMPARE(controller.requestParameters(inventorySink.completion()).error, DeviceParameterError::None);
+    QVERIFY(inventorySink.wait());
+    const auto inventory = inventorySink.take();
+    const auto* width = findParameter(inventory.parameters, "Applet:0", "Width");
+    QVERIFY(width != nullptr);
+
+    {
+        std::lock_guard<std::mutex> lock(fake.state.mutex);
+        fake.state.widthPrototypeOverride = 0.0;
+    }
+    Sink<DeviceParameterResult> resultSink;
+    QCOMPARE(controller.requestWriteParameter(width->target, std::int64_t(800), width->revision,
+        resultSink.completion()).error, DeviceParameterError::None);
+    QVERIFY(resultSink.wait());
+    const auto result = resultSink.take();
+    QCOMPARE(result.error, DeviceParameterError::InvalidArgument);
+    QCOMPARE(result.effect, DeviceParameterEffect::None);
+    QVERIFY(result.message.find("not representable") != std::string::npos);
+    {
+        std::lock_guard<std::mutex> lock(fake.state.mutex);
+        QVERIFY(fake.state.parameterWrites.empty());
+        QCOMPARE(fake.state.integers[1], std::int64_t(640));
     }
 }
 
@@ -1266,6 +1361,32 @@ void FramegrabberControllerTests::notificationQueueOverflowsToResync()
     QVERIFY(resync);
     QCOMPARE(hub.pending("watch"), std::size_t(0));
     hub.close();
+}
+
+void FramegrabberControllerTests::terminalChangeFollowsInitialSnapshot()
+{
+    framegrabber::ParameterNotificationHub hub(
+        [](const std::string& connection, const std::string& subscription) {
+            DeviceParameterChange change;
+            change.kind = DeviceParameterChangeKind::Snapshot;
+            change.connectionId = connection;
+            change.subscriptionId = subscription;
+            return change;
+        });
+    std::vector<DeviceParameterChange> collected;
+    QCOMPARE(hub.add("connection", "watch", [&](DeviceParameterChange change) {
+        collected.push_back(std::move(change));
+    }).error, DeviceParameterError::None);
+    hub.publishTerminal("connection", DeviceParameterError::Disconnected, "closed");
+    hub.drain();
+    QCOMPARE(collected.size(), std::size_t(2));
+    QCOMPARE(collected[0].kind, DeviceParameterChangeKind::Snapshot);
+    QCOMPARE(collected[0].error, DeviceParameterError::None);
+    QCOMPARE(collected[0].sequence, std::uint64_t(1));
+    QCOMPARE(collected[1].kind, DeviceParameterChangeKind::Delta);
+    QCOMPARE(collected[1].error, DeviceParameterError::Disconnected);
+    QCOMPARE(collected[1].sequence, std::uint64_t(2));
+    QCOMPARE(hub.size(), std::size_t(0));
 }
 
 void FramegrabberControllerTests::samplesImageRejectionsPerSourceAndRun()

@@ -3,8 +3,11 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <exception>
+#include <functional>
 #include <memory>
 #include <mutex>
+#include <string>
 #include <vector>
 
 namespace FramegrabberDetail
@@ -88,4 +91,26 @@ private:
     std::vector<std::unique_ptr<std::uint8_t[]>> _available;
     bool _stopped = false;
 };
+
+inline std::shared_ptr<std::uint8_t> acquireFrameStorage(
+    const std::function<std::shared_ptr<std::uint8_t>(std::size_t)>& storage,
+    const std::shared_ptr<OwnedBufferPool>& pool,
+    const std::size_t bytes,
+    std::string* error)
+{
+    if (error) error->clear();
+    try
+    {
+        return storage ? storage(bytes) : pool ? pool->acquire() : std::shared_ptr<std::uint8_t>{};
+    }
+    catch (const std::exception& exception)
+    {
+        if (error) *error = exception.what();
+    }
+    catch (...)
+    {
+        if (error) *error = "Frame storage acquisition failed.";
+    }
+    return {};
+}
 }

@@ -1,6 +1,7 @@
 #include "Framegrabber.h"
 #include "FramegrabberSystem.h"
 
+#include <atomic>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -79,15 +80,20 @@ int main()
     FramegrabberSystem system(false);
     if (!expect(system.isInitialized(), "The frame grabber SDK runtime did not initialize.")) return 1;
     system.setCachedBoardInfo({board});
-    system.setResourceClaimCallback([&state](const std::string& serial, std::string& error) {
+    Framegrabber* framegrabber = nullptr;
+    std::atomic<bool> claimReentryCalled{false};
+    std::atomic<bool> claimReentryResult{true};
+    system.setResourceClaimCallback([&](const std::string& serial, std::string& error) {
         if (serial != "SN_TEST")
         {
             error = "Unexpected board serial.";
             return std::shared_ptr<void>{};
         }
+        claimReentryCalled.store(true, std::memory_order_release);
+        claimReentryResult.store(framegrabber->loadApplet("SN_TEST"), std::memory_order_release);
         return claimFrom(state, "framegrabber", error);
     });
-    Framegrabber* framegrabber = system.addFramegrabber();
+    framegrabber = system.addFramegrabber();
     if (!expect(framegrabber, "The test frame grabber was not created.")) return 1;
 
     const bool opened = framegrabber->loadApplet(applet.path.string());
@@ -99,6 +105,11 @@ int main()
     }
     if (!expect(state.claims == 1 && state.releases == 1 && state.holder.empty(),
             "A failed open retained the hardware resource claim.")) return 1;
+    if (!expect(claimReentryCalled.load(std::memory_order_acquire)
+            && !claimReentryResult.load(std::memory_order_acquire),
+            "A resource-claim callback re-entered applet loading.")) return 1;
+    if (!expect(framegrabber->lastError().message.find("callback") == std::string::npos,
+            "A refused callback operation replaced the outer SDK error.")) return 1;
 
     std::string error;
     auto other = claimFrom(state, "other", error);

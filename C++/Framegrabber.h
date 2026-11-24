@@ -18,6 +18,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -193,7 +194,21 @@ public:
 
         [[nodiscard]] bool isValid() const noexcept
         {
-            return data() != nullptr && width > 0 && height > 0 && stride > 0;
+            if (data() == nullptr || width <= 0 || height <= 0 || stride <= 0
+                || bitsPerPixel <= 0)
+            {
+                return false;
+            }
+            const auto pixelCount = static_cast<std::size_t>(width);
+            const auto pixelBits = static_cast<std::size_t>(bitsPerPixel);
+            if (pixelCount > (std::numeric_limits<std::size_t>::max)() / pixelBits)
+            {
+                return false;
+            }
+            const auto rowBits = pixelCount * pixelBits;
+            const auto minimumStride = rowBits / 8U + (rowBits % 8U != 0U ? 1U : 0U);
+            return static_cast<std::size_t>(stride) >= minimumStride
+                && static_cast<std::size_t>(stride) <= size / static_cast<std::size_t>(height);
         }
     };
 
@@ -472,6 +487,8 @@ public:
 private:
     struct DmaChannel;
     struct CameraEntry;
+    struct LifecycleLock;
+    struct CallbackReentry;
 
     template<typename Callback>
     using CallbackMap = std::unordered_map<CallbackId, Callback>;
@@ -573,7 +590,10 @@ private:
     void setLastError(int code, std::string message);
     void setLastSdkError(const std::string& context, int code);
     void clearLastError();
+    [[nodiscard]] bool rejectLifecycleReentry(const char* operation);
     void requestStopChannels();
+    [[nodiscard]] bool isAcquisitionThread() const;
+    [[nodiscard]] bool isLifecycleThread() const noexcept;
     bool joinStoppedChannels();
     void releaseHandles();
     void startChannel(unsigned int dmaIndex, std::size_t frames);

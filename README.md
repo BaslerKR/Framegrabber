@@ -95,7 +95,7 @@ Acquisition uses `Fg_AcquireEx(..., ACQ_STANDARD, ...)` with `setDMABufferCount(
 
 Stopping follows the SDK order: the CXP camera stream (`Sgc_stopAcquisition`) stops first, then the DMA (`Fg_stopAcquireEx`). After that the buffers are freed (`Fg_FreeMemEx`).
 
-Callbacks run on acquisition workers. Keep them bounded, do not access GUI objects directly, and stop acquisition and join workers before closing the board or destroying callbacks. A callback return is not an admission signal: the worker already moved on to the newest frame and never waits for downstream processing.
+Callbacks run on acquisition workers. Keep them bounded, do not access GUI objects directly, and stop acquisition and join workers before closing the board or destroying callbacks. A callback may call `stop()` or `requestStop()`; applet/configuration/camera lifecycle changes from a callback are refused with an explicit reason, and a callback cannot release another operation's control gate. Calling `close()` from a callback only requests acquisition stop; close the board from an owning thread after workers finish. A callback return is not an admission signal: the worker already moved on to the newest frame and never waits for downstream processing.
 
 ## Applet and Configuration Contract
 
@@ -157,6 +157,16 @@ cmake --build build/loopback --config Release --target FramegrabberParameterLoop
 ```
 
 Set `CMAKE_BUILD_TYPE=Release` for a single-configuration generator.
+
+The opt-in hardware smoke test requires a supported board and the SDK `FrameGrabberTest` applet. It validates DMA layout, Single and sustained Live acquisition, repeated start/stop and applet reopen, owned-pool exhaustion, callback exception containment, frame-storage failure and stop re-entry, callback control-gate protection, lifecycle refusal during acquisition, recursive node-notification protection, concurrent stop/close, and feature-model reads during applet replacement. It skips when no board or test applet is available.
+
+```sh
+cmake -S C++ -B build/hardware -DCMAKE_CONFIGURATION_TYPES=Release -DCMAKE_BUILD_TYPE=Release -DFRAMEGRABBER_BUILD_HARDWARE_TESTS=ON
+cmake --build build/hardware --config Release --target FramegrabberHardwareSmokeTest
+ctest --test-dir build/hardware -C Release -R '^FramegrabberHardwareSmokeTest$' --output-on-failure
+```
+
+The test does not establish CXP camera, multi-DMA or sustained-throughput acceptance. MCF save/load runs only on SDK 5.11.9 or later because SDK 5.11.7 crashes inside `Fg_saveConfig` for `FrameGrabberTest` even when called directly.
 
 ## Declared device and parameter contracts
 

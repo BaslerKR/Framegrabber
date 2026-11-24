@@ -10,6 +10,9 @@ option(FRAMEGRABBER_BUILD_PLAYGROUND_PLUGIN
     OFF
 )
 option(FRAMEGRABBER_BUILD_TESTS "Build focused Framegrabber adapter tests." OFF)
+option(FRAMEGRABBER_BUILD_HARDWARE_TESTS
+    "Build the opt-in FrameGrabberTest hardware smoke test."
+    OFF)
 option(FRAMEGRABBER_BUILD_PLAYGROUND_LOOPBACK_TESTS
     "Build the Playground parameter loopback test for the Framegrabber controller."
     OFF
@@ -123,6 +126,12 @@ if(FRAMEGRABBER_BUILD_TESTS)
         NAME framegrabber_resource_claim_test
         COMMAND framegrabber_resource_claim_test
     )
+    add_executable(framegrabber_callback_reentry_test Tests/CallbackReentryTest.cpp)
+    target_link_libraries(framegrabber_callback_reentry_test PRIVATE Framegrabber::Framegrabber)
+    add_test(NAME framegrabber_callback_reentry_test COMMAND framegrabber_callback_reentry_test)
+    add_executable(framegrabber_image_layout_test Tests/ImageLayoutTest.cpp)
+    target_include_directories(framegrabber_image_layout_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+    add_test(NAME framegrabber_image_layout_test COMMAND framegrabber_image_layout_test)
 endif()
 
 if(SISOPLATFORM_DEFINITIONS)
@@ -304,6 +313,17 @@ if(FRAMEGRABBER_BUILD_PLAYGROUND_PLUGIN)
                 ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
         endif()
     endif()
+endif()
+
+if(FRAMEGRABBER_BUILD_HARDWARE_TESTS)
+    enable_testing()
+    add_executable(FramegrabberHardwareSmokeTest Tests/HardwareSmokeTest.cpp)
+    target_link_libraries(FramegrabberHardwareSmokeTest PRIVATE Framegrabber::Framegrabber)
+    add_test(NAME FramegrabberHardwareSmokeTest COMMAND FramegrabberHardwareSmokeTest)
+    set_tests_properties(FramegrabberHardwareSmokeTest PROPERTIES
+        LABELS "hardware;framegrabber"
+        SKIP_RETURN_CODE 77
+        TIMEOUT 180)
 endif()
 
 message(STATUS "[Framegrabber] Basler Frame Grabber SDK root: ${BASLER_FG_SDK_DIR}")
