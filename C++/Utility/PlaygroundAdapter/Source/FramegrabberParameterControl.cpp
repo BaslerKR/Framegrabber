@@ -203,6 +203,23 @@ std::optional<double> floatingValue(const Framegrabber::ParameterValue& value)
     return std::nullopt;
 }
 
+bool parameterPrototypeMatches(const Framegrabber::ParameterValue& prototype, const Kind kind) noexcept
+{
+    switch (kind)
+    {
+    case Kind::Integer:
+    case Kind::Boolean:
+    case Kind::Enumeration:
+        return std::visit([](const auto& value) {
+            return std::is_integral_v<std::decay_t<decltype(value)>>;
+        }, prototype);
+    case Kind::Float: return std::holds_alternative<double>(prototype);
+    case Kind::String: return std::holds_alternative<std::string>(prototype);
+    case Kind::Command: return true;
+    }
+    return false;
+}
+
 /** @brief Stores an exact integer in the SDK type of the prototype, refusing overflow. */
 bool assignInteger(Framegrabber::ParameterValue& prototype, const std::int64_t value)
 {
@@ -617,28 +634,15 @@ DeviceParameterDescriptor FramegrabberSourceController::observeCameraParameter(
         result.observationError += message;
     };
     bool locked = false;
-    if (!declaration.lockedFeature.empty())
+    if (!declaration.lockedFeature.empty() && (!readGate(declaration.lockedFeature, &locked) || locked))
     {
-        if (!readGate(declaration.lockedFeature, &locked))
-        {
-            writable = false;
-        }
-        else if (locked)
-        {
-            writable = false;
-        }
+        writable = false;
     }
     bool available = true;
-    if (!declaration.availableFeature.empty())
+    if (!declaration.availableFeature.empty()
+        && (!readGate(declaration.availableFeature, &available) || !available))
     {
-        if (!readGate(declaration.availableFeature, &available))
-        {
-            writable = false;
-        }
-        else if (!available)
-        {
-            writable = false;
-        }
+        writable = false;
     }
     result.readable = readable && result.kind != Kind::Command;
     result.writable = writable;
@@ -1053,7 +1057,28 @@ DeviceParameterResult FramegrabberSourceController::requestParameter(
                         else if (!current.readable) result.error = Error::Unreadable;
                         else if (!current.observationError.empty()) result.error = Error::BackendFailure;
                     } else {
-                        result.error = validateDeviceParameterWrite(current, target, value, revision);
+                        const auto writeGateError = [&](const std::string& gate, const char* reason) {
+                            if (gate.empty()) return std::string{};
+                            Framegrabber::ParameterValue gateValue = std::uint32_t{0};
+                            if (!_backend.getCameraFeature
+                                || !_backend.getCameraFeature(transport, dma, gate, gateValue)
+                                || !signedInteger(gateValue))
+                            {
+                                return std::string(reason);
+                            }
+                            return std::string{};
+                        };
+                        std::string gateError = writeGateError(feature->lockedFeature,
+                            "The camera lock state could not be read.");
+                        if (gateError.empty())
+                            gateError = writeGateError(feature->availableFeature,
+                                "The camera availability state could not be read.");
+                        if (!gateError.empty()) {
+                            result.error = Error::BackendFailure;
+                            result.message = gateError;
+                        } else {
+                            result.error = validateDeviceParameterWrite(current, target, value, revision);
+                        }
                         Framegrabber::ParameterValue sdkValue = std::int64_t{0};
                         if (result.error == Error::None && current.kind != Kind::Command) {
                             switch (current.kind) {
@@ -1112,7 +1137,9 @@ DeviceParameterResult FramegrabberSourceController::requestParameter(
                             const auto prototype = _backend.appletParameterPrototype
                                 ? _backend.appletParameterPrototype(node->parameterId, dma)
                                 : std::optional<Framegrabber::ParameterValue>{};
-                            bool converted = prototype.has_value();
+                            const bool typeMatches = prototype.has_value()
+                                && parameterPrototypeMatches(*prototype, current.kind);
+                            bool converted = typeMatches;
                             if (converted) {
                                 sdkValue = *prototype;
                                 switch (current.kind) {
@@ -1142,6 +1169,9 @@ DeviceParameterResult FramegrabberSourceController::requestParameter(
                                 result.message = _backend.isOpened && !_backend.isOpened()
                                     ? "The applet closed before the SDK parameter type was resolved."
                                     : "The SDK parameter type is not supported.";
+                            } else if (!typeMatches) {
+                                result.error = Error::Unsupported;
+                                result.message = "The SDK parameter type does not match the descriptor kind.";
                             } else if (!converted) {
                                 result.error = Error::InvalidArgument;
                                 result.message = "The value is not representable by the SDK parameter type.";

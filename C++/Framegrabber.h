@@ -531,6 +531,7 @@ private:
     std::vector<ChannelStatistics> _lastStatistics;
 
     std::atomic<bool> _controlBusy{false};
+    std::atomic<bool> _controlGateReentryWarningLogged{false};
     std::atomic<bool> _isRunning{false};
     std::atomic<bool> _grabbingStatusPublished{false};
     std::atomic<bool> _startingChannels{false};

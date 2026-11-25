@@ -13,6 +13,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <functional>
+#include <limits>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -971,6 +972,13 @@ void FramegrabberControllerTests::parameterTreeCoversAppletAndCameraScopes()
         gateFailureRead.completion()).error, DeviceParameterError::None);
     QVERIFY(gateFailureRead.wait());
     QCOMPARE(gateFailureRead.take().error, DeviceParameterError::None);
+    Sink<DeviceParameterResult> gateFailureWrite;
+    QCOMPARE(controller.requestWriteParameter(gateFailureGain->target, 2.0,
+        gateFailureGain->revision, gateFailureWrite.completion()).error, DeviceParameterError::None);
+    QVERIFY(gateFailureWrite.wait());
+    const auto gateFailureWriteResult = gateFailureWrite.take();
+    QCOMPARE(gateFailureWriteResult.error, DeviceParameterError::BackendFailure);
+    QVERIFY(gateFailureWriteResult.message.find("lock state could not be read") != std::string::npos);
     {
         std::lock_guard<std::mutex> lock(fake.state.mutex);
         fake.state.failCameraGateReads = false;
@@ -993,6 +1001,15 @@ void FramegrabberControllerTests::parameterTreeCoversAppletAndCameraScopes()
         availabilityFailureRead.completion()).error, DeviceParameterError::None);
     QVERIFY(availabilityFailureRead.wait());
     QCOMPARE(availabilityFailureRead.take().error, DeviceParameterError::None);
+    Sink<DeviceParameterResult> availabilityFailureWrite;
+    QCOMPARE(controller.requestWriteParameter(availabilityFailureWidth->target, std::int64_t(640),
+        availabilityFailureWidth->revision, availabilityFailureWrite.completion()).error,
+        DeviceParameterError::None);
+    QVERIFY(availabilityFailureWrite.wait());
+    const auto availabilityFailureWriteResult = availabilityFailureWrite.take();
+    QCOMPARE(availabilityFailureWriteResult.error, DeviceParameterError::BackendFailure);
+    QVERIFY(availabilityFailureWriteResult.message.find("availability state could not be read")
+        != std::string::npos);
     {
         std::lock_guard<std::mutex> lock(fake.state.mutex);
         fake.state.failCameraAvailabilityReads = false;
@@ -1089,6 +1106,10 @@ void FramegrabberControllerTests::parameterWriteRefusesUnrepresentableSdkType()
     FramegrabberControllerTestAccess::install(controller, fake);
     const auto outcome = connectBoard(controller);
     QVERIFY2(outcome.error.isEmpty(), qPrintable(outcome.error));
+    {
+        std::lock_guard<std::mutex> lock(fake.state.mutex);
+        fake.state.widthMaximum = (std::numeric_limits<std::int64_t>::max)();
+    }
 
     Sink<DeviceParameterInventory> inventorySink;
     QCOMPARE(controller.requestParameters(inventorySink.completion()).error, DeviceParameterError::None);
@@ -1106,9 +1127,23 @@ void FramegrabberControllerTests::parameterWriteRefusesUnrepresentableSdkType()
         resultSink.completion()).error, DeviceParameterError::None);
     QVERIFY(resultSink.wait());
     const auto result = resultSink.take();
-    QCOMPARE(result.error, DeviceParameterError::InvalidArgument);
+    QCOMPARE(result.error, DeviceParameterError::Unsupported);
     QCOMPARE(result.effect, DeviceParameterEffect::None);
-    QVERIFY(result.message.find("not representable") != std::string::npos);
+    QVERIFY(result.message.find("does not match") != std::string::npos);
+    {
+        std::lock_guard<std::mutex> lock(fake.state.mutex);
+        QVERIFY(fake.state.parameterWrites.empty());
+        QCOMPARE(fake.state.integers[1], std::int64_t(640));
+        fake.state.widthPrototypeOverride = std::int32_t{0};
+    }
+    Sink<DeviceParameterResult> overflowSink;
+    QCOMPARE(controller.requestWriteParameter(width->target,
+        (std::numeric_limits<std::int64_t>::max)(), width->revision,
+        overflowSink.completion()).error, DeviceParameterError::None);
+    QVERIFY(overflowSink.wait());
+    const auto overflow = overflowSink.take();
+    QCOMPARE(overflow.error, DeviceParameterError::InvalidArgument);
+    QVERIFY(overflow.message.find("not representable") != std::string::npos);
     {
         std::lock_guard<std::mutex> lock(fake.state.mutex);
         QVERIFY(fake.state.parameterWrites.empty());
@@ -1124,6 +1159,20 @@ void FramegrabberControllerTests::parameterWriteRefusesUnrepresentableSdkType()
     QCOMPARE(unsupported.error, DeviceParameterError::Unsupported);
     QCOMPARE(unsupported.effect, DeviceParameterEffect::None);
     QVERIFY(unsupported.message.find("not supported") != std::string::npos);
+    {
+        std::lock_guard<std::mutex> lock(fake.state.mutex);
+        QVERIFY(fake.state.parameterWrites.empty());
+        QCOMPARE(fake.state.integers[1], std::int64_t(640));
+        fake.state.widthPrototypeMissing = false;
+        fake.state.disconnectBeforePrototype = true;
+    }
+    Sink<DeviceParameterResult> disconnectedSink;
+    QCOMPARE(controller.requestWriteParameter(width->target, std::int64_t(800), width->revision,
+        disconnectedSink.completion()).error, DeviceParameterError::None);
+    QVERIFY(disconnectedSink.wait());
+    const auto disconnected = disconnectedSink.take();
+    QCOMPARE(disconnected.error, DeviceParameterError::Disconnected);
+    QVERIFY(disconnected.message.find("closed before") != std::string::npos);
     {
         std::lock_guard<std::mutex> lock(fake.state.mutex);
         QVERIFY(fake.state.parameterWrites.empty());

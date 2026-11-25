@@ -1,5 +1,10 @@
+#include "FramegrabberAcquisitionState.h"
 #include "FramegrabberRuntimeDiagnostics.h"
+
+#include <atomic>
+#include <chrono>
 #include <iostream>
+#include <thread>
 
 int main()
 {
@@ -41,5 +46,29 @@ int main()
     if (absent.delivered != 0 || absent.failed != 0) return 10;
     const FramegrabberDetail::ProducerRuntimeCounters nextRun;
     if (nextRun.delivered() != 0 || nextRun.failed() != 0) return 11;
-    std::cout << "Producer delivery, failure, idle-poll and per-DMA aggregation contracts passed.\n";
+
+    std::atomic<unsigned int> activeChannels{0};
+    std::atomic<bool> startingChannels{true};
+    std::atomic<bool> completionEntered{false};
+    std::atomic<bool> completionFinished{false};
+    std::atomic<bool> completionStopped{true};
+    std::thread completion([&] {
+        completionEntered.store(true, std::memory_order_release);
+        completionStopped.store(FramegrabberDetail::acquisitionRunStopped(
+            1, activeChannels, startingChannels), std::memory_order_release);
+        completionFinished.store(true, std::memory_order_release);
+    });
+    while (!completionEntered.load(std::memory_order_acquire)) std::this_thread::yield();
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    if (completionFinished.load(std::memory_order_acquire)) return 17;
+    activeChannels.store(1, std::memory_order_release);
+    startingChannels.store(false, std::memory_order_release);
+    completion.join();
+    if (completionStopped.load(std::memory_order_acquire)) return 18;
+    if (FramegrabberDetail::acquisitionRunStopped(1, activeChannels, startingChannels)) return 19;
+    activeChannels.store(0, std::memory_order_release);
+    if (!FramegrabberDetail::acquisitionRunStopped(1, activeChannels, startingChannels)) return 20;
+    if (FramegrabberDetail::acquisitionRunStopped(0, activeChannels, startingChannels)) return 21;
+
+    std::cout << "Producer delivery, failure, idle-poll, per-DMA aggregation and multi-DMA completion contracts passed.\n";
 }

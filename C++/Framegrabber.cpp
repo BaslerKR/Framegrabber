@@ -1,6 +1,7 @@
 #include "Framegrabber.h"
 #include "FramegrabberRuntimeDiagnostics.h"
 
+#include "FramegrabberAcquisitionState.h"
 #include "FramegrabberCameraGeometry.h"
 #include "FramegrabberImageLayout.h"
 #include "FramegrabberOwnedBufferPool.h"
@@ -1514,7 +1515,6 @@ bool Framegrabber::tryBeginControl()
     bool expected = false;
     if (!_controlBusy.compare_exchange_strong(expected, true, std::memory_order_acq_rel))
     {
-        setLastError(FG_ERROR, "Another frame grabber control operation is active.");
         return false;
     }
     notifyStatus(ControlStatus, true);
@@ -1526,12 +1526,14 @@ bool Framegrabber::endControl()
     if (isLifecycleThread())
     {
         setLastError(FG_ERROR, "The control gate cannot be released from a frame grabber callback.");
-        log("A frame grabber callback cannot release another operation's control gate.", true);
+        if (!_controlGateReentryWarningLogged.exchange(true, std::memory_order_acq_rel))
+        {
+            log("A frame grabber callback cannot release another operation's control gate.", true);
+        }
         return false;
     }
     if (!_controlBusy.exchange(false, std::memory_order_acq_rel))
     {
-        setLastError(FG_ERROR, "No frame grabber control operation is active.");
         return false;
     }
     notifyStatus(ControlStatus, false);
@@ -2348,12 +2350,8 @@ void Framegrabber::finishChannel(DmaChannel& channel)
     }
 
     const unsigned int previous = _activeChannels.fetch_sub(1, std::memory_order_acq_rel);
-    if (previous == 1)
+    if (FramegrabberDetail::acquisitionRunStopped(previous, _activeChannels, _startingChannels))
     {
-        while (_startingChannels.load(std::memory_order_acquire))
-        {
-            std::this_thread::yield();
-        }
         _isRunning.store(false, std::memory_order_release);
         publishAcquisitionStopped();
     }

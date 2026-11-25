@@ -5,6 +5,7 @@
 #include <mutex>
 #include <stdexcept>
 #include <string>
+#include <thread>
 
 int main()
 {
@@ -62,13 +63,28 @@ int main()
     if (!closeReasonSeen.load(std::memory_order_acquire)) return 9;
     if (!board.endControl()) return 10;
     if (board.controlBusy()) return 11;
+    const auto errorBeforeUnbalancedRelease = board.lastError().message;
     if (board.endControl()) return 12;
-    if (board.lastError().message.find("No frame grabber control operation") == std::string::npos) return 13;
+    if (board.lastError().message != errorBeforeUnbalancedRelease) return 13;
     {
         std::lock_guard<std::mutex> lock(errorMutex);
         if (callbackError.find("callback") == std::string::npos) return 14;
         if (closeError.find("only requests acquisition stop") == std::string::npos) return 15;
     }
+    board.clearStatusCallbacks();
+    const auto contentionCallbackId = board.registerStatusCallback([&](const Framegrabber::Status status,
+        const bool on) {
+        if (status == Framegrabber::ControlStatus && on) board.grab();
+    });
+    if (contentionCallbackId == 0) return 21;
+    if (!board.tryBeginControl()) return 22;
+    const auto holderError = board.lastError().message;
+    std::atomic<bool> contended{true};
+    std::thread contender([&] { contended.store(board.tryBeginControl(), std::memory_order_release); });
+    contender.join();
+    if (contended.load(std::memory_order_acquire)) return 23;
+    if (board.lastError().message != holderError) return 24;
+    if (!board.endControl()) return 25;
     board.clearStatusCallbacks();
     const auto throwingId = board.registerStatusCallback([](Framegrabber::Status, bool) {
         throw std::runtime_error("intentional status callback failure");

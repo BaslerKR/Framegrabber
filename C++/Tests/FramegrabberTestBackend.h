@@ -5,6 +5,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
+#include <limits>
 #include <map>
 #include <mutex>
 #include <string>
@@ -56,6 +57,8 @@ struct FramegrabberTestState
     bool failCameraGateReads = false;
     bool failCameraAvailabilityReads = false;
     bool widthPrototypeMissing = false;
+    bool disconnectBeforePrototype = false;
+    std::int64_t widthMaximum = 65535;
     std::optional<Framegrabber::ParameterValue> widthPrototypeOverride;
     std::vector<std::pair<std::int64_t, Framegrabber::ParameterValue>> parameterWrites;
 
@@ -443,12 +446,13 @@ struct FramegrabberTestBackend
             std::lock_guard<std::mutex> lock(shared->mutex);
             return shared->appletModel;
         };
-        result.appletParameterLimits = [](std::int64_t id, unsigned) {
+        result.appletParameterLimits = [shared](std::int64_t id, unsigned) {
             Framegrabber::AppletParameterLimits limits;
             if (id == 1)
             {
+                std::lock_guard<std::mutex> lock(shared->mutex);
                 limits.minimum = std::int64_t{1};
-                limits.maximum = std::int64_t{65535};
+                limits.maximum = shared->widthMaximum;
                 limits.increment = std::int64_t{1};
             }
             else if (id == 5)
@@ -489,6 +493,11 @@ struct FramegrabberTestBackend
             if (id == 1)
             {
                 std::lock_guard<std::mutex> lock(shared->mutex);
+                if (shared->disconnectBeforePrototype)
+                {
+                    shared->opened = false;
+                    return std::nullopt;
+                }
                 if (shared->widthPrototypeMissing) return std::nullopt;
                 if (shared->widthPrototypeOverride) return shared->widthPrototypeOverride;
             }

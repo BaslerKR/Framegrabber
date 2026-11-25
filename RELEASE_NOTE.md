@@ -1,6 +1,6 @@
 ## Unreleased
 
-- Contain frame-storage exceptions on acquisition workers, count the dropped frames, prevent callback/lifecycle re-entry from deadlocking stop or applet replacement, and report control-gate or lifecycle refusals explicitly. Worker identity is tracked independently of `std::thread` objects to avoid racing identification with `join()`, and acquisition-stop status is published once.
+- Contain frame-storage exceptions on acquisition workers, count the dropped frames, prevent callback/lifecycle re-entry from deadlocking stop or applet replacement, and report control-gate or lifecycle refusals explicitly. Worker identity is tracked independently of `std::thread` objects to avoid racing identification with `join()`, and acquisition-stop status is published once at stop request without confusing a still-starting peer DMA with a completed run.
 - Refuse parameter writes that cannot be represented by the SDK type, distinguish missing/unsupported SDK types from invalid values, fail writes closed when camera lock/availability gates cannot be read without blocking valid reads, and preserve snapshot-before-terminal notification ordering.
 - Validate complete image rows in `Framegrabber::Image::isValid()`, count every refused DMA layout as rejected, and add an opt-in `FrameGrabberTest` hardware smoke target for DMA, lifecycle, failure and re-entry scenarios.
 - Report rejected DMA image layouts through the optional image diagnostic sink, with the failed rule and numeric input layout.
