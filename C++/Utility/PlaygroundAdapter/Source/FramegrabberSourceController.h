@@ -214,7 +214,7 @@ private:
     DeviceParameterDescriptor observeCameraParameter(
         const FramegrabberCameraFeatureDeclaration& declaration,
         Framegrabber::CameraTransport transport, unsigned int dmaIndex,
-        const std::string& connection);
+        const std::string& connection, std::string* gateError = nullptr);
     /** @brief Observes every applet and camera parameter for one connection. */
     Observation observeAll(const std::string& connection, bool purge);
     /** @brief Copies the cached camera declarations, parsing the XML once per generation. */

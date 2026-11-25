@@ -603,8 +603,10 @@ DeviceParameterDescriptor FramegrabberSourceController::observeParameter(
 
 DeviceParameterDescriptor FramegrabberSourceController::observeCameraParameter(
     const FramegrabberCameraFeatureDeclaration& declaration,
-    const Transport transport, const unsigned int dmaIndex, const std::string& connection)
+    const Transport transport, const unsigned int dmaIndex, const std::string& connection,
+    std::string* gateError)
 {
+    if (gateError) gateError->clear();
     DeviceParameterDescriptor result;
     result.target = {connection, cameraScope(transport, dmaIndex), declaration.name, {}};
     result.kind = cameraKind(QString::fromStdString(declaration.tag)).value_or(Kind::String);
@@ -634,15 +636,30 @@ DeviceParameterDescriptor FramegrabberSourceController::observeCameraParameter(
         result.observationError += message;
     };
     bool locked = false;
-    if (!declaration.lockedFeature.empty() && (!readGate(declaration.lockedFeature, &locked) || locked))
+    if (!declaration.lockedFeature.empty())
     {
-        writable = false;
+        if (!readGate(declaration.lockedFeature, &locked))
+        {
+            writable = false;
+            if (gateError) *gateError = "The camera lock state could not be read.";
+        }
+        else if (locked)
+        {
+            writable = false;
+        }
     }
     bool available = true;
-    if (!declaration.availableFeature.empty()
-        && (!readGate(declaration.availableFeature, &available) || !available))
+    if (!declaration.availableFeature.empty())
     {
-        writable = false;
+        if (!readGate(declaration.availableFeature, &available))
+        {
+            writable = false;
+            if (gateError) *gateError = "The camera availability state could not be read.";
+        }
+        else if (!available)
+        {
+            writable = false;
+        }
     }
     result.readable = readable && result.kind != Kind::Command;
     result.writable = writable;
@@ -1050,29 +1067,15 @@ DeviceParameterResult FramegrabberSourceController::requestParameter(
                 if (!feature) {
                     result = failure(Error::NotFound, "Camera feature was not found.");
                 } else {
-                    auto current = observeCameraParameter(*feature, transport, dma, target.connectionId);
+                    std::string gateError;
+                    auto current = observeCameraParameter(*feature, transport, dma,
+                        target.connectionId, &gateError);
                     result.descriptor = current;
                     if (!mutate) {
                         if (!current.available) result.error = Error::Unavailable;
                         else if (!current.readable) result.error = Error::Unreadable;
                         else if (!current.observationError.empty()) result.error = Error::BackendFailure;
                     } else {
-                        const auto writeGateError = [&](const std::string& gate, const char* reason) {
-                            if (gate.empty()) return std::string{};
-                            Framegrabber::ParameterValue gateValue = std::uint32_t{0};
-                            if (!_backend.getCameraFeature
-                                || !_backend.getCameraFeature(transport, dma, gate, gateValue)
-                                || !signedInteger(gateValue))
-                            {
-                                return std::string(reason);
-                            }
-                            return std::string{};
-                        };
-                        std::string gateError = writeGateError(feature->lockedFeature,
-                            "The camera lock state could not be read.");
-                        if (gateError.empty())
-                            gateError = writeGateError(feature->availableFeature,
-                                "The camera availability state could not be read.");
                         if (!gateError.empty()) {
                             result.error = Error::BackendFailure;
                             result.message = gateError;
