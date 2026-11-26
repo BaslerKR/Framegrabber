@@ -138,7 +138,8 @@ GraphicsImage wrapImage(
         return fail(reason, std::move(frame));
     }
     frame.pixels = std::move(borrowed).value();
-    return fail(imageFailure(frame), std::move(frame));
+    const GraphicsImageFailure reason = imageFailure(frame);
+    return fail(reason, std::move(frame));
 }
 
 GraphicsImageFailure imageFailure(const GraphicsImage& image) noexcept
