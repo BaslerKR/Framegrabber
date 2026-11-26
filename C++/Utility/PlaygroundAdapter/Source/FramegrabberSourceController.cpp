@@ -37,10 +37,10 @@ std::optional<DeviceImageRejection> imageRejection(const GraphicsImageFailure fa
     case GraphicsImageFailure::ExtentOverflow: return DeviceImageRejection::ExtentOverflow;
     case GraphicsImageFailure::TruncatedBytes: return DeviceImageRejection::TruncatedBytes;
     case GraphicsImageFailure::OddWidth: return DeviceImageRejection::OddWidth;
+    case GraphicsImageFailure::UnsupportedConversion: return DeviceImageRejection::UnsupportedConversion;
+    case GraphicsImageFailure::StorageRefused: return DeviceImageRejection::StorageRefused;
     case GraphicsImageFailure::None:
-    case GraphicsImageFailure::UnsupportedConversion:
-    case GraphicsImageFailure::ExcessBytes:
-    case GraphicsImageFailure::StorageRefused: return std::nullopt;
+    case GraphicsImageFailure::ExcessBytes: return std::nullopt;
     }
     return std::nullopt;
 }
@@ -578,7 +578,7 @@ void FramegrabberSourceController::registerCallbacks()
             if (!_frameConsumer) return;
             SessionFrame frame;
             frame.payload = std::move(payload);
-            frame.frameSeq = frame.payload.metadata.frameIndex;
+            frame.frameSeq = frame.payload.metadata().frameIndex;
             _frameConsumer(std::move(frame), sourceIndex);
         },
         [this](const GraphicsImage& image, const unsigned int dma, const GraphicsImageFailure failure)
@@ -619,7 +619,7 @@ void FramegrabberSourceController::reportImageRejection(
     // The DMA producer derives stride from transfer length and delivered height.
     observation.effectiveStride = image.stride > 0 ? static_cast<std::uint64_t>(image.stride) : 0;
     observation.minimumRowBytes = GraphicsImageValidation::minimumRowBytes(image.pixelFormat, image.width);
-    observation.readableBytes = image.data() ? image.size : 0;
+    observation.readableBytes = image.data() ? image.pixels.size() : 0;
     observation.requiredBytes = observation.effectiveStride * observation.height;
     _imageRejectionSink(observation);
 }

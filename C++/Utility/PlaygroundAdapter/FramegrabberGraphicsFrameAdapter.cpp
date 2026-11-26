@@ -103,12 +103,17 @@ namespace
 namespace FramegrabberGraphicsFrameAdapter
 {
 GraphicsImage wrapImage(
+    GraphicsFrameBuilder& builder,
     const Framegrabber::Image& image,
-    const std::size_t frameSeq) noexcept
+    const std::size_t frameSeq,
+    GraphicsImageFailure* const failure)
 {
+    const auto fail = [failure](const GraphicsImageFailure reason, GraphicsImage result) {
+        if (failure) *failure = reason;
+        return result;
+    };
+
     GraphicsImage frame;
-    frame.storage = image.storage;
-    frame.size = image.size;
     frame.width = image.width;
     frame.height = image.height;
     frame.stride = image.stride;
@@ -117,13 +122,29 @@ GraphicsImage wrapImage(
     frame.pixelFormat = graphicsPixelFormat(image.pixelFormat);
     frame.bitAlignment = graphicsBitAlignment(image.bitAlignment);
     frame.frameSequence = frameSeq;
-    return frame;
+
+    if (!image.storage || image.data() == nullptr || image.size == 0U)
+    {
+        return fail(GraphicsImageFailure::MissingBytes, std::move(frame));
+    }
+
+    auto borrowed = builder.borrow(image.storage, image.data(), image.size, GraphicsBorrow::Immutable);
+    if (!borrowed)
+    {
+        const GraphicsImageFailure reason =
+            borrowed.error() == GraphicsFrameError::InvalidInput
+                ? GraphicsImageFailure::MissingBytes
+                : GraphicsImageFailure::StorageRefused;
+        return fail(reason, std::move(frame));
+    }
+    frame.pixels = std::move(borrowed).value();
+    return fail(imageFailure(frame), std::move(frame));
 }
 
 GraphicsImageFailure imageFailure(const GraphicsImage& image) noexcept
 {
     if (!image.data()) return GraphicsImageFailure::MissingBytes;
     return GraphicsImageValidation::layoutFailure(
-        image.pixelFormat, image.width, image.height, image.stride, image.size);
+        image.pixelFormat, image.width, image.height, image.stride, image.pixels.size());
 }
 }

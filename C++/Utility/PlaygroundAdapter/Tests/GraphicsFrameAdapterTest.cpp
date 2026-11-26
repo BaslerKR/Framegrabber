@@ -21,13 +21,44 @@ int main()
     source.pixelFormat = Framegrabber::PixelFormat::Mono8;
     source.bitAlignment = Framegrabber::BitAlignment::Packed;
 
-    const GraphicsImage image = FramegrabberGraphicsFrameAdapter::wrapImage(source, 9U);
+    GraphicsFrameBuilder builder;
+    GraphicsImageFailure failure = GraphicsImageFailure::None;
+    GraphicsImage image = FramegrabberGraphicsFrameAdapter::wrapImage(builder, source, 9U, &failure);
+    assert(failure == GraphicsImageFailure::None);
     assert(image.isValid());
     assert(image.pixelFormat == GraphicsImagePixelFormat::Mono8);
     assert(image.frameSequence == 9U);
+    assert(image.pixels.data() == storage->data());
+    assert(image.pixels.size() == storage->size());
     assert(image.data() == storage->data());
     assert(image.data()[3] == 4U);
     assert(FramegrabberGraphicsFrameAdapter::imageFailure(image) == GraphicsImageFailure::None);
+
+    auto rejected = image;
+    rejected.stride = 1;
+    assert(FramegrabberGraphicsFrameAdapter::imageFailure(rejected) == GraphicsImageFailure::StrideBelowMinimum);
+    rejected.stride = 2;
+    rejected.pixels = rejected.pixels.subspan(0U, 3U);
+    assert(FramegrabberGraphicsFrameAdapter::imageFailure(rejected) == GraphicsImageFailure::TruncatedBytes);
+    rejected.pixels = {};
+    assert(FramegrabberGraphicsFrameAdapter::imageFailure(rejected) == GraphicsImageFailure::MissingBytes);
+
+    builder.addImage("image", std::move(image), "Image");
+    GraphicsFrameMetadata metadata;
+    metadata.sourceName = "Framegrabber";
+    metadata.frameIndex = 9U;
+    builder.setMetadata(std::move(metadata));
+    auto published = std::move(builder).publish();
+    assert(published.hasValue());
+    const GraphicsFrame frame = std::move(published).value();
+    assert(frame.isValid());
+    assert(frame.firstImage() != nullptr);
+    assert(frame.firstImage()->payload.pixels.data() == storage->data());
+    assert(frame.firstImage()->payload.pixels.size() == storage->size());
+    assert(frame.firstImage()->payload.pixels.allocation());
+    assert(frame.firstImage()->payload.pixels.allocation()->origin() == GraphicsAllocationOrigin::Borrowed);
+    assert(frame.metadata().sourceName == "Framegrabber");
+    assert(frame.metadata().frameIndex == 9U);
 
     auto truncated = source;
     truncated.size = 3;
@@ -41,6 +72,14 @@ int main()
     truncated = source;
     truncated.storage.reset();
     assert(!truncated.isValid());
+    {
+        GraphicsFrameBuilder missingBuilder;
+        GraphicsImageFailure missingFailure = GraphicsImageFailure::None;
+        const GraphicsImage missing =
+            FramegrabberGraphicsFrameAdapter::wrapImage(missingBuilder, truncated, 10U, &missingFailure);
+        assert(missingFailure == GraphicsImageFailure::MissingBytes);
+        assert(!missing.isValid());
+    }
     truncated = source;
     truncated.stride = 1;
     truncated.size = 2;
@@ -55,15 +94,6 @@ int main()
     truncated.bitsPerPixel = (std::numeric_limits<int>::max)();
     truncated.size = (std::numeric_limits<std::size_t>::max)();
     assert(!truncated.isValid());
-
-    auto rejected = image;
-    rejected.stride = 1;
-    assert(FramegrabberGraphicsFrameAdapter::imageFailure(rejected) == GraphicsImageFailure::StrideBelowMinimum);
-    rejected.stride = 2;
-    rejected.size = 3;
-    assert(FramegrabberGraphicsFrameAdapter::imageFailure(rejected) == GraphicsImageFailure::TruncatedBytes);
-    rejected.storage.reset();
-    assert(FramegrabberGraphicsFrameAdapter::imageFailure(rejected) == GraphicsImageFailure::MissingBytes);
 
     auto wrapNative = [](const Framegrabber::PixelFormat pixelFormat,
                          const GraphicsImagePixelFormat expected,
@@ -85,9 +115,14 @@ int main()
         input.bitAlignment = Framegrabber::BitAlignment::Packed;
         assert(input.isValid());
 
-        const GraphicsImage wrapped = FramegrabberGraphicsFrameAdapter::wrapImage(input, 3U);
+        GraphicsFrameBuilder nativeBuilder;
+        GraphicsImageFailure nativeFailure = GraphicsImageFailure::None;
+        const GraphicsImage wrapped =
+            FramegrabberGraphicsFrameAdapter::wrapImage(nativeBuilder, input, 3U, &nativeFailure);
+        assert(nativeFailure == GraphicsImageFailure::None);
         assert(wrapped.isValid());
         assert(wrapped.pixelFormat == expected);
+        assert(wrapped.pixels.data() == bytes->data());
         assert(wrapped.data() == bytes->data());
         assert(wrapped.width == width);
         assert(wrapped.height == height);

@@ -2,6 +2,7 @@
 
 #include "FramegrabberSourceController.h"
 #include "FramegrabberTestBackend.h"
+#include "engine/GraphicsFrameBuilder.h"
 
 #include <QDir>
 #include <QFile>
@@ -1488,11 +1489,15 @@ void FramegrabberControllerTests::samplesImageRejectionsPerSourceAndRun()
     using Access = FramegrabberControllerTestAccess;
     imageRejections.clear();
     FramegrabberSourceController controller(nullptr, nullptr, &recordImageRejection);
+    auto bytes = std::make_shared<std::vector<std::uint8_t>>(7U);
+    GraphicsFrameBuilder builder;
+    auto borrowed = builder.borrow(bytes, bytes->data(), bytes->size(), GraphicsBorrow::Immutable);
+    QVERIFY(borrowed.hasValue());
     GraphicsImage image;
+    image.pixels = std::move(borrowed).value();
     image.width = 4;
     image.height = 2;
     image.stride = 4;
-    image.size = 7;
     image.pixelFormat = GraphicsImagePixelFormat::Mono8;
     Access::beginImageRejectionRun(controller, false);
     const auto truncated = GraphicsImageFailure::TruncatedBytes;
@@ -1505,21 +1510,24 @@ void FramegrabberControllerTests::samplesImageRejectionsPerSourceAndRun()
     QCOMPARE(imageRejections[1].frameSequence, std::uint64_t{100});
     QCOMPARE(imageRejections.front().sourceIndex, std::uint32_t{2});
     QCOMPARE(imageRejections.front().reason, DeviceImageRejection::TruncatedBytes);
+    QCOMPARE(imageRejections.front().readableBytes, std::uint64_t{7});
     QCOMPARE(imageRejections.front().requiredBytes, std::uint64_t{8});
     QCOMPARE(imageRejections.front().reportedStride, std::uint64_t{0});
 
     Access::reportImageRejection(controller, image, 3U, truncated);
     Access::reportImageRejection(controller, image, 2U, GraphicsImageFailure::MissingBytes);
+    Access::reportImageRejection(controller, image, 2U, GraphicsImageFailure::StorageRefused);
     Access::reportImageRejection(controller, image, 2U, GraphicsImageFailure::None);
-    QCOMPARE(imageRejections.size(), std::size_t{4});
+    QCOMPARE(imageRejections.size(), std::size_t{5});
+    QCOMPARE(imageRejections.back().reason, DeviceImageRejection::StorageRefused);
 
     Access::beginImageRejectionRun(controller, false);
     Access::reportImageRejection(controller, image, 2U, truncated);
-    QCOMPARE(imageRejections.size(), std::size_t{5});
+    QCOMPARE(imageRejections.size(), std::size_t{6});
     Access::beginImageRejectionRun(controller, true);
     Access::reportImageRejection(controller, image, 2U, truncated);
     Access::reportImageRejection(controller, image, 2U, truncated);
-    QCOMPARE(imageRejections.size(), std::size_t{7});
+    QCOMPARE(imageRejections.size(), std::size_t{8});
 }
 
 QTEST_GUILESS_MAIN(FramegrabberControllerTests)

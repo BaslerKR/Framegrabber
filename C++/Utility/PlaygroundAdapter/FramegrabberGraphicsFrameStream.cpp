@@ -40,18 +40,40 @@ FramegrabberGraphicsFrameStream::Impl::Impl(
             GraphicsFrameCallbackGate::Lease lease(callbackToken);
             if (!lease) return;
             // The DMA callback boundary counts and logs any conversion/consumer failure once.
-            GraphicsImage graphicsImage = FramegrabberGraphicsFrameAdapter::wrapImage(image, sequence);
-            const auto failure = FramegrabberGraphicsFrameAdapter::imageFailure(graphicsImage);
+            GraphicsFrameBuilder builder;
+            GraphicsImageFailure failure = GraphicsImageFailure::None;
+            GraphicsImage graphicsImage =
+                FramegrabberGraphicsFrameAdapter::wrapImage(builder, image, sequence, &failure);
             if (failure != GraphicsImageFailure::None) {
                 if (rejectedImage) rejectedImage(graphicsImage, image.dmaIndex, failure);
                 throw std::runtime_error("Invalid GraphicsImage conversion.");
             }
 
-            GraphicsFrame frame;
-            frame.addImage("image", std::move(graphicsImage), "Image");
-            frame.metadata.sourceName = "Framegrabber";
-            frame.metadata.frameIndex = sequence;
-            _callback(std::move(frame), image.dmaIndex);
+            builder.addImage("image", std::move(graphicsImage), "Image");
+            GraphicsFrameMetadata metadata;
+            metadata.sourceName = "Framegrabber";
+            metadata.frameIndex = sequence;
+            builder.setMetadata(std::move(metadata));
+            auto published = std::move(builder).publish();
+            if (!published) {
+                if (rejectedImage) {
+                    GraphicsImage rejected;
+                    rejected.width = image.width;
+                    rejected.height = image.height;
+                    rejected.stride = image.stride;
+                    rejected.sourceFormat = image.fgFormat;
+                    rejected.frameSequence = sequence;
+                    const GraphicsImageFailure publishFailure =
+                        (published.error() == GraphicsFrameError::InvalidInput
+                         || published.error() == GraphicsFrameError::UnsealedWrite
+                         || published.error() == GraphicsFrameError::None)
+                        ? GraphicsImageFailure::InvalidDimensions
+                        : GraphicsImageFailure::StorageRefused;
+                    rejectedImage(rejected, image.dmaIndex, publishFailure);
+                }
+                throw std::runtime_error("Invalid GraphicsFrame publish.");
+            }
+            _callback(std::move(published).value(), image.dmaIndex);
         });
 }
 
