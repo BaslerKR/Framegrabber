@@ -1,5 +1,7 @@
 ## Unreleased
 
+- Adopt `DevicePluginSessionCapability::GraphicsViewer` in `FramegrabberPlugin`.
+
 - Migrate the Playground adapter, stream, controller, and tests to the immutable `GraphicsFrame` handle and `GraphicsFrameBuilder`, borrowing core buffer leases with `GraphicsBorrow::Immutable` without adding copies and routing borrow/publish failures through the existing image-rejection sink.
 
 - Contain frame-storage exceptions on acquisition workers, count the dropped frames, prevent callback/lifecycle re-entry from deadlocking stop or applet replacement, and report control-gate or lifecycle refusals explicitly. Worker identity is tracked independently of `std::thread` objects to avoid racing identification with `join()`, and acquisition-stop status is published once at stop request without confusing a still-starting peer DMA with a completed run.

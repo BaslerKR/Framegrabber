@@ -97,7 +97,7 @@ public:
     AbstractSourceController* sourceController() const override { return _controller.get(); }
     unsigned int capabilities() const noexcept override
     {
-        return DevicePluginSessionCapability::GraphicsEngine
+        return DevicePluginSessionCapability::GraphicsViewer
             | DevicePluginSessionCapability::ScriptEditor;
     }
     void setTitleChangedCallback(std::function<void(const QString&)> callback) override { _titleState->setCallback(std::move(callback)); }
