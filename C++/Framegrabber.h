@@ -28,10 +28,19 @@
 #include <variant>
 #include <vector>
 
+class Framegrabber;
+
+namespace FramegrabberDetail
+{
+struct CaptureTransactionAccess;
+struct CaptureTransactionSlot;
+}
+
 class Framegrabber
 {
     friend class FramegrabberSystem;
     friend struct FramegrabberCatalogTestAccess;
+    friend struct FramegrabberDetail::CaptureTransactionAccess;
 
 public:
     using CallbackId = std::size_t;
@@ -522,6 +531,9 @@ private:
     std::size_t _dmaBufferCount = 6;
     std::mutex _frameStorageMutex;
     FrameStorage _frameStorage;
+    std::mutex _captureTransactionMutex;
+    std::shared_ptr<const FramegrabberDetail::CaptureTransactionSlot> _captureTransaction;
+    std::atomic<bool> _managedCaptureMode{false};
     std::vector<std::unique_ptr<DmaChannel>> _channels;
     std::vector<CameraEntry> _cxpCameras;
     std::vector<AppletInfo> _appletCatalog;

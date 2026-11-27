@@ -1,4 +1,5 @@
 #include "Framegrabber.h"
+#include "FramegrabberCaptureTransaction.h"
 #include "FramegrabberRuntimeDiagnostics.h"
 
 #include "FramegrabberAcquisitionState.h"
@@ -1994,10 +1995,11 @@ void Framegrabber::startChannel(const unsigned int dmaIndex, const std::size_t f
         std::lock_guard<std::mutex> lock(_frameStorageMutex);
         frameStorage = _frameStorage;
     }
+    const bool managedMode = _managedCaptureMode.load(std::memory_order_acquire);
     std::shared_ptr<OwnedBufferPool> ownedBufferPool;
     try
     {
-        if (!frameStorage)
+        if (!managedMode && !frameStorage)
         {
             ownedBufferPool = OwnedBufferPool::create(
                 frameBytes,
@@ -2043,7 +2045,7 @@ void Framegrabber::startChannel(const unsigned int dmaIndex, const std::size_t f
     {
         channelPtr->thread = std::thread(
             [this, channelPtr, handle, frames, width, height, sdkFormat, pixelFormat, pixelBits,
-             pixelBytes, bitAlignment, frameBytes, bufferCount]
+             pixelBytes, bitAlignment, frameBytes, bufferCount, managedMode]
             {
                 const unsigned int dmaIndex = channelPtr->index;
                 {
@@ -2187,6 +2189,188 @@ void Framegrabber::startChannel(const unsigned int dmaIndex, const std::size_t f
                     {
                         break;
                     }
+
+                    if (managedMode)
+                    {
+                        std::shared_ptr<const FramegrabberDetail::CaptureTransactionSlot> transactionSlot;
+                        {
+                            std::lock_guard<std::mutex> lock(_captureTransactionMutex);
+                            transactionSlot = _captureTransaction;
+                        }
+                        if (!transactionSlot || !transactionSlot->fn)
+                        {
+                            channelPtr->poolExhausted.fetch_add(1, std::memory_order_relaxed);
+                            if (!storageWarningLogged)
+                            {
+                                log("DMA(" + std::to_string(dmaIndex)
+                                        + ") managed capture transaction is not configured.",
+                                    true);
+                                storageWarningLogged = true;
+                            }
+                            continue;
+                        }
+
+                        const std::uint64_t frameSeq =
+                            _frameSeq.fetch_add(1, std::memory_order_acq_rel) + 1;
+                        FramegrabberDetail::CaptureFrameDescriptor descriptor;
+                        descriptor.size = payloadBytes;
+                        descriptor.width = imageWidth;
+                        descriptor.height = height;
+                        descriptor.stride = static_cast<int>(payloadStride);
+                        descriptor.bitsPerPixel = pixelBits;
+                        descriptor.bytesPerPixel = pixelBytes;
+                        descriptor.fgFormat = sdkFormat;
+                        descriptor.pixelFormat = pixelFormat;
+                        descriptor.bitAlignment = bitAlignment;
+                        descriptor.dmaIndex = dmaIndex;
+                        descriptor.frameSeq = frameSeq;
+
+                        class DmaCopyGate final : public FramegrabberDetail::CaptureCopyGate
+                        {
+                        public:
+                            DmaCopyGate(Fg_Struct* fgHandle,
+                                        dma_mem* dmaMemory,
+                                        unsigned int channelIndex,
+                                        std::size_t bufferDepth,
+                                        frameindex_t pic,
+                                        const std::uint8_t* dmaSource,
+                                        std::size_t bytes,
+                                        const std::atomic<bool>& stopFlag) noexcept
+                                : _handle(fgHandle)
+                                , _memory(dmaMemory)
+                                , _dmaIndex(channelIndex)
+                                , _bufferCount(bufferDepth)
+                                , _picture(pic)
+                                , _source(dmaSource)
+                                , _bytes(bytes)
+                                , _stopRequested(stopFlag)
+                            {
+                            }
+
+                            bool copyAndVerify(
+                                std::uint8_t* destination,
+                                std::size_t capacity) noexcept override
+                            {
+                                if (_attempted || !destination || capacity < _bytes)
+                                {
+                                    return false;
+                                }
+                                _attempted = true;
+                                if (_stopRequested.load(std::memory_order_acquire))
+                                {
+                                    _stopped = true;
+                                    return false;
+                                }
+                                std::memcpy(destination, _source, _bytes);
+                                if (_stopRequested.load(std::memory_order_acquire))
+                                {
+                                    _stopped = true;
+                                    return false;
+                                }
+
+                                // ACQ_STANDARD does not protect frame buffers. Verify the driver
+                                // did not advance into the reuse window while copying.
+                                const frameindex_t grabbed = Fg_getStatusEx(
+                                    _handle,
+                                    NUMBER_OF_GRABBED_IMAGES,
+                                    0,
+                                    _dmaIndex,
+                                    _memory);
+                                if (grabbed > 0
+                                    && grabbed - _picture
+                                        >= static_cast<frameindex_t>(_bufferCount) - 1)
+                                {
+                                    _overwritten = true;
+                                    return false;
+                                }
+                                return true;
+                            }
+
+                            [[nodiscard]] bool overwritten() const noexcept { return _overwritten; }
+                            [[nodiscard]] bool stopped() const noexcept { return _stopped; }
+
+                        private:
+                            Fg_Struct* _handle;
+                            dma_mem* _memory;
+                            unsigned int _dmaIndex;
+                            std::size_t _bufferCount;
+                            frameindex_t _picture;
+                            const std::uint8_t* _source;
+                            std::size_t _bytes;
+                            const std::atomic<bool>& _stopRequested;
+                            bool _attempted = false;
+                            bool _overwritten = false;
+                            bool _stopped = false;
+                        };
+
+                        DmaCopyGate copyGate(
+                            handle,
+                            channelPtr->memory,
+                            dmaIndex,
+                            bufferCount,
+                            picture,
+                            source,
+                            payloadBytes,
+                            channelPtr->stopRequested);
+
+                        using Outcome = FramegrabberDetail::CaptureTransactionOutcome;
+                        Outcome outcome = Outcome::DroppedInvalidOrFailed;
+                        {
+                            CallbackReentry callbackScope(*this);
+                            try
+                            {
+                                outcome = transactionSlot->fn(descriptor, copyGate);
+                            }
+                            catch (const std::exception& exception)
+                            {
+                                channelPtr->diagnostics.noteFailure();
+                                log(std::string("Capture transaction failed: ") + exception.what(), true);
+                                outcome = Outcome::DroppedInvalidOrFailed;
+                            }
+                            catch (...)
+                            {
+                                channelPtr->diagnostics.noteFailure();
+                                log("Capture transaction failed with an unknown exception.", true);
+                                outcome = Outcome::DroppedInvalidOrFailed;
+                            }
+                        }
+
+                        if (copyGate.stopped()
+                            || outcome == Outcome::AbortedStop
+                            || channelPtr->stopRequested.load(std::memory_order_acquire))
+                        {
+                            break;
+                        }
+                        if (copyGate.overwritten())
+                        {
+                            channelPtr->overwritten.fetch_add(1, std::memory_order_relaxed);
+                            continue;
+                        }
+                        switch (outcome)
+                        {
+                        case Outcome::Delivered:
+                            channelPtr->diagnostics.noteFrameDelivered(true);
+                            ++delivered;
+                            channelPtr->delivered.fetch_add(1, std::memory_order_relaxed);
+                            break;
+                        case Outcome::DroppedNoCredit:
+                        case Outcome::DroppedStorageRefused:
+                            channelPtr->poolExhausted.fetch_add(1, std::memory_order_relaxed);
+                            break;
+                        case Outcome::DroppedInvalidOrFailed:
+                            channelPtr->diagnostics.noteFailure();
+                            channelPtr->diagnostics.noteFrameDelivered(false);
+                            break;
+                        case Outcome::AbortedStop:
+                            break;
+                        }
+                        if (outcome == Outcome::Delivered && frames != 0 && delivered >= frames)
+                        {
+                            break;
+                        }
+                        continue;
+                    }
+
                     std::string storageError;
                     OwnedBufferPool::Lease ownedBytes;
                     {
@@ -2668,6 +2852,31 @@ void Framegrabber::setFrameStorage(FrameStorage storage)
 {
     std::lock_guard<std::mutex> lock(_frameStorageMutex);
     _frameStorage = std::move(storage);
+}
+
+void FramegrabberDetail::CaptureTransactionAccess::enableManagedCaptureMode(
+    Framegrabber& grabber) noexcept
+{
+    grabber._managedCaptureMode.store(true, std::memory_order_release);
+}
+
+void FramegrabberDetail::CaptureTransactionAccess::setCaptureTransaction(
+    Framegrabber& grabber,
+    CaptureTransactionFn transaction)
+{
+    grabber._managedCaptureMode.store(true, std::memory_order_release);
+    auto slot = transaction
+        ? std::make_shared<const CaptureTransactionSlot>(CaptureTransactionSlot{std::move(transaction)})
+        : std::shared_ptr<const CaptureTransactionSlot>{};
+    std::lock_guard<std::mutex> lock(grabber._captureTransactionMutex);
+    grabber._captureTransaction = std::move(slot);
+}
+
+void FramegrabberDetail::CaptureTransactionAccess::clearCaptureTransaction(
+    Framegrabber& grabber) noexcept
+{
+    std::lock_guard<std::mutex> lock(grabber._captureTransactionMutex);
+    grabber._captureTransaction.reset();
 }
 
 void Framegrabber::setDMABufferCount(const std::size_t count)

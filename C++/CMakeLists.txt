@@ -66,6 +66,7 @@ add_library(Framegrabber STATIC
     Framegrabber.h
     Framegrabber.cpp
     FramegrabberCameraGeometry.h
+    FramegrabberCaptureTransaction.h
     FramegrabberOwnedBufferPool.h
     FramegrabberSystem.h
     FramegrabberSystem.cpp

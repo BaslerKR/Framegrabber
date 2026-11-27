@@ -238,7 +238,8 @@ private:
     void publishObservation(const std::string& connection, bool snapshot,
                             const Observation& observation);
     void reportImageRejection(const GraphicsImage& image, unsigned int dma,
-                              GraphicsImageFailure failure);
+                              GraphicsImageFailure failure,
+                              std::optional<std::size_t> readableBytes = std::nullopt);
     void beginImageRejectionRun(bool single);
 
     struct ContextSourceState {

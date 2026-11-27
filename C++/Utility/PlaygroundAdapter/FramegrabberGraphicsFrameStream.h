@@ -18,7 +18,7 @@ class Framegrabber;
 class FramegrabberGraphicsFrameStream final
 {
 public:
-    using RejectedImage = std::function<void(const GraphicsImage&, unsigned int, GraphicsImageFailure)>;
+    using RejectedImage = std::function<void(const GraphicsImage&, unsigned int, GraphicsImageFailure, std::size_t)>;
     using StorageOutcome = std::function<void(GraphicsFrameError)>;
 
     FramegrabberGraphicsFrameStream(

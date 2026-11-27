@@ -102,6 +102,183 @@ namespace
 
 namespace FramegrabberGraphicsFrameAdapter
 {
+GraphicsImagePixelFormat graphicsPixelFormat(const Framegrabber::PixelFormat format) noexcept
+{
+    return ::graphicsPixelFormat(format);
+}
+
+GraphicsImageBitAlignment graphicsBitAlignment(const Framegrabber::BitAlignment alignment) noexcept
+{
+    return ::graphicsBitAlignment(alignment);
+}
+
+GraphicsResult<GraphicsImageWriteLayout> planImage(
+    const FramegrabberDetail::CaptureFrameDescriptor& descriptor,
+    GraphicsImageFailure* const failure) noexcept
+{
+    const auto reject = [failure](const GraphicsImageFailure reason)
+        -> GraphicsResult<GraphicsImageWriteLayout> {
+        if (failure) *failure = reason;
+        return reason == GraphicsImageFailure::ExtentOverflow
+            ? GraphicsFrameError::Capacity
+            : GraphicsFrameError::InvalidInput;
+    };
+    if (descriptor.size == 0U)
+    {
+        return reject(GraphicsImageFailure::MissingBytes);
+    }
+    if (descriptor.width <= 0 || descriptor.height <= 0)
+    {
+        return reject(GraphicsImageFailure::InvalidDimensions);
+    }
+    if (descriptor.stride <= 0)
+    {
+        return reject(GraphicsImageFailure::InvalidStride);
+    }
+
+    // planGraphicsImageWrite checks data != nullptr without dereferencing it, so a static
+    // non-null byte plans the destination without exposing any raw DMA pointer.
+    alignas(16) static constexpr std::uint8_t kPlannedBytePlaceholder = 0U;
+    GraphicsImageWriterSource source;
+    source.data = &kPlannedBytePlaceholder;
+    source.size = descriptor.size;
+    source.width = descriptor.width;
+    source.height = descriptor.height;
+    source.stride = descriptor.stride;
+    source.pixelFormat = ::graphicsPixelFormat(descriptor.pixelFormat);
+    source.bitsPerPixel = descriptor.bitsPerPixel;
+    source.sourceFormat = descriptor.fgFormat;
+    source.bitAlignment = ::graphicsBitAlignment(descriptor.bitAlignment);
+    source.frameSequence = descriptor.frameSeq;
+    source.operation = GraphicsImageWriterOperation::Copy;
+    return planGraphicsImageWrite(source, failure);
+}
+
+GraphicsResult<GraphicsFrame> captureFrame(
+    GraphicsFrameContextSource& contextSource,
+    const FramegrabberDetail::CaptureFrameDescriptor& descriptor,
+    FramegrabberDetail::CaptureCopyGate& copyGate,
+    GraphicsImageFailure* const outImageFailure,
+    GraphicsImage* const rejectedImage,
+    const std::atomic<bool>* const cancelled)
+{
+    if (outImageFailure) *outImageFailure = GraphicsImageFailure::None;
+    const auto isCancelled = [cancelled]() noexcept {
+        return cancelled && cancelled->load(std::memory_order_acquire);
+    };
+    const auto recordRejected = [rejectedImage, &descriptor](
+        const GraphicsImagePixelFormat pixelFormat,
+        const int width,
+        const int height,
+        const int stride) noexcept {
+        if (!rejectedImage) return;
+        GraphicsImage rejected;
+        rejected.width = width;
+        rejected.height = height;
+        rejected.stride = stride;
+        rejected.bitsPerPixel = descriptor.bitsPerPixel;
+        rejected.sourceFormat = descriptor.fgFormat;
+        rejected.pixelFormat = pixelFormat;
+        rejected.bitAlignment = ::graphicsBitAlignment(descriptor.bitAlignment);
+        rejected.frameSequence = descriptor.frameSeq;
+        *rejectedImage = std::move(rejected);
+    };
+
+    if (isCancelled())
+    {
+        return GraphicsFrameError::Disconnected;
+    }
+
+    GraphicsImageFailure planFailure = GraphicsImageFailure::None;
+    const auto plan = planImage(descriptor, &planFailure);
+    if (!plan)
+    {
+        if (outImageFailure) *outImageFailure = planFailure;
+        recordRejected(
+            ::graphicsPixelFormat(descriptor.pixelFormat),
+            descriptor.width,
+            descriptor.height,
+            descriptor.stride);
+        return plan.error();
+    }
+
+    const GraphicsImageWriteLayout& layout = plan.value();
+    auto contextResult = contextSource.beginFrame(layout.bytes);
+    if (!contextResult)
+    {
+        return contextResult.error();
+    }
+    if (isCancelled())
+    {
+        return GraphicsFrameError::Disconnected;
+    }
+
+    GraphicsFrameBuilder builder(contextResult.value());
+    auto reserved = builder.reserve<std::uint8_t>(layout.bytes, layout.alignment);
+    if (!reserved)
+    {
+        if (outImageFailure) *outImageFailure = GraphicsImageFailure::StorageRefused;
+        recordRejected(layout.format, layout.width, layout.height, layout.strideBytes);
+        return reserved.error();
+    }
+
+    GraphicsWriteRegion<std::uint8_t> region = std::move(reserved).value();
+    if (!copyGate.copyAndVerify(region.data(), layout.bytes))
+    {
+        // RAII destroys region and builder without sealing or publishing.
+        return GraphicsFrameError::InvalidInput;
+    }
+    if (isCancelled())
+    {
+        // RAII releases the unsealed write region on stop/cancellation before seal.
+        return GraphicsFrameError::Disconnected;
+    }
+
+    GraphicsImage image;
+    image.pixels = builder.seal(std::move(region));
+    image.width = layout.width;
+    image.height = layout.height;
+    image.stride = layout.strideBytes;
+    image.bitsPerPixel = descriptor.bitsPerPixel;
+    image.sourceFormat = descriptor.fgFormat;
+    image.pixelFormat = layout.format;
+    image.bitAlignment = ::graphicsBitAlignment(descriptor.bitAlignment);
+    image.frameSequence = descriptor.frameSeq;
+
+    const GraphicsImageFailure failure = imageFailure(image);
+    if (failure != GraphicsImageFailure::None)
+    {
+        if (outImageFailure) *outImageFailure = failure;
+        if (rejectedImage) *rejectedImage = std::move(image);
+        return GraphicsFrameError::InvalidInput;
+    }
+
+    builder.addImage("image", std::move(image), "Image");
+    GraphicsFrameMetadata metadata;
+    metadata.sourceName = "Framegrabber";
+    metadata.frameIndex = descriptor.frameSeq;
+    builder.setMetadata(std::move(metadata));
+    auto published = std::move(builder).publish();
+    if (!published)
+    {
+        if (outImageFailure)
+        {
+            *outImageFailure = (published.error() == GraphicsFrameError::InvalidInput
+                                || published.error() == GraphicsFrameError::UnsealedWrite
+                                || published.error() == GraphicsFrameError::None)
+                ? GraphicsImageFailure::InvalidDimensions
+                : GraphicsImageFailure::StorageRefused;
+        }
+        recordRejected(layout.format, layout.width, layout.height, layout.strideBytes);
+        return published.error();
+    }
+    if (isCancelled())
+    {
+        return GraphicsFrameError::Disconnected;
+    }
+    return published;
+}
+
 GraphicsImage wrapImage(
     GraphicsFrameBuilder& builder,
     const Framegrabber::Image& image,

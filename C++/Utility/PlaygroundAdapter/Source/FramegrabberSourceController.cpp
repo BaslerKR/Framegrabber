@@ -1,5 +1,6 @@
 #include "FramegrabberSourceController.h"
 
+#include "FramegrabberCaptureTransaction.h"
 #include "Utility/PlaygroundAdapter/FramegrabberGraphicsFrameStream.h"
 #include "DeviceRuntime/Contract/SessionFrame.h"
 
@@ -521,8 +522,9 @@ void FramegrabberSourceController::rebuildGraphicsStream(
             frame.frameSeq = frame.payload.metadata().frameIndex;
             _frameConsumer(std::move(frame), sourceIndex);
         },
-        [this](const GraphicsImage& image, const unsigned int dma, const GraphicsImageFailure failure) {
-            reportImageRejection(image, dma, failure);
+        [this](const GraphicsImage& image, const unsigned int dma, const GraphicsImageFailure failure,
+               const std::size_t readableBytes) {
+            reportImageRejection(image, dma, failure, readableBytes);
         },
         std::move(storageOutcome),
         std::move(cancelledFlag));
@@ -541,6 +543,10 @@ FramegrabberSourceController::FramegrabberSourceController(
       _imageRejectionSink(imageRejectionSink)
 {
     bindBackend();
+    if (_framegrabber != nullptr)
+    {
+        FramegrabberDetail::CaptureTransactionAccess::enableManagedCaptureMode(*_framegrabber);
+    }
     _sessionAvailable.store(_framegrabber != nullptr, std::memory_order_release);
     startObservationThread();
     registerCallbacks();
@@ -795,7 +801,8 @@ void FramegrabberSourceController::beginImageRejectionRun(const bool single)
 }
 
 void FramegrabberSourceController::reportImageRejection(
-    const GraphicsImage& image, const unsigned int dma, const GraphicsImageFailure failure)
+    const GraphicsImage& image, const unsigned int dma, const GraphicsImageFailure failure,
+    const std::optional<std::size_t> readableBytes)
 {
     if (!_imageRejectionSink) return;
     const auto reason = imageRejection(failure);
@@ -810,7 +817,7 @@ void FramegrabberSourceController::reportImageRejection(
 
     DeviceImageRejectionObservation observation;
     observation.reason = *reason;
-    observation.conversion = DeviceImageConversion::Borrow;
+    observation.conversion = DeviceImageConversion::Copy;
     observation.sourceIndex = dma;
     observation.width = image.width > 0 ? static_cast<std::uint32_t>(image.width) : 0;
     observation.height = image.height > 0 ? static_cast<std::uint32_t>(image.height) : 0;
@@ -819,7 +826,9 @@ void FramegrabberSourceController::reportImageRejection(
     // The DMA producer derives stride from transfer length and delivered height.
     observation.effectiveStride = image.stride > 0 ? static_cast<std::uint64_t>(image.stride) : 0;
     observation.minimumRowBytes = GraphicsImageValidation::minimumRowBytes(image.pixelFormat, image.width);
-    observation.readableBytes = image.data() ? image.pixels.size() : 0;
+    observation.readableBytes = readableBytes.has_value()
+        ? *readableBytes
+        : (image.data() ? image.pixels.size() : 0);
     observation.requiredBytes = observation.effectiveStride * observation.height;
     _imageRejectionSink(observation);
 }

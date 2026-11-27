@@ -1,8 +1,8 @@
 #include "FramegrabberGraphicsFrameStream.h"
 
+#include "FramegrabberCaptureTransaction.h"
 #include "FramegrabberGraphicsFrameAdapter.h"
 
-#include <stdexcept>
 #include <memory>
 #include <utility>
 
@@ -38,13 +38,13 @@ private:
     StorageOutcome _storageOutcome;
     std::shared_ptr<const std::atomic<bool>> _externalCancelled;
     std::atomic<bool> _localCancelled{false};
+    std::atomic<bool> _stickyRefused{false};
     GraphicsFrameCallbackGate _callbackGate;
-    Framegrabber::CallbackId _grabCallbackId = 0;
 };
 
 FramegrabberGraphicsFrameStream::Impl::Impl(
     Framegrabber* framegrabber,
-         std::shared_ptr<GraphicsFrameContextSource> contextSource,
+    std::shared_ptr<GraphicsFrameContextSource> contextSource,
     GraphicsFrameCallback callback,
     RejectedImage rejectedImage,
     StorageOutcome storageOutcome,
@@ -61,47 +61,75 @@ FramegrabberGraphicsFrameStream::Impl::Impl(
     }
 
     const auto callbackToken = _callbackGate.token();
-    _grabCallbackId = _framegrabber->registerGrabCallback(
+    FramegrabberDetail::CaptureTransactionAccess::setCaptureTransaction(
+        *_framegrabber,
         [this, callbackToken, rejectedImage = std::move(rejectedImage)](
-            const Framegrabber::Image& image, const std::size_t sequence) {
+            const FramegrabberDetail::CaptureFrameDescriptor& descriptor,
+            FramegrabberDetail::CaptureCopyGate& copyGate)
+            -> FramegrabberDetail::CaptureTransactionOutcome
+        {
+            using Outcome = FramegrabberDetail::CaptureTransactionOutcome;
             GraphicsFrameCallbackGate::Lease lease(callbackToken);
-            if (!lease || isCancelled()) return;
-            // The DMA callback boundary counts and logs any conversion/consumer failure once.
-            GraphicsFrameBuilder builder;
-            GraphicsImageFailure failure = GraphicsImageFailure::None;
-            GraphicsImage graphicsImage =
-                FramegrabberGraphicsFrameAdapter::wrapImage(builder, image, sequence, &failure);
-            if (failure != GraphicsImageFailure::None) {
-                if (rejectedImage) rejectedImage(graphicsImage, image.dmaIndex, failure);
-                throw std::runtime_error("Invalid GraphicsImage conversion.");
+            if (!lease || isCancelled())
+            {
+                return Outcome::AbortedStop;
+            }
+            if (_stickyRefused.load(std::memory_order_acquire))
+            {
+                return Outcome::DroppedStorageRefused;
             }
 
-            builder.addImage("image", std::move(graphicsImage), "Image");
-            GraphicsFrameMetadata metadata;
-            metadata.sourceName = "Framegrabber";
-            metadata.frameIndex = sequence;
-            builder.setMetadata(std::move(metadata));
-            auto published = std::move(builder).publish();
-            if (!published) {
-                if (rejectedImage) {
-                    GraphicsImage rejected;
-                    rejected.width = image.width;
-                    rejected.height = image.height;
-                    rejected.stride = image.stride;
-                    rejected.sourceFormat = image.fgFormat;
-                    rejected.frameSequence = sequence;
-                    const GraphicsImageFailure publishFailure =
-                        (published.error() == GraphicsFrameError::InvalidInput
-                         || published.error() == GraphicsFrameError::UnsealedWrite
-                         || published.error() == GraphicsFrameError::None)
-                        ? GraphicsImageFailure::InvalidDimensions
-                        : GraphicsImageFailure::StorageRefused;
-                    rejectedImage(rejected, image.dmaIndex, publishFailure);
+            GraphicsImageFailure imageFailure = GraphicsImageFailure::None;
+            GraphicsImage rejected;
+            const auto* activeCancel = _externalCancelled ? _externalCancelled.get() : &_localCancelled;
+            auto frame = FramegrabberGraphicsFrameAdapter::captureFrame(
+                *_contextSource,
+                descriptor,
+                copyGate,
+                &imageFailure,
+                rejectedImage ? &rejected : nullptr,
+                activeCancel);
+            if (frame.hasValue())
+            {
+                if (isCancelled())
+                {
+                    return Outcome::AbortedStop;
                 }
-                throw std::runtime_error("Invalid GraphicsFrame publish.");
+                _callback(std::move(frame).value(), descriptor.dmaIndex);
+                return Outcome::Delivered;
             }
-            if (isCancelled()) return;
-            _callback(std::move(published).value(), image.dmaIndex);
+
+            const GraphicsFrameError error = frame.error();
+            if (isCancelled())
+            {
+                return Outcome::AbortedStop;
+            }
+            if (error == GraphicsFrameError::NoReadyCredit)
+            {
+                if (_storageOutcome) _storageOutcome(error);
+                return Outcome::DroppedNoCredit;
+            }
+            if (error == GraphicsFrameError::ClassRefused || error == GraphicsFrameError::Capacity)
+            {
+                _stickyRefused.store(true, std::memory_order_release);
+                if (_storageOutcome) _storageOutcome(error);
+                return Outcome::DroppedStorageRefused;
+            }
+            if (error == GraphicsFrameError::ClassNotPrepared
+                || error == GraphicsFrameError::Disconnected)
+            {
+                if (_storageOutcome) _storageOutcome(error);
+                return Outcome::DroppedStorageRefused;
+            }
+            if (error == GraphicsFrameError::Allocation && _storageOutcome)
+            {
+                _storageOutcome(error);
+            }
+            if (rejectedImage && imageFailure != GraphicsImageFailure::None)
+            {
+                rejectedImage(rejected, descriptor.dmaIndex, imageFailure, descriptor.size);
+            }
+            return Outcome::DroppedInvalidOrFailed;
         });
 }
 
@@ -109,9 +137,9 @@ FramegrabberGraphicsFrameStream::Impl::~Impl()
 {
     _localCancelled.store(true, std::memory_order_release);
     _callbackGate.beginShutdown();
-    if (_framegrabber && _grabCallbackId != 0U)
+    if (_framegrabber)
     {
-        _framegrabber->deregisterGrabCallback(_grabCallbackId);
+        FramegrabberDetail::CaptureTransactionAccess::clearCaptureTransaction(*_framegrabber);
     }
     _callbackGate.waitForDrain();
 }
