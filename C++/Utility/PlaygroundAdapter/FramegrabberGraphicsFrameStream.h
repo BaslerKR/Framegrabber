@@ -6,7 +6,9 @@
  */
 
 #include "engine/GraphicsFrameAdapter.h"
+#include "engine/GraphicsFrameContext.h"
 
+#include <atomic>
 #include <functional>
 #include <memory>
 
@@ -17,13 +19,22 @@ class FramegrabberGraphicsFrameStream final
 {
 public:
     using RejectedImage = std::function<void(const GraphicsImage&, unsigned int, GraphicsImageFailure)>;
+    using StorageOutcome = std::function<void(GraphicsFrameError)>;
 
-    FramegrabberGraphicsFrameStream(Framegrabber* framegrabber, GraphicsFrameCallback callback,
-                                   RejectedImage rejectedImage = {});
+    FramegrabberGraphicsFrameStream(
+        Framegrabber* framegrabber,
+        std::shared_ptr<GraphicsFrameContextSource> contextSource,
+        GraphicsFrameCallback callback,
+        RejectedImage rejectedImage = {},
+        StorageOutcome storageOutcome = {},
+        std::shared_ptr<const std::atomic<bool>> cancelled = {});
     ~FramegrabberGraphicsFrameStream();
 
     FramegrabberGraphicsFrameStream(const FramegrabberGraphicsFrameStream&) = delete;
     FramegrabberGraphicsFrameStream& operator=(const FramegrabberGraphicsFrameStream&) = delete;
+
+    /** @brief Cancels in-flight capture/conversion before seal and publication. */
+    void cancel() noexcept;
 
 private:
     class Impl;

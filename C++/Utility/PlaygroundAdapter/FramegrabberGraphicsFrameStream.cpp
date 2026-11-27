@@ -9,26 +9,53 @@
 class FramegrabberGraphicsFrameStream::Impl final
 {
 public:
-    Impl(Framegrabber* framegrabber, GraphicsFrameCallback callback, RejectedImage rejectedImage);
+    Impl(Framegrabber* framegrabber,
+         std::shared_ptr<GraphicsFrameContextSource> contextSource,
+         GraphicsFrameCallback callback,
+         RejectedImage rejectedImage,
+         StorageOutcome storageOutcome,
+         std::shared_ptr<const std::atomic<bool>> cancelled);
     ~Impl();
 
     Impl(const Impl&) = delete;
     Impl& operator=(const Impl&) = delete;
 
+    void cancel() noexcept
+    {
+        _localCancelled.store(true, std::memory_order_release);
+    }
+
 private:
+    [[nodiscard]] bool isCancelled() const noexcept
+    {
+        return _localCancelled.load(std::memory_order_acquire)
+            || (_externalCancelled && _externalCancelled->load(std::memory_order_acquire));
+    }
+
     Framegrabber* _framegrabber = nullptr;
+    std::shared_ptr<GraphicsFrameContextSource> _contextSource;
     GraphicsFrameCallback _callback;
+    StorageOutcome _storageOutcome;
+    std::shared_ptr<const std::atomic<bool>> _externalCancelled;
+    std::atomic<bool> _localCancelled{false};
     GraphicsFrameCallbackGate _callbackGate;
     Framegrabber::CallbackId _grabCallbackId = 0;
 };
 
 FramegrabberGraphicsFrameStream::Impl::Impl(
     Framegrabber* framegrabber,
+         std::shared_ptr<GraphicsFrameContextSource> contextSource,
     GraphicsFrameCallback callback,
-    RejectedImage rejectedImage)
-    : _framegrabber(framegrabber), _callback(std::move(callback))
+    RejectedImage rejectedImage,
+    StorageOutcome storageOutcome,
+    std::shared_ptr<const std::atomic<bool>> cancelled)
+    : _framegrabber(framegrabber),
+      _contextSource(std::move(contextSource)),
+      _callback(std::move(callback)),
+      _storageOutcome(std::move(storageOutcome)),
+      _externalCancelled(std::move(cancelled))
 {
-    if (!_framegrabber || !_callback)
+    if (!_framegrabber || !_contextSource || !_callback)
     {
         return;
     }
@@ -38,7 +65,7 @@ FramegrabberGraphicsFrameStream::Impl::Impl(
         [this, callbackToken, rejectedImage = std::move(rejectedImage)](
             const Framegrabber::Image& image, const std::size_t sequence) {
             GraphicsFrameCallbackGate::Lease lease(callbackToken);
-            if (!lease) return;
+            if (!lease || isCancelled()) return;
             // The DMA callback boundary counts and logs any conversion/consumer failure once.
             GraphicsFrameBuilder builder;
             GraphicsImageFailure failure = GraphicsImageFailure::None;
@@ -73,12 +100,14 @@ FramegrabberGraphicsFrameStream::Impl::Impl(
                 }
                 throw std::runtime_error("Invalid GraphicsFrame publish.");
             }
+            if (isCancelled()) return;
             _callback(std::move(published).value(), image.dmaIndex);
         });
 }
 
 FramegrabberGraphicsFrameStream::Impl::~Impl()
 {
+    _localCancelled.store(true, std::memory_order_release);
     _callbackGate.beginShutdown();
     if (_framegrabber && _grabCallbackId != 0U)
     {
@@ -89,10 +118,27 @@ FramegrabberGraphicsFrameStream::Impl::~Impl()
 
 FramegrabberGraphicsFrameStream::FramegrabberGraphicsFrameStream(
     Framegrabber* framegrabber,
+    std::shared_ptr<GraphicsFrameContextSource> contextSource,
     GraphicsFrameCallback callback,
-    RejectedImage rejectedImage)
-    : _impl(std::make_unique<Impl>(framegrabber, std::move(callback), std::move(rejectedImage)))
+    RejectedImage rejectedImage,
+    StorageOutcome storageOutcome,
+    std::shared_ptr<const std::atomic<bool>> cancelled)
+    : _impl(std::make_unique<Impl>(
+        framegrabber,
+        std::move(contextSource),
+        std::move(callback),
+        std::move(rejectedImage),
+        std::move(storageOutcome),
+        std::move(cancelled)))
 {
 }
 
 FramegrabberGraphicsFrameStream::~FramegrabberGraphicsFrameStream() = default;
+
+void FramegrabberGraphicsFrameStream::cancel() noexcept
+{
+    if (_impl)
+    {
+        _impl->cancel();
+    }
+}

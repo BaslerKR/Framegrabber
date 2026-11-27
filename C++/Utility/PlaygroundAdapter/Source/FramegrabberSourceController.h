@@ -4,7 +4,7 @@
 #include "DeviceRuntime/Contract/DeviceConnectionControl.h"
 #include "DeviceRuntime/Contract/DeviceImageDiagnostics.h"
 #include "DeviceRuntime/Contract/DeviceParameterControl.h"
-#include "DeviceRuntime/Contract/FrameStorage.h"
+#include "DeviceRuntime/Contract/FrameContextClient.h"
 #include "Framegrabber.h"
 #include "FramegrabberParameterNotifications.h"
 #include "Tools/ToolProvider.h"
@@ -62,13 +62,13 @@ class FramegrabberSourceController final
       public IToolExecution,
       public IDeviceConnectionControl,
       public IDeviceParameterControl,
-      public IFrameStorageClient
+      public IFrameContextClient
 {
     Q_OBJECT
-    Q_INTERFACES(IToolProvider IToolExecution IDeviceConnectionControl IDeviceParameterControl IFrameStorageClient)
+    Q_INTERFACES(IToolProvider IToolExecution IDeviceConnectionControl IDeviceParameterControl IFrameContextClient)
 
 public:
-    void setFrameStorageProvider(std::shared_ptr<IFrameStorageProvider> provider) override;
+    void setFrameContextSource(std::shared_ptr<GraphicsFrameContextSource> source) override;
     using TargetsCompletion = IDeviceConnectionControl::TargetsCompletion;
     using ChangeListener = IDeviceParameterControl::ChangeListener;
     explicit FramegrabberSourceController(Framegrabber* framegrabber,
@@ -241,6 +241,32 @@ private:
                               GraphicsImageFailure failure);
     void beginImageRejectionRun(bool single);
 
+    struct ContextSourceState {
+        std::shared_ptr<GraphicsFrameContextSource> source;
+        mutable std::mutex mutex;
+        std::atomic<GraphicsFrameError> stickyError{GraphicsFrameError::None};
+        std::string stickyMessage;
+    };
+    struct AcquisitionRun {
+        std::uint64_t generation = 0;
+        std::atomic<bool> active{true};
+        std::atomic<bool> cancelled{false};
+        std::atomic<bool> stickyRefused{false};
+        std::shared_ptr<ContextSourceState> contextState;
+        std::mutex failureMutex;
+        std::string failureMessage;
+    };
+
+    [[nodiscard]] std::shared_ptr<ContextSourceState> activeContextSource(std::string* error) const;
+    static void recordStickyContextFailure(
+        const std::shared_ptr<ContextSourceState>& state,
+        GraphicsFrameError error,
+        std::string message);
+    std::shared_ptr<AcquisitionRun> beginAcquisitionRun(
+        const std::shared_ptr<ContextSourceState>& state);
+    void revokeActiveRun();
+    void rebuildGraphicsStream(const std::shared_ptr<AcquisitionRun>& run);
+
     Framegrabber* _framegrabber = nullptr;
     Backend _backend;
     std::atomic<bool> _sessionAvailable{false};
@@ -250,6 +276,11 @@ private:
 
     Framegrabber::CallbackId _statusCallbackId = 0;
     Framegrabber::CallbackId _nodeCallbackId = 0;
+    mutable std::mutex _contextMutex;
+    std::shared_ptr<ContextSourceState> _contextSourceState;
+    std::shared_ptr<AcquisitionRun> _activeRun;
+    std::uint64_t _runGeneration = 0;
+    std::mutex _streamMutex;
     std::unique_ptr<FramegrabberGraphicsFrameStream> _graphicsStream;
     const DeviceImageRejectionSink _imageRejectionSink;
     std::mutex _imageRejectionMutex;

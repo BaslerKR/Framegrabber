@@ -25,6 +25,26 @@ namespace
 // Single acquisition waits for one frame per DMA; a trigger source may be idle.
 constexpr auto kSingleAcquisitionTimeout = std::chrono::seconds(30);
 
+std::string contextErrorMessage(const GraphicsFrameError error)
+{
+    switch (error)
+    {
+    case GraphicsFrameError::None: return "Frame storage failed.";
+    case GraphicsFrameError::InvalidInput: return "Frame storage request is invalid.";
+    case GraphicsFrameError::Capacity:
+        return "Frame storage admission failed: frame size exceeds capacity.";
+    case GraphicsFrameError::Allocation: return "Frame storage allocation failed.";
+    case GraphicsFrameError::Disconnected: return "Frame storage session is disconnected.";
+    case GraphicsFrameError::StaleGeneration: return "Frame storage grant expired.";
+    case GraphicsFrameError::UnsealedWrite: return "Frame write region remained open.";
+    case GraphicsFrameError::ClassNotPrepared: return "Frame storage class is not prepared.";
+    case GraphicsFrameError::NoReadyCredit: return "Frame storage has no ready credit.";
+    case GraphicsFrameError::ClassRefused:
+        return "Frame storage admission failed: class refused by host.";
+    }
+    return "Frame storage allocation failed.";
+}
+
 std::optional<DeviceImageRejection> imageRejection(const GraphicsImageFailure failure)
 {
     switch (failure)
@@ -329,22 +349,183 @@ QString loadMessage(const QString& name, const QString& argument)
 }
 }
 
-void FramegrabberSourceController::setFrameStorageProvider(
-    std::shared_ptr<IFrameStorageProvider> provider)
+void FramegrabberSourceController::setFrameContextSource(
+    std::shared_ptr<GraphicsFrameContextSource> source)
 {
-    if (_framegrabber == nullptr)
+    revokeActiveRun();
+    {
+        std::lock_guard<std::mutex> streamLock(_streamMutex);
+        _graphicsStream.reset();
+    }
+    std::shared_ptr<ContextSourceState> nextState;
+    if (source)
+    {
+        nextState = std::make_shared<ContextSourceState>();
+        nextState->source = std::move(source);
+    }
+    std::shared_ptr<AcquisitionRun> standbyRun;
+    {
+        std::lock_guard<std::mutex> lock(_contextMutex);
+        _contextSourceState = nextState;
+        if (nextState)
+        {
+            standbyRun = std::make_shared<AcquisitionRun>();
+            standbyRun->generation = 0;
+            standbyRun->contextState = nextState;
+            _activeRun = standbyRun;
+        }
+        else
+        {
+            _activeRun.reset();
+        }
+    }
+    if (_framegrabber && standbyRun)
+    {
+        rebuildGraphicsStream(standbyRun);
+    }
+}
+
+std::shared_ptr<FramegrabberSourceController::ContextSourceState>
+FramegrabberSourceController::activeContextSource(std::string* error) const
+{
+    std::shared_ptr<ContextSourceState> state;
+    {
+        std::lock_guard<std::mutex> lock(_contextMutex);
+        state = _contextSourceState;
+    }
+    if (!state || !state->source)
+    {
+        if (error) *error = "Frame context source is not configured.";
+        return {};
+    }
+    if (state->stickyError.load(std::memory_order_acquire) != GraphicsFrameError::None)
+    {
+        std::lock_guard<std::mutex> stateLock(state->mutex);
+        if (error)
+        {
+            const auto err = state->stickyError.load(std::memory_order_acquire);
+            *error = state->stickyMessage.empty() ? contextErrorMessage(err) : state->stickyMessage;
+        }
+        return {};
+    }
+    return state;
+}
+
+void FramegrabberSourceController::recordStickyContextFailure(
+    const std::shared_ptr<ContextSourceState>& state,
+    const GraphicsFrameError error,
+    std::string message)
+{
+    if (!state || (error != GraphicsFrameError::ClassRefused && error != GraphicsFrameError::Capacity))
     {
         return;
     }
-    if (!provider)
+    std::lock_guard<std::mutex> stateLock(state->mutex);
+    if (state->stickyError.load(std::memory_order_acquire) == GraphicsFrameError::None)
     {
-        _framegrabber->setFrameStorage({});
+        state->stickyMessage = message.empty() ? contextErrorMessage(error) : std::move(message);
+        state->stickyError.store(error, std::memory_order_release);
+    }
+}
+
+std::shared_ptr<FramegrabberSourceController::AcquisitionRun>
+FramegrabberSourceController::beginAcquisitionRun(
+    const std::shared_ptr<ContextSourceState>& state)
+{
+    auto run = std::make_shared<AcquisitionRun>();
+    {
+        std::lock_guard<std::mutex> lock(_contextMutex);
+        if (_activeRun)
+        {
+            _activeRun->cancelled.store(true, std::memory_order_release);
+            _activeRun->active.store(false, std::memory_order_release);
+        }
+        run->generation = ++_runGeneration;
+        run->contextState = state;
+        _activeRun = run;
+    }
+    if (_framegrabber)
+    {
+        rebuildGraphicsStream(run);
+    }
+    return run;
+}
+
+void FramegrabberSourceController::revokeActiveRun()
+{
+    std::shared_ptr<AcquisitionRun> run;
+    {
+        std::lock_guard<std::mutex> lock(_contextMutex);
+        run = _activeRun;
+    }
+    if (run)
+    {
+        run->cancelled.store(true, std::memory_order_release);
+        run->active.store(false, std::memory_order_release);
+    }
+    std::lock_guard<std::mutex> streamLock(_streamMutex);
+    if (_graphicsStream)
+    {
+        _graphicsStream->cancel();
+    }
+}
+
+void FramegrabberSourceController::rebuildGraphicsStream(
+    const std::shared_ptr<AcquisitionRun>& run)
+{
+    std::lock_guard<std::mutex> streamLock(_streamMutex);
+    _graphicsStream.reset();
+    if (!_framegrabber || !run || !run->contextState || !run->contextState->source)
+    {
         return;
     }
-    _framegrabber->setFrameStorage([provider](const std::size_t bytes)
-    {
-        return provider->acquire(bytes);
-    });
+
+    auto cancelledFlag = std::shared_ptr<const std::atomic<bool>>(run, &run->cancelled);
+    auto storageOutcome = [this, run](const GraphicsFrameError err) {
+        if (err == GraphicsFrameError::ClassRefused || err == GraphicsFrameError::Capacity)
+        {
+            const std::string message = contextErrorMessage(err);
+            recordStickyContextFailure(run->contextState, err, message);
+            {
+                std::lock_guard<std::mutex> lock(run->failureMutex);
+                if (run->failureMessage.empty()) run->failureMessage = message;
+            }
+            run->stickyRefused.store(true, std::memory_order_release);
+            FramegrabberSystem::syslog("Framegrabber frame storage refused: " + message, true);
+        }
+        else if (err == GraphicsFrameError::Allocation)
+        {
+            const std::string message = contextErrorMessage(err);
+            {
+                std::lock_guard<std::mutex> lock(run->failureMutex);
+                if (run->failureMessage.empty()) run->failureMessage = message;
+            }
+            FramegrabberSystem::syslog(
+                "Framegrabber producer contract error: planned reserve exceeded frame context budget.",
+                true);
+        }
+    };
+
+    _graphicsStream = std::make_unique<FramegrabberGraphicsFrameStream>(
+        _framegrabber,
+        run->contextState->source,
+        [this, run](GraphicsFrame&& payload, const unsigned int sourceIndex) {
+            if (!run->active.load(std::memory_order_acquire)
+                || run->cancelled.load(std::memory_order_acquire))
+            {
+                return;
+            }
+            if (!_frameConsumer) return;
+            SessionFrame frame;
+            frame.payload = std::move(payload);
+            frame.frameSeq = frame.payload.metadata().frameIndex;
+            _frameConsumer(std::move(frame), sourceIndex);
+        },
+        [this](const GraphicsImage& image, const unsigned int dma, const GraphicsImageFailure failure) {
+            reportImageRejection(image, dma, failure);
+        },
+        std::move(storageOutcome),
+        std::move(cancelledFlag));
 }
 
 FramegrabberSourceController::FramegrabberSourceController(
@@ -492,12 +673,46 @@ void FramegrabberSourceController::start()
     {
         return;
     }
+    if (_backend.isGrabbing && _backend.isGrabbing())
+    {
+        return;
+    }
+    std::shared_ptr<ContextSourceState> state;
+    if (_backend.isOpened && _backend.isOpened())
+    {
+        std::string sourceError;
+        state = activeContextSource(&sourceError);
+        if (!state)
+        {
+            throw std::runtime_error(sourceError);
+        }
+    }
+    else
+    {
+        std::lock_guard<std::mutex> lock(_contextMutex);
+        state = _contextSourceState;
+    }
+    beginImageRejectionRun(false);
+    auto run = beginAcquisitionRun(state);
     publishSourceDescriptors();
-    if (_backend.grab) _backend.grab(0);
+    if (_backend.grab)
+    {
+        try
+        {
+            _backend.grab(0);
+        }
+        catch (...)
+        {
+            run->cancelled.store(true, std::memory_order_release);
+            run->active.store(false, std::memory_order_release);
+            throw;
+        }
+    }
 }
 
 void FramegrabberSourceController::stop()
 {
+    revokeActiveRun();
     if (_sessionAvailable.load(std::memory_order_acquire) && _backend.stop) _backend.stop();
     _isGrabbing.store(false, std::memory_order_release);
 }
@@ -570,21 +785,6 @@ void FramegrabberSourceController::registerCallbacks()
         {
             wakeObservation(false);
         });
-
-    _graphicsStream = std::make_unique<FramegrabberGraphicsFrameStream>(
-        _framegrabber,
-        [this](GraphicsFrame&& payload, const unsigned int sourceIndex)
-        {
-            if (!_frameConsumer) return;
-            SessionFrame frame;
-            frame.payload = std::move(payload);
-            frame.frameSeq = frame.payload.metadata().frameIndex;
-            _frameConsumer(std::move(frame), sourceIndex);
-        },
-        [this](const GraphicsImage& image, const unsigned int dma, const GraphicsImageFailure failure)
-        {
-            reportImageRejection(image, dma, failure);
-        });
 }
 
 void FramegrabberSourceController::beginImageRejectionRun(const bool single)
@@ -626,11 +826,15 @@ void FramegrabberSourceController::reportImageRejection(
 
 void FramegrabberSourceController::deregisterCallbacks()
 {
+    revokeActiveRun();
+    {
+        std::lock_guard<std::mutex> streamLock(_streamMutex);
+        _graphicsStream.reset();
+    }
     if (!_framegrabber)
     {
         return;
     }
-    _graphicsStream.reset();
     if (_statusCallbackId != 0)
     {
         _framegrabber->deregisterStatusCallback(_statusCallbackId);
@@ -1010,6 +1214,11 @@ ApiResult<void> FramegrabberSourceController::admitControl(
     }
     if (_backend.isGrabbing && _backend.isGrabbing() && name != kDisconnect)
         return Admission::failure(ApiErrorCode::Busy, "Stop acquisition explicitly first.");
+    if (name == kSingle) {
+        std::string sourceError;
+        if (!activeContextSource(&sourceError))
+            return Admission::failure(ApiErrorCode::Unavailable, QString::fromStdString(sourceError));
+    }
     // The same gate serializes the host device panel; it never implicitly stops acquisition.
     if (!_backend.tryBeginControl || !_backend.tryBeginControl())
         return Admission::failure(ApiErrorCode::Busy, "Another frame grabber control operation is active.");
@@ -1108,28 +1317,58 @@ ApiResult<void> FramegrabberSourceController::admitControl(
                                               : QString::fromStdString(discovery.message),
                     QJsonObject{{"sdkResult", discovery.sdkResult}});
             } else if (name == kSingle) {
-                if (backend->grab) backend->grab(1);
-                const auto deadline = std::chrono::steady_clock::now() + kSingleAcquisitionTimeout;
-                const auto grabbing = [backend] {
-                    return backend->isGrabbing && backend->isGrabbing();
-                };
-                while (grabbing() && std::chrono::steady_clock::now() < deadline)
-                    std::this_thread::sleep_for(std::chrono::milliseconds(10));
-                if (grabbing()) {
-                    if (backend->stop) backend->stop();
-                    failure = Result::failure(ApiErrorCode::Timeout,
-                        "Not every DMA channel delivered a frame within 30 s; acquisition was stopped.");
+                std::string sourceError;
+                const auto sourceState = activeContextSource(&sourceError);
+                if (!sourceState) {
+                    failure = Result::failure(ApiErrorCode::Unavailable, QString::fromStdString(sourceError));
                 } else {
-                    const int dmaCount = backend->dmaCount ? backend->dmaCount() : 0;
-                    int delivered = 0;
-                    if (backend->acquisitionStatistics)
-                    {
-                        for (const auto& channel : backend->acquisitionStatistics())
-                            if (channel.delivered >= 1) ++delivered;
+                    beginImageRejectionRun(true);
+                    auto run = beginAcquisitionRun(sourceState);
+                    if (backend->grab) backend->grab(1);
+                    const auto deadline = std::chrono::steady_clock::now() + kSingleAcquisitionTimeout;
+                    const auto grabbing = [backend] {
+                        return backend->isGrabbing && backend->isGrabbing();
+                    };
+                    while (grabbing()
+                           && !run->stickyRefused.load(std::memory_order_acquire)
+                           && std::chrono::steady_clock::now() < deadline)
+                        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                    if (run->stickyRefused.load(std::memory_order_acquire)) {
+                        if (grabbing() && backend->stop) backend->stop();
+                        std::string storageFailure;
+                        {
+                            std::lock_guard<std::mutex> lock(run->failureMutex);
+                            storageFailure = run->failureMessage;
+                        }
+                        failure = Result::failure(ApiErrorCode::Unavailable,
+                            storageFailure.empty()
+                                ? QStringLiteral("Frame storage admission failed.")
+                                : QString::fromStdString(storageFailure));
+                    } else if (grabbing()) {
+                        if (backend->stop) backend->stop();
+                        failure = Result::failure(ApiErrorCode::Timeout,
+                            "Not every DMA channel delivered a frame within 30 s; acquisition was stopped.");
+                    } else {
+                        const int dmaCount = backend->dmaCount ? backend->dmaCount() : 0;
+                        int delivered = 0;
+                        if (backend->acquisitionStatistics)
+                        {
+                            for (const auto& channel : backend->acquisitionStatistics())
+                                if (channel.delivered >= 1) ++delivered;
+                        }
+                        if (dmaCount > 0 && delivered >= dmaCount) payload = Payload::State;
+                        else {
+                            std::string storageFailure;
+                            {
+                                std::lock_guard<std::mutex> lock(run->failureMutex);
+                                storageFailure = run->failureMessage;
+                            }
+                            failure = Result::failure(ApiErrorCode::Unavailable,
+                                storageFailure.empty()
+                                    ? QStringLiteral("Acquisition ended before every DMA channel delivered a frame.")
+                                    : QString::fromStdString(storageFailure));
+                        }
                     }
-                    if (dmaCount > 0 && delivered >= dmaCount) payload = Payload::State;
-                    else failure = Result::failure(ApiErrorCode::Unavailable,
-                        "Acquisition ended before every DMA channel delivered a frame.");
                 }
             }
         } catch (const std::exception& error) {
