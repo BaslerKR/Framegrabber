@@ -611,8 +611,6 @@ struct Framegrabber::DmaChannel
     std::thread::id workerThreadId;
     std::mutex resourceMutex;
     std::shared_ptr<OwnedBufferPool> ownedBufferPool;
-    // Set instead of the pool when the consumer supplies the storage frames are copied into.
-    Framegrabber::FrameStorage frameStorage;
     std::atomic<bool> stopRequested{false};
     std::atomic<bool> acquisitionStarted{false};
     std::atomic<bool> cameraStarted{false};
@@ -1990,16 +1988,11 @@ void Framegrabber::startChannel(const unsigned int dmaIndex, const std::size_t f
         return;
     }
 
-    FrameStorage frameStorage;
-    {
-        std::lock_guard<std::mutex> lock(_frameStorageMutex);
-        frameStorage = _frameStorage;
-    }
     const bool managedMode = _managedCaptureMode.load(std::memory_order_acquire);
     std::shared_ptr<OwnedBufferPool> ownedBufferPool;
     try
     {
-        if (!managedMode && !frameStorage)
+        if (!managedMode)
         {
             ownedBufferPool = OwnedBufferPool::create(
                 frameBytes,
@@ -2030,7 +2023,6 @@ void Framegrabber::startChannel(const unsigned int dmaIndex, const std::size_t f
     channel->index = dmaIndex;
     channel->memory = memory;
     channel->ownedBufferPool = std::move(ownedBufferPool);
-    channel->frameStorage = std::move(frameStorage);
     DmaChannel* channelPtr = channel.get();
     std::unique_lock<std::mutex> registrationLock(_stateMutex);
     if (!_isRunning.load(std::memory_order_acquire))
@@ -2371,26 +2363,12 @@ void Framegrabber::startChannel(const unsigned int dmaIndex, const std::size_t f
                         continue;
                     }
 
-                    std::string storageError;
-                    OwnedBufferPool::Lease ownedBytes;
-                    {
-                        CallbackReentry storageCallback(*this);
-                        ownedBytes = acquireFrameStorage(
-                            channelPtr->frameStorage,
-                            channelPtr->ownedBufferPool,
-                            payloadBytes,
-                            &storageError);
-                    }
+                    OwnedBufferPool::Lease ownedBytes = channelPtr->ownedBufferPool
+                        ? channelPtr->ownedBufferPool->acquire()
+                        : OwnedBufferPool::Lease{};
                     if (!ownedBytes)
                     {
                         channelPtr->poolExhausted.fetch_add(1, std::memory_order_relaxed);
-                        if (!storageError.empty() && !storageWarningLogged)
-                        {
-                            log("DMA(" + std::to_string(dmaIndex)
-                                    + ") frame storage acquisition failed: " + storageError,
-                                true);
-                            storageWarningLogged = true;
-                        }
                         continue;
                     }
                     if (channelPtr->stopRequested.load(std::memory_order_acquire))
@@ -2846,12 +2824,6 @@ std::vector<FramegrabberSystem::BoardInfo> Framegrabber::getCachedBoardInfo() co
 std::string Framegrabber::getBoardAppletPath(const std::string& boardName) const
 {
     return _system ? _system->getBoardAppletPath(boardName) : std::string{};
-}
-
-void Framegrabber::setFrameStorage(FrameStorage storage)
-{
-    std::lock_guard<std::mutex> lock(_frameStorageMutex);
-    _frameStorage = std::move(storage);
 }
 
 void FramegrabberDetail::CaptureTransactionAccess::enableManagedCaptureMode(

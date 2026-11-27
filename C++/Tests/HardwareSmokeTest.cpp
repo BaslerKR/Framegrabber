@@ -63,7 +63,6 @@ struct BoardCleanup
         board.clearGrabCallbacks();
         board.clearStatusCallbacks();
         board.clearNodeUpdatedCallbacks();
-        board.setFrameStorage({});
         board.stop();
         board.close();
     }
@@ -141,10 +140,6 @@ int main()
     Capture capture;
     Capture exceptionCapture;
     std::atomic<bool> exceptionThrown{false};
-    std::atomic<bool> storageStopped{false};
-    std::atomic<bool> storageGateProbed{false};
-    std::atomic<bool> storageGateFinished{false};
-    std::atomic<bool> storageNestedBegin{true};
     std::atomic<bool> grabGateProbed{false};
     std::atomic<bool> grabGateFinished{false};
     std::atomic<bool> grabNestedBegin{true};
@@ -231,62 +226,6 @@ int main()
         || callbackFailure.front().consumerDelivered != 5) return 13;
     board->deregisterGrabCallback(throwingId);
     board->deregisterGrabCallback(siblingId);
-
-    board->setFrameStorage([](std::size_t) -> std::shared_ptr<std::uint8_t> {
-        throw std::runtime_error("intentional storage failure");
-    });
-    board->grab(0);
-    if (!waitFor([&] { return poolExhausted(*board) > 0; })) return 14;
-    board->stop();
-    const auto storageFailure = board->acquisitionStatistics();
-    if (storageFailure.size() != 1 || storageFailure.front().delivered != 0
-        || storageFailure.front().poolExhausted == 0) return 15;
-    board->setFrameStorage({});
-
-    board->setFrameStorage([&](const std::size_t bytes) -> std::shared_ptr<std::uint8_t> {
-        if (!storageStopped.exchange(true)) board->stop();
-        auto storage = std::make_shared<std::vector<std::uint8_t>>(bytes);
-        return std::shared_ptr<std::uint8_t>(storage, storage->data());
-    });
-    capture.reset();
-    board->grab(0);
-    if (!waitForStop(*board) || !storageStopped.load()) return 37;
-    {
-        std::lock_guard<std::mutex> lock(capture.mutex);
-        if (capture.count != 0) return 38;
-    }
-    board->setFrameStorage({});
-
-    if (!board->tryBeginControl()) return 55;
-    board->setFrameStorage([&](const std::size_t bytes) -> std::shared_ptr<std::uint8_t> {
-        storageGateProbed.store(true, std::memory_order_release);
-        storageNestedBegin.store(board->tryBeginControl(), std::memory_order_release);
-        board->endControl();
-        auto storage = std::make_shared<std::vector<std::uint8_t>>(bytes);
-        storageGateFinished.store(true, std::memory_order_release);
-        return std::shared_ptr<std::uint8_t>(storage, storage->data());
-    });
-    capture.reset();
-    board->grab(0);
-    const auto storageGateCompleted = waitFor([&] {
-        return storageGateFinished.load(std::memory_order_acquire);
-    });
-    board->stop();
-    const auto storageGateStopped = waitForStop(*board);
-    if (!storageGateStopped || !storageGateCompleted
-        || !storageGateProbed.load(std::memory_order_acquire)
-        || storageNestedBegin.load(std::memory_order_acquire) || !board->controlBusy())
-    {
-        std::cerr << "Storage control gate probe failed: completed=" << storageGateCompleted
-                  << ", stopped=" << storageGateStopped
-                  << ", probed=" << storageGateProbed.load(std::memory_order_acquire)
-                  << ", nestedBegin=" << storageNestedBegin.load(std::memory_order_acquire)
-                  << ", busy=" << board->controlBusy() << '\n';
-        return 56;
-    }
-    board->endControl();
-    if (board->controlBusy()) return 57;
-    board->setFrameStorage({});
 
     if (!board->tryBeginControl()) return 58;
     const auto gateProbeId = board->registerGrabCallback([&](const Framegrabber::Image&, std::size_t) {

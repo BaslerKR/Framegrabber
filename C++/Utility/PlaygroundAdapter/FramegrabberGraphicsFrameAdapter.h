@@ -40,13 +40,6 @@ namespace FramegrabberGraphicsFrameAdapter
     GraphicsImage* rejectedImage = nullptr,
     const std::atomic<bool>* cancelled = nullptr);
 
-/** Maps an owned Framegrabber image into a GraphicsEngine image by borrowing @p image.storage. */
-[[nodiscard]] GraphicsImage wrapImage(
-    GraphicsFrameBuilder& builder,
-    const Framegrabber::Image& image,
-    std::size_t frameSeq,
-    GraphicsImageFailure* failure = nullptr);
-
-/** Reports the first rule that prevents the wrapped image from being readable. */
+/** Reports the first rule that prevents the captured image from being readable. */
 [[nodiscard]] GraphicsImageFailure imageFailure(const GraphicsImage& image) noexcept;
 }

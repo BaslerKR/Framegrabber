@@ -279,46 +279,6 @@ GraphicsResult<GraphicsFrame> captureFrame(
     return published;
 }
 
-GraphicsImage wrapImage(
-    GraphicsFrameBuilder& builder,
-    const Framegrabber::Image& image,
-    const std::size_t frameSeq,
-    GraphicsImageFailure* const failure)
-{
-    const auto fail = [failure](const GraphicsImageFailure reason, GraphicsImage result) {
-        if (failure) *failure = reason;
-        return result;
-    };
-
-    GraphicsImage frame;
-    frame.width = image.width;
-    frame.height = image.height;
-    frame.stride = image.stride;
-    frame.bitsPerPixel = image.bitsPerPixel;
-    frame.sourceFormat = image.fgFormat;
-    frame.pixelFormat = graphicsPixelFormat(image.pixelFormat);
-    frame.bitAlignment = graphicsBitAlignment(image.bitAlignment);
-    frame.frameSequence = frameSeq;
-
-    if (!image.storage || image.data() == nullptr || image.size == 0U)
-    {
-        return fail(GraphicsImageFailure::MissingBytes, std::move(frame));
-    }
-
-    auto borrowed = builder.borrow(image.storage, image.data(), image.size, GraphicsBorrow::Immutable);
-    if (!borrowed)
-    {
-        const GraphicsImageFailure reason =
-            borrowed.error() == GraphicsFrameError::InvalidInput
-                ? GraphicsImageFailure::MissingBytes
-                : GraphicsImageFailure::StorageRefused;
-        return fail(reason, std::move(frame));
-    }
-    frame.pixels = std::move(borrowed).value();
-    const GraphicsImageFailure reason = imageFailure(frame);
-    return fail(reason, std::move(frame));
-}
-
 GraphicsImageFailure imageFailure(const GraphicsImage& image) noexcept
 {
     if (!image.data()) return GraphicsImageFailure::MissingBytes;
