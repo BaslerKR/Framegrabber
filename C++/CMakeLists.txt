@@ -158,6 +158,8 @@ if(FRAMEGRABBER_BUILD_PLAYGROUND_ADAPTER)
         ALIAS FramegrabberPlaygroundAdapter
     )
     target_compile_features(FramegrabberPlaygroundAdapter PUBLIC cxx_std_17)
+    target_compile_definitions(FramegrabberPlaygroundAdapter PUBLIC
+        $<$<PLATFORM_ID:Windows>:NOMINMAX>)
     target_include_directories(FramegrabberPlaygroundAdapter
         PUBLIC
             "${CMAKE_CURRENT_SOURCE_DIR}"
