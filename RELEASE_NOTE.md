@@ -1,5 +1,6 @@
 ## Unreleased
 
+- Drop a frame refused by the frame context (ClassRefused or Capacity) without latching a refusal so the run continues and the next frame asks again, and report an image extent overflow as a per-frame invalid drop instead of Capacity.
 - Migrate managed DMA capture to a synchronous admitted frame transaction with overwrite verification and cancellation before publication.
 
 - Adopt `DevicePluginSessionCapability::GraphicsViewer` in `FramegrabberPlugin`.
