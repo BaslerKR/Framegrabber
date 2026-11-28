@@ -81,14 +81,14 @@ FramegrabberGraphicsFrameStream::Impl::Impl(
 
             GraphicsImageFailure imageFailure = GraphicsImageFailure::None;
             GraphicsImage rejected;
-            const auto* activeCancel = _externalCancelled ? _externalCancelled.get() : &_localCancelled;
             auto frame = FramegrabberGraphicsFrameAdapter::captureFrame(
                 *_contextSource,
                 descriptor,
                 copyGate,
                 &imageFailure,
                 rejectedImage ? &rejected : nullptr,
-                activeCancel);
+                &_localCancelled,
+                _externalCancelled.get());
             if (frame.hasValue())
             {
                 if (isCancelled())

@@ -160,11 +160,13 @@ GraphicsResult<GraphicsFrame> captureFrame(
     FramegrabberDetail::CaptureCopyGate& copyGate,
     GraphicsImageFailure* const outImageFailure,
     GraphicsImage* const rejectedImage,
-    const std::atomic<bool>* const cancelled)
+    const std::atomic<bool>* const cancelled,
+    const std::atomic<bool>* const externalCancelled)
 {
     if (outImageFailure) *outImageFailure = GraphicsImageFailure::None;
-    const auto isCancelled = [cancelled]() noexcept {
-        return cancelled && cancelled->load(std::memory_order_acquire);
+    const auto isCancelled = [cancelled, externalCancelled]() noexcept {
+        return (cancelled && cancelled->load(std::memory_order_acquire))
+            || (externalCancelled && externalCancelled->load(std::memory_order_acquire));
     };
     const auto recordRejected = [rejectedImage, &descriptor](
         const GraphicsImagePixelFormat pixelFormat,

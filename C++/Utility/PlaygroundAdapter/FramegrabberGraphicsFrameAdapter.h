@@ -38,7 +38,8 @@ namespace FramegrabberGraphicsFrameAdapter
     FramegrabberDetail::CaptureCopyGate& copyGate,
     GraphicsImageFailure* outImageFailure = nullptr,
     GraphicsImage* rejectedImage = nullptr,
-    const std::atomic<bool>* cancelled = nullptr);
+    const std::atomic<bool>* cancelled = nullptr,
+    const std::atomic<bool>* externalCancelled = nullptr);
 
 /** Reports the first rule that prevents the captured image from being readable. */
 [[nodiscard]] GraphicsImageFailure imageFailure(const GraphicsImage& image) noexcept;

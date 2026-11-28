@@ -30,9 +30,11 @@ public:
         {
             std::memcpy(destination, _source.data(), _source.size());
         }
+        if (cancelOnCopy) cancelOnCopy->store(true);
         return !_rejectOverwrite;
     }
 
+    std::atomic<bool>* cancelOnCopy = nullptr;
     int copyAttempts = 0;
 
 private:
@@ -146,6 +148,21 @@ int main()
         auto plan = FramegrabberGraphicsFrameAdapter::planImage(descriptor, &failure);
         assert(!plan.hasValue());
         assert(failure == GraphicsImageFailure::InvalidStride);
+    }
+
+    {
+        FramegrabberDetail::CaptureFrameDescriptor descriptor;
+        descriptor.size = 4; descriptor.width = 2; descriptor.height = 2;
+        descriptor.stride = 2; descriptor.bitsPerPixel = 8;
+        descriptor.pixelFormat = Framegrabber::PixelFormat::Mono8;
+        std::atomic<bool> localCancel{false}, externalCancel{false};
+        TestCopyGate gate({1, 2, 3, 4});
+        gate.cancelOnCopy = &localCancel;
+        auto result = FramegrabberGraphicsFrameAdapter::captureFrame(
+            localSource, descriptor, gate, nullptr, nullptr, &localCancel, &externalCancel);
+        assert(!result.hasValue());
+        assert(result.error() == GraphicsFrameError::Disconnected);
+        assert(gate.copyAttempts == 1);
     }
 
     auto captureNative = [&localSource](const Framegrabber::PixelFormat pixelFormat,
