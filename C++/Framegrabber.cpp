@@ -1,5 +1,6 @@
 #include "Framegrabber.h"
 #include "FramegrabberCaptureTransaction.h"
+#include <cassert>
 #include "FramegrabberRuntimeDiagnostics.h"
 
 #include "FramegrabberAcquisitionState.h"
@@ -2009,6 +2010,8 @@ void Framegrabber::startChannel(const unsigned int dmaIndex, const std::size_t f
         return;
     }
 
+    assert(!managedMode || !ownedBufferPool);
+
     dma_mem* memory = Fg_AllocMemEx(
         handle,
         frameBytes * bufferCount,
@@ -2363,6 +2366,7 @@ void Framegrabber::startChannel(const unsigned int dmaIndex, const std::size_t f
                         continue;
                     }
 
+                    assert(!managedMode);
                     OwnedBufferPool::Lease ownedBytes = channelPtr->ownedBufferPool
                         ? channelPtr->ownedBufferPool->acquire()
                         : OwnedBufferPool::Lease{};
