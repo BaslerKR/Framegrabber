@@ -38,7 +38,6 @@ private:
     StorageOutcome _storageOutcome;
     std::shared_ptr<const std::atomic<bool>> _externalCancelled;
     std::atomic<bool> _localCancelled{false};
-    std::atomic<bool> _stickyRefused{false};
     GraphicsFrameCallbackGate _callbackGate;
 };
 
@@ -74,11 +73,6 @@ FramegrabberGraphicsFrameStream::Impl::Impl(
             {
                 return Outcome::AbortedStop;
             }
-            if (_stickyRefused.load(std::memory_order_acquire))
-            {
-                return Outcome::DroppedStorageRefused;
-            }
-
             GraphicsImageFailure imageFailure = GraphicsImageFailure::None;
             GraphicsImage rejected;
             auto frame = FramegrabberGraphicsFrameAdapter::captureFrame(
@@ -111,7 +105,6 @@ FramegrabberGraphicsFrameStream::Impl::Impl(
             }
             if (error == GraphicsFrameError::ClassRefused || error == GraphicsFrameError::Capacity)
             {
-                _stickyRefused.store(true, std::memory_order_release);
                 if (_storageOutcome) _storageOutcome(error);
                 return Outcome::DroppedStorageRefused;
             }

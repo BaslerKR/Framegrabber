@@ -119,9 +119,7 @@ GraphicsResult<GraphicsImageWriteLayout> planImage(
     const auto reject = [failure](const GraphicsImageFailure reason)
         -> GraphicsResult<GraphicsImageWriteLayout> {
         if (failure) *failure = reason;
-        return reason == GraphicsImageFailure::ExtentOverflow
-            ? GraphicsFrameError::Capacity
-            : GraphicsFrameError::InvalidInput;
+        return GraphicsFrameError::InvalidInput;
     };
     if (descriptor.size == 0U)
     {
@@ -151,7 +149,16 @@ GraphicsResult<GraphicsImageWriteLayout> planImage(
     source.bitAlignment = ::graphicsBitAlignment(descriptor.bitAlignment);
     source.frameSequence = descriptor.frameSeq;
     source.operation = GraphicsImageWriterOperation::Copy;
-    return planGraphicsImageWrite(source, failure);
+    // An extent overflow is a property of this frame's geometry, not a Host storage refusal:
+    // it stays a per-frame invalid drop and must never read as Capacity.
+    GraphicsImageFailure planFailure = GraphicsImageFailure::None;
+    auto plan = planGraphicsImageWrite(source, &planFailure);
+    if (failure) *failure = planFailure;
+    if (!plan)
+    {
+        return GraphicsFrameError::InvalidInput;
+    }
+    return plan;
 }
 
 GraphicsResult<GraphicsFrame> captureFrame(

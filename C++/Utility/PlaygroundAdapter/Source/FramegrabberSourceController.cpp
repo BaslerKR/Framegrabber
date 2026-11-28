@@ -399,34 +399,7 @@ FramegrabberSourceController::activeContextSource(std::string* error) const
         if (error) *error = "Frame context source is not configured.";
         return {};
     }
-    if (state->stickyError.load(std::memory_order_acquire) != GraphicsFrameError::None)
-    {
-        std::lock_guard<std::mutex> stateLock(state->mutex);
-        if (error)
-        {
-            const auto err = state->stickyError.load(std::memory_order_acquire);
-            *error = state->stickyMessage.empty() ? contextErrorMessage(err) : state->stickyMessage;
-        }
-        return {};
-    }
     return state;
-}
-
-void FramegrabberSourceController::recordStickyContextFailure(
-    const std::shared_ptr<ContextSourceState>& state,
-    const GraphicsFrameError error,
-    std::string message)
-{
-    if (!state || (error != GraphicsFrameError::ClassRefused && error != GraphicsFrameError::Capacity))
-    {
-        return;
-    }
-    std::lock_guard<std::mutex> stateLock(state->mutex);
-    if (state->stickyError.load(std::memory_order_acquire) == GraphicsFrameError::None)
-    {
-        state->stickyMessage = message.empty() ? contextErrorMessage(error) : std::move(message);
-        state->stickyError.store(error, std::memory_order_release);
-    }
 }
 
 std::shared_ptr<FramegrabberSourceController::AcquisitionRun>
@@ -485,14 +458,22 @@ void FramegrabberSourceController::rebuildGraphicsStream(
     auto storageOutcome = [this, run](const GraphicsFrameError err) {
         if (err == GraphicsFrameError::ClassRefused || err == GraphicsFrameError::Capacity)
         {
+            // The refused frame is dropped and counted by the stream; the run keeps acquiring.
+            // The user-facing message and the log line are surfaced once per run.
             const std::string message = contextErrorMessage(err);
-            recordStickyContextFailure(run->contextState, err, message);
+            bool firstRefusal = false;
             {
                 std::lock_guard<std::mutex> lock(run->failureMutex);
-                if (run->failureMessage.empty()) run->failureMessage = message;
+                if (run->failureMessage.empty())
+                {
+                    run->failureMessage = message;
+                    firstRefusal = true;
+                }
             }
-            run->stickyRefused.store(true, std::memory_order_release);
-            FramegrabberSystem::syslog("Framegrabber frame storage refused: " + message, true);
+            if (firstRefusal)
+            {
+                FramegrabberSystem::syslog("Framegrabber frame storage refused: " + message, true);
+            }
         }
         else if (err == GraphicsFrameError::Allocation)
         {
@@ -1338,25 +1319,21 @@ ApiResult<void> FramegrabberSourceController::admitControl(
                     const auto grabbing = [backend] {
                         return backend->isGrabbing && backend->isGrabbing();
                     };
-                    while (grabbing()
-                           && !run->stickyRefused.load(std::memory_order_acquire)
-                           && std::chrono::steady_clock::now() < deadline)
+                    while (grabbing() && std::chrono::steady_clock::now() < deadline)
                         std::this_thread::sleep_for(std::chrono::milliseconds(10));
-                    if (run->stickyRefused.load(std::memory_order_acquire)) {
-                        if (grabbing() && backend->stop) backend->stop();
+                    if (grabbing()) {
+                        if (backend->stop) backend->stop();
                         std::string storageFailure;
                         {
                             std::lock_guard<std::mutex> lock(run->failureMutex);
                             storageFailure = run->failureMessage;
                         }
-                        failure = Result::failure(ApiErrorCode::Unavailable,
-                            storageFailure.empty()
-                                ? QStringLiteral("Frame storage admission failed.")
-                                : QString::fromStdString(storageFailure));
-                    } else if (grabbing()) {
-                        if (backend->stop) backend->stop();
-                        failure = Result::failure(ApiErrorCode::Timeout,
-                            "Not every DMA channel delivered a frame within 30 s; acquisition was stopped.");
+                        // Refused frames were dropped one by one; if none arrived in time, the
+                        // surfaced refusal explains why.
+                        failure = storageFailure.empty()
+                            ? Result::failure(ApiErrorCode::Timeout,
+                                "Not every DMA channel delivered a frame within 30 s; acquisition was stopped.")
+                            : Result::failure(ApiErrorCode::Unavailable, QString::fromStdString(storageFailure));
                     } else {
                         const int dmaCount = backend->dmaCount ? backend->dmaCount() : 0;
                         int delivered = 0;

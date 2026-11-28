@@ -12,6 +12,7 @@
 #include <QJsonObject>
 #include <QTemporaryDir>
 
+#include <algorithm>
 #include <atomic>
 #include <condition_variable>
 #include <functional>
@@ -26,7 +27,7 @@ class FramegrabberControllerTests final : public QObject
 {
     Q_OBJECT
 private slots:
-    void stickyRefusalBlocksSingleAndLive();
+    void refusedFrameIsDroppedAndLaterFramePublishes();
     void declaresHierarchicalBoardConnection();
     void connectLoadsOpeningAppletAndOwnsDmaSources();
     void declaredActionsCarryPresentationAndPromptKinds();
@@ -171,16 +172,25 @@ struct FramegrabberCatalogTestAccess
     }
 };
 
-void FramegrabberControllerTests::stickyRefusalBlocksSingleAndLive()
+void FramegrabberControllerTests::refusedFrameIsDroppedAndLaterFramePublishes()
 {
-    struct Refused final : GraphicsFrameContextSource {
-        GraphicsResult<GraphicsFrameContext> beginFrame(std::size_t) noexcept override {
-            ++calls; return GraphicsFrameError::ClassRefused;
+    struct Switchable final : GraphicsFrameContextSource {
+        GraphicsResult<GraphicsFrameContext> beginFrame(std::size_t bytes) noexcept override {
+            ++calls;
+            const auto error = refusal.load(std::memory_order_acquire);
+            if (error != GraphicsFrameError::None) return error;
+            return local.beginFrame(bytes);
         }
-        int calls = 0;
+        GraphicsLocalFrameContextSource local;
+        std::atomic<GraphicsFrameError> refusal{GraphicsFrameError::ClassRefused};
+        std::atomic<int> calls{0};
     };
     struct Gate final : FramegrabberDetail::CaptureCopyGate {
-        bool copyAndVerify(std::uint8_t*, std::size_t) noexcept override { ++calls; return true; }
+        bool copyAndVerify(std::uint8_t* destination, std::size_t bytes) noexcept override {
+            ++calls;
+            std::fill_n(destination, bytes, std::uint8_t{7});
+            return true;
+        }
         int calls = 0;
     } gate;
     Framegrabber grabber(nullptr);
@@ -189,8 +199,9 @@ void FramegrabberControllerTests::stickyRefusalBlocksSingleAndLive()
     FramegrabberControllerTestAccess::install(controller, fake);
     const auto connection = connectBoard(controller);
     QVERIFY2(connection.error.isEmpty(), qPrintable(connection.error));
-    auto source = std::make_shared<Refused>();
-    controller.setFrameConsumer([](SessionFrame&&, unsigned) {});
+    auto source = std::make_shared<Switchable>();
+    int delivered = 0;
+    controller.setFrameConsumer([&delivered](SessionFrame&&, unsigned) { ++delivered; });
     controller.setFrameContextSource(source);
     controller.start();
     auto slot = FramegrabberDetail::CaptureTransactionAccess::snapshot(grabber);
@@ -199,16 +210,25 @@ void FramegrabberControllerTests::stickyRefusalBlocksSingleAndLive()
     descriptor.size = 4; descriptor.width = 2; descriptor.height = 2;
     descriptor.stride = 2; descriptor.bitsPerPixel = 8;
     descriptor.pixelFormat = Framegrabber::PixelFormat::Mono8;
-    QCOMPARE(slot->fn(descriptor, gate), FramegrabberDetail::CaptureTransactionOutcome::DroppedStorageRefused);
+
+    // A refused class or capacity drops only that frame; every later frame asks the source again.
+    for (const auto refusal : {GraphicsFrameError::ClassRefused, GraphicsFrameError::Capacity}) {
+        source->refusal.store(refusal, std::memory_order_release);
+        const int callsBefore = source->calls.load();
+        QCOMPARE(slot->fn(descriptor, gate), FramegrabberDetail::CaptureTransactionOutcome::DroppedStorageRefused);
+        QCOMPARE(slot->fn(descriptor, gate), FramegrabberDetail::CaptureTransactionOutcome::DroppedStorageRefused);
+        QCOMPARE(source->calls.load(), callsBefore + 2);
+        QCOMPARE(gate.calls, 0);
+        QCOMPARE(delivered, 0);
+    }
+
+    source->refusal.store(GraphicsFrameError::None, std::memory_order_release);
+    QCOMPARE(slot->fn(descriptor, gate), FramegrabberDetail::CaptureTransactionOutcome::Delivered);
+    QCOMPARE(gate.calls, 1);
+    QCOMPARE(delivered, 1);
+
+    // The refusal did not stop the run: a new start is accepted and the capture transaction stays installed.
     controller.stop();
-    Sink<DeviceConnectionResult> single;
-    const auto refused = controller.requestSingle(connection.result.state->connectionId, single.completion());
-    QVERIFY(refused.error != DeviceConnectionError::None);
-    QVERIFY(!refused.message.empty());
-    QVERIFY_EXCEPTION_THROWN(controller.start(), std::runtime_error);
-    QCOMPARE(source->calls, 1);
-    QCOMPARE(gate.calls, 0);
-    controller.setFrameContextSource(std::make_shared<GraphicsLocalFrameContextSource>());
     controller.start();
     QVERIFY(FramegrabberDetail::CaptureTransactionAccess::snapshot(grabber));
     controller.stop();

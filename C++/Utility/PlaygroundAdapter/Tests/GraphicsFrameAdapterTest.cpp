@@ -53,9 +53,11 @@ public:
     {
         ++calls;
         requested = bytes;
+        if (error == GraphicsFrameError::None) return local.beginFrame(bytes);
         return error;
     }
     GraphicsFrameError error;
+    GraphicsLocalFrameContextSource local;
     int calls = 0;
     std::size_t requested = 0;
 };
@@ -276,21 +278,23 @@ int main()
         descriptor.stride = 2; descriptor.bitsPerPixel = 8;
         descriptor.pixelFormat = Framegrabber::PixelFormat::Mono8;
         TestCopyGate gate({1, 2, 3, 4});
-        {
-            FramegrabberGraphicsFrameStream stream(&grabber, source,
-                [&](GraphicsFrame&&, unsigned) { ++delivered; }, {},
-                [&](GraphicsFrameError error) { assert(error == GraphicsFrameError::ClassRefused); ++failures; });
-            auto slot = FramegrabberDetail::CaptureTransactionAccess::snapshot(grabber);
-            assert(slot->fn(descriptor, gate) == FramegrabberDetail::CaptureTransactionOutcome::DroppedStorageRefused);
-            assert(slot->fn(descriptor, gate) == FramegrabberDetail::CaptureTransactionOutcome::DroppedStorageRefused);
-            assert(source->calls == 1 && failures == 1 && gate.copyAttempts == 0);
-        }
-        auto replacement = std::make_shared<GraphicsLocalFrameContextSource>();
-        FramegrabberGraphicsFrameStream stream(&grabber, replacement,
-            [&](GraphicsFrame&&, unsigned) { ++delivered; });
+        GraphicsFrameError lastError = GraphicsFrameError::None;
+        FramegrabberGraphicsFrameStream stream(&grabber, source,
+            [&](GraphicsFrame&&, unsigned) { ++delivered; }, {},
+            [&](GraphicsFrameError error) { lastError = error; ++failures; });
         auto slot = FramegrabberDetail::CaptureTransactionAccess::snapshot(grabber);
+        // Each refused frame is dropped and counted; the next frame asks the source again.
+        assert(slot->fn(descriptor, gate) == FramegrabberDetail::CaptureTransactionOutcome::DroppedStorageRefused);
+        assert(slot->fn(descriptor, gate) == FramegrabberDetail::CaptureTransactionOutcome::DroppedStorageRefused);
+        assert(source->calls == 2 && failures == 2 && lastError == GraphicsFrameError::ClassRefused);
+        source->error = GraphicsFrameError::Capacity;
+        assert(slot->fn(descriptor, gate) == FramegrabberDetail::CaptureTransactionOutcome::DroppedStorageRefused);
+        assert(source->calls == 3 && failures == 3 && lastError == GraphicsFrameError::Capacity);
+        assert(gate.copyAttempts == 0 && delivered == 0);
+        // A later frame publishes once the source accepts the class again.
+        source->error = GraphicsFrameError::None;
         assert(slot->fn(descriptor, gate) == FramegrabberDetail::CaptureTransactionOutcome::Delivered);
-        assert(delivered == 1 && gate.copyAttempts == 1);
+        assert(delivered == 1 && gate.copyAttempts == 1 && failures == 3);
     }
 
     {
