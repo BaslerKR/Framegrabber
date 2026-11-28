@@ -224,6 +224,32 @@ int main()
         assert(source->calls == 2 && gate.copyAttempts == 0 && delivered == 0 && outcomes == 0);
     }
 
+    {
+        Framegrabber grabber(nullptr);
+        auto source = std::make_shared<RefusingSource>(GraphicsFrameError::ClassRefused);
+        int failures = 0, delivered = 0;
+        FramegrabberDetail::CaptureFrameDescriptor descriptor;
+        descriptor.size = 4; descriptor.width = 2; descriptor.height = 2;
+        descriptor.stride = 2; descriptor.bitsPerPixel = 8;
+        descriptor.pixelFormat = Framegrabber::PixelFormat::Mono8;
+        TestCopyGate gate({1, 2, 3, 4});
+        {
+            FramegrabberGraphicsFrameStream stream(&grabber, source,
+                [&](GraphicsFrame&&, unsigned) { ++delivered; }, {},
+                [&](GraphicsFrameError error) { assert(error == GraphicsFrameError::ClassRefused); ++failures; });
+            auto slot = FramegrabberDetail::CaptureTransactionAccess::snapshot(grabber);
+            assert(slot->fn(descriptor, gate) == FramegrabberDetail::CaptureTransactionOutcome::DroppedStorageRefused);
+            assert(slot->fn(descriptor, gate) == FramegrabberDetail::CaptureTransactionOutcome::DroppedStorageRefused);
+            assert(source->calls == 1 && failures == 1 && gate.copyAttempts == 0);
+        }
+        auto replacement = std::make_shared<GraphicsLocalFrameContextSource>();
+        FramegrabberGraphicsFrameStream stream(&grabber, replacement,
+            [&](GraphicsFrame&&, unsigned) { ++delivered; });
+        auto slot = FramegrabberDetail::CaptureTransactionAccess::snapshot(grabber);
+        assert(slot->fn(descriptor, gate) == FramegrabberDetail::CaptureTransactionOutcome::Delivered);
+        assert(delivered == 1 && gate.copyAttempts == 1);
+    }
+
     auto captureNative = [&localSource](const Framegrabber::PixelFormat pixelFormat,
                                         const GraphicsImagePixelFormat expected,
                                         const int width,
