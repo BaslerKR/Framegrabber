@@ -509,14 +509,14 @@ int main()
     {
         // An odd YCbCr 4:2:2 width loses its last column instead of refusing the frame.
         FramegrabberDetail::CaptureFrameDescriptor descriptor;
-        descriptor.size = 12; descriptor.width = 5; descriptor.height = 2;
-        descriptor.stride = 6; descriptor.bitsPerPixel = 16;
+        descriptor.size = 20; descriptor.width = 5; descriptor.height = 2;
+        descriptor.stride = 10; descriptor.bitsPerPixel = 16;
         descriptor.pixelFormat = Framegrabber::PixelFormat::YCbCr422_8;
-        auto result = capture(descriptor, std::vector<std::uint8_t>(12, 9), gate, holder);
+        auto result = capture(descriptor, std::vector<std::uint8_t>(20, 9), gate, holder);
         assert(result.hasValue());
         const auto frame = std::move(result).value();
         const GraphicsImage& image = frame.firstImage()->payload;
-        assert(image.isValid() && image.width == 4 && image.stride == 6);
+        assert(image.isValid() && image.width == 4 && image.stride == 10);
         assert(gate->anomalies.countOf(Reason::OddWidthTrimmed) == 1);
     }
 
