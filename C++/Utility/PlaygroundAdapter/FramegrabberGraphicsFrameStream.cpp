@@ -115,8 +115,11 @@ FramegrabberGraphicsFrameStream::Impl::Impl(
                 if (_storageOutcome) _storageOutcome(error);
                 return Outcome::DroppedStorageRefused;
             }
-            if (error == GraphicsFrameError::ClassNotPrepared
-                || error == GraphicsFrameError::Disconnected)
+            if (error == GraphicsFrameError::Disconnected)
+            {
+                return Outcome::AbortedStop;
+            }
+            if (error == GraphicsFrameError::ClassNotPrepared)
             {
                 if (_storageOutcome) _storageOutcome(error);
                 return Outcome::DroppedStorageRefused;
