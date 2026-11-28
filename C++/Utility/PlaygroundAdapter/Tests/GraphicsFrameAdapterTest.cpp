@@ -294,6 +294,25 @@ int main()
         assert(delivered == 0 && outcomes == 0 && gate.copyAttempts == 1);
     }
 
+    {
+        Framegrabber grabber(nullptr);
+        auto source = std::make_shared<GraphicsLocalFrameContextSource>();
+        int received[2] = {0, 0};
+        FramegrabberGraphicsFrameStream stream(&grabber, source,
+            [&](GraphicsFrame&&, unsigned dma) { assert(dma < 2); ++received[dma]; });
+        auto slot = FramegrabberDetail::CaptureTransactionAccess::snapshot(grabber);
+        FramegrabberDetail::CaptureFrameDescriptor descriptor;
+        descriptor.size = 4; descriptor.width = 2; descriptor.height = 2;
+        descriptor.stride = 2; descriptor.bitsPerPixel = 8;
+        descriptor.pixelFormat = Framegrabber::PixelFormat::Mono8;
+        TestCopyGate gate({1, 2, 3, 4});
+        descriptor.dmaIndex = 0;
+        assert(slot->fn(descriptor, gate) == FramegrabberDetail::CaptureTransactionOutcome::Delivered);
+        descriptor.dmaIndex = 1;
+        assert(slot->fn(descriptor, gate) == FramegrabberDetail::CaptureTransactionOutcome::Delivered);
+        assert(received[0] == 1 && received[1] == 1);
+    }
+
     auto captureNative = [&localSource](const Framegrabber::PixelFormat pixelFormat,
                                         const GraphicsImagePixelFormat expected,
                                         const int width,
