@@ -2851,6 +2851,13 @@ void FramegrabberDetail::CaptureTransactionAccess::clearCaptureTransaction(
     grabber._captureTransaction.reset();
 }
 
+std::shared_ptr<const FramegrabberDetail::CaptureTransactionSlot>
+FramegrabberDetail::CaptureTransactionAccess::snapshot(Framegrabber& grabber) noexcept
+{
+    std::lock_guard<std::mutex> lock(grabber._captureTransactionMutex);
+    return grabber._captureTransaction;
+}
+
 void Framegrabber::setDMABufferCount(const std::size_t count)
 {
     std::lock_guard<std::mutex> lock(_stateMutex);

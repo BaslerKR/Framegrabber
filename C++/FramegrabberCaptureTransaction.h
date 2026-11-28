@@ -72,6 +72,7 @@ struct CaptureTransactionAccess
         Framegrabber& grabber,
         CaptureTransactionFn transaction);
     static void clearCaptureTransaction(Framegrabber& grabber) noexcept;
+    static std::shared_ptr<const CaptureTransactionSlot> snapshot(Framegrabber& grabber) noexcept;
 };
 
 } // namespace FramegrabberDetail
