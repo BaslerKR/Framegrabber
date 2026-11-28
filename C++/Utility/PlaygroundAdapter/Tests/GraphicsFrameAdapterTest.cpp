@@ -32,10 +32,12 @@ public:
             std::memcpy(destination, _source.data(), _source.size());
         }
         if (cancelOnCopy) cancelOnCopy->store(true);
+        if (onCopy) onCopy();
         return !_rejectOverwrite;
     }
 
     std::atomic<bool>* cancelOnCopy = nullptr;
+    std::function<void()> onCopy;
     int copyAttempts = 0;
 
 private:
@@ -272,6 +274,24 @@ int main()
         TestCopyGate gate({1, 2, 3, 4});
         assert(late->fn(descriptor, gate) == FramegrabberDetail::CaptureTransactionOutcome::AbortedStop);
         assert(oldSource->calls == 0 && newSource->calls == 0 && delivered == 0);
+    }
+
+    {
+        Framegrabber grabber(nullptr);
+        auto source = std::make_shared<GraphicsLocalFrameContextSource>();
+        int delivered = 0, outcomes = 0;
+        FramegrabberGraphicsFrameStream stream(&grabber, source,
+            [&](GraphicsFrame&&, unsigned) { ++delivered; }, {},
+            [&](GraphicsFrameError) { ++outcomes; });
+        auto slot = FramegrabberDetail::CaptureTransactionAccess::snapshot(grabber);
+        FramegrabberDetail::CaptureFrameDescriptor descriptor;
+        descriptor.size = 4; descriptor.width = 2; descriptor.height = 2;
+        descriptor.stride = 2; descriptor.bitsPerPixel = 8;
+        descriptor.pixelFormat = Framegrabber::PixelFormat::Mono8;
+        TestCopyGate gate({1, 2, 3, 4});
+        gate.onCopy = [&] { stream.cancel(); };
+        assert(slot->fn(descriptor, gate) == FramegrabberDetail::CaptureTransactionOutcome::AbortedStop);
+        assert(delivered == 0 && outcomes == 0 && gate.copyAttempts == 1);
     }
 
     auto captureNative = [&localSource](const Framegrabber::PixelFormat pixelFormat,
