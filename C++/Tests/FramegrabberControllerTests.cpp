@@ -2,6 +2,7 @@
 
 #include "FramegrabberSourceController.h"
 #include "FramegrabberTestBackend.h"
+#include "FramegrabberCaptureTransaction.h"
 #include "engine/GraphicsFrameBuilder.h"
 
 #include <QDir>
@@ -25,6 +26,7 @@ class FramegrabberControllerTests final : public QObject
 {
     Q_OBJECT
 private slots:
+    void stickyRefusalBlocksSingleAndLive();
     void declaresHierarchicalBoardConnection();
     void connectLoadsOpeningAppletAndOwnsDmaSources();
     void declaredActionsCarryPresentationAndPromptKinds();
@@ -168,6 +170,49 @@ struct FramegrabberCatalogTestAccess
         return Framegrabber::resolveCatalogEntry({}, path, board, lookup, log);
     }
 };
+
+void FramegrabberControllerTests::stickyRefusalBlocksSingleAndLive()
+{
+    struct Refused final : GraphicsFrameContextSource {
+        GraphicsResult<GraphicsFrameContext> beginFrame(std::size_t) noexcept override {
+            ++calls; return GraphicsFrameError::ClassRefused;
+        }
+        int calls = 0;
+    };
+    struct Gate final : FramegrabberDetail::CaptureCopyGate {
+        bool copyAndVerify(std::uint8_t*, std::size_t) noexcept override { ++calls; return true; }
+        int calls = 0;
+    } gate;
+    Framegrabber grabber(nullptr);
+    FramegrabberTestBackend fake;
+    FramegrabberSourceController controller(&grabber);
+    FramegrabberControllerTestAccess::install(controller, fake);
+    const auto connection = connectBoard(controller);
+    QVERIFY2(connection.error.isEmpty(), qPrintable(connection.error));
+    auto source = std::make_shared<Refused>();
+    controller.setFrameConsumer([](SessionFrame&&, unsigned) {});
+    controller.setFrameContextSource(source);
+    controller.start();
+    auto slot = FramegrabberDetail::CaptureTransactionAccess::snapshot(grabber);
+    QVERIFY(slot);
+    FramegrabberDetail::CaptureFrameDescriptor descriptor;
+    descriptor.size = 4; descriptor.width = 2; descriptor.height = 2;
+    descriptor.stride = 2; descriptor.bitsPerPixel = 8;
+    descriptor.pixelFormat = Framegrabber::PixelFormat::Mono8;
+    QCOMPARE(slot->fn(descriptor, gate), FramegrabberDetail::CaptureTransactionOutcome::DroppedStorageRefused);
+    controller.stop();
+    Sink<DeviceConnectionResult> single;
+    const auto refused = controller.requestSingle(connection.result.state->connectionId, single.completion());
+    QVERIFY(refused.error != DeviceConnectionError::None);
+    QVERIFY(!refused.message.empty());
+    QVERIFY_EXCEPTION_THROWN(controller.start(), std::runtime_error);
+    QCOMPARE(source->calls, 1);
+    QCOMPARE(gate.calls, 0);
+    controller.setFrameContextSource(std::make_shared<GraphicsLocalFrameContextSource>());
+    controller.start();
+    QVERIFY(FramegrabberDetail::CaptureTransactionAccess::snapshot(grabber));
+    controller.stop();
+}
 
 void FramegrabberControllerTests::declaresHierarchicalBoardConnection()
 {
