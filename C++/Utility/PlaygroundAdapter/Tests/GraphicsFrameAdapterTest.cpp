@@ -165,6 +165,17 @@ int main()
         assert(gate.copyAttempts == 1);
     }
 
+    {
+        FramegrabberDetail::CaptureFrameDescriptor descriptor;
+        descriptor.size = 4; descriptor.width = 2; descriptor.height = 2;
+        descriptor.stride = 2; descriptor.bitsPerPixel = 8;
+        descriptor.pixelFormat = Framegrabber::PixelFormat::Mono8;
+        TestCopyGate gate({1, 2, 3, 4}, true);
+        auto result = FramegrabberGraphicsFrameAdapter::captureFrame(localSource, descriptor, gate);
+        assert(!result.hasValue());
+        assert(gate.copyAttempts == 1);
+    }
+
     auto captureNative = [&localSource](const Framegrabber::PixelFormat pixelFormat,
                                         const GraphicsImagePixelFormat expected,
                                         const int width,

@@ -1,5 +1,7 @@
 ## Unreleased
 
+- Migrate managed DMA capture to a synchronous admitted frame transaction with overwrite verification and cancellation before publication.
+
 - Adopt `DevicePluginSessionCapability::GraphicsViewer` in `FramegrabberPlugin`.
 
 - Migrate the Playground adapter, stream, controller, and tests to the immutable `GraphicsFrame` handle and `GraphicsFrameBuilder`, borrowing core buffer leases with `GraphicsBorrow::Immutable` without adding copies and routing borrow/publish failures through the existing image-rejection sink.
