@@ -1,11 +1,13 @@
 #include "FramegrabberGraphicsFrameAdapter.h"
 #include "FramegrabberGraphicsFrameStream.h"
+#include "FramegrabberImageLayout.h"
 
 #include <algorithm>
 #include <cassert>
 #include <cstdint>
 #include <cstring>
 #include <limits>
+#include <memory>
 #include <vector>
 
 namespace
@@ -20,17 +22,19 @@ public:
     {
     }
 
-    bool copyAndVerify(std::uint8_t* destination, std::size_t capacity) noexcept override
+    bool copyAndVerify(std::uint8_t* destination,
+                       const FramegrabberDetail::CaptureCopyPlan& plan) noexcept override
     {
         ++copyAttempts;
-        if (!destination || capacity < _source.size())
+        lastPlan = plan;
+        if (!destination || plan.destinationStride == 0 || plan.rows == 0
+            || plan.rows > plan.capacity / plan.destinationStride)
         {
             return false;
         }
-        if (!_source.empty())
-        {
-            std::memcpy(destination, _source.data(), _source.size());
-        }
+        // Same row-by-row, zero-filling copy as the DMA gate: only bytes that exist are read.
+        FramegrabberDetail::copyPayloadRows(destination, plan.destinationStride, plan.rows,
+            _source.data(), plan.sourceStride, _source.size());
         if (cancelOnCopy) cancelOnCopy->store(true);
         if (onCopy) onCopy();
         return !_rejectOverwrite;
@@ -39,6 +43,7 @@ public:
     std::atomic<bool>* cancelOnCopy = nullptr;
     std::function<void()> onCopy;
     int copyAttempts = 0;
+    FramegrabberDetail::CaptureCopyPlan lastPlan;
 
 private:
     std::vector<std::uint8_t> _source;
@@ -157,6 +162,9 @@ int main()
     }
 
     {
+        // Changed expectation: a descriptor smaller than stride * height used to be refused as
+        // TruncatedBytes; it is now planned at stride * height, copied as far as it exists and
+        // zero-filled, and counted.
         FramegrabberDetail::CaptureFrameDescriptor descriptor;
         descriptor.size = 3U;
         descriptor.width = 2;
@@ -171,10 +179,13 @@ int main()
         GraphicsImage rejected;
         auto result = FramegrabberGraphicsFrameAdapter::captureFrame(
             localSource, descriptor, gate, &failure, &rejected);
-        assert(!result.hasValue());
-        assert(failure == GraphicsImageFailure::TruncatedBytes);
-        assert(gate.copyAttempts == 0);
-        assert(rejected.frameSequence == 10U);
+        assert(result.hasValue());
+        assert(failure == GraphicsImageFailure::None);
+        assert(gate.copyAttempts == 1);
+        const GraphicsFrame frame = std::move(result).value();
+        const GraphicsImage& image = frame.firstImage()->payload;
+        assert(image.isValid() && image.pixels.size() == 4U);
+        assert(image.data()[2] == 3U && image.data()[3] == 0U);
     }
 
     {
@@ -205,10 +216,15 @@ int main()
         descriptor.bitsPerPixel = 8;
         descriptor.pixelFormat = Framegrabber::PixelFormat::Mono8;
 
+        // Changed expectation: a zero stride used to be refused as InvalidStride; the bytes are
+        // now published as Mono8 rows and the fit is counted.
         GraphicsImageFailure failure = GraphicsImageFailure::None;
-        auto plan = FramegrabberGraphicsFrameAdapter::planImage(descriptor, &failure);
-        assert(!plan.hasValue());
-        assert(failure == GraphicsImageFailure::InvalidStride);
+        FramegrabberDetail::FrameAnomalies anomalies;
+        auto plan = FramegrabberGraphicsFrameAdapter::planImage(descriptor, &failure, &anomalies);
+        assert(plan.hasValue());
+        assert(plan.value().format == GraphicsImagePixelFormat::Mono8);
+        assert(plan.value().bytes == 4U && plan.value().strideBytes == 4 && plan.value().height == 1);
+        assert(anomalies.countOf(FramegrabberDetail::FrameAnomalyReason::InvalidGeometryRaw) == 1);
     }
 
     {
@@ -422,5 +438,150 @@ int main()
         2,
         15,
         30);
+
+    using Reason = FramegrabberDetail::FrameAnomalyReason;
+    const auto capture = [&localSource](FramegrabberDetail::CaptureFrameDescriptor descriptor,
+                                        std::vector<std::uint8_t> bytes,
+                                        TestCopyGate*& outGate,
+                                        std::unique_ptr<TestCopyGate>& holder) {
+        holder = std::make_unique<TestCopyGate>(std::move(bytes));
+        outGate = holder.get();
+        return FramegrabberGraphicsFrameAdapter::captureFrame(localSource, descriptor, *holder);
+    };
+    TestCopyGate* gate = nullptr;
+    std::unique_ptr<TestCopyGate> holder;
+
+    {
+        // An SDK format without a GraphicsEngine layout maps to the nearest format by bit depth.
+        FramegrabberDetail::CaptureFrameDescriptor descriptor;
+        descriptor.size = 8; descriptor.width = 4; descriptor.height = 2;
+        descriptor.stride = 4; descriptor.bitsPerPixel = 8;
+        descriptor.fgFormat = 4242;
+        descriptor.pixelFormat = Framegrabber::PixelFormat::Unknown;
+        auto result = capture(descriptor, {1, 2, 3, 4, 5, 6, 7, 8}, gate, holder);
+        assert(result.hasValue());
+        const auto frame = std::move(result).value();
+        const GraphicsImage& image = frame.firstImage()->payload;
+        assert(image.isValid() && image.pixelFormat == GraphicsImagePixelFormat::Mono8);
+        assert(image.width == 4 && image.height == 2 && image.stride == 4);
+        assert(image.sourceFormat == 4242);
+        assert(gate->anomalies.countOf(Reason::UnknownFormatMapped) == 1);
+        assert(gate->anomalies.total() == 1);
+    }
+
+    for (const auto format : {Framegrabber::PixelFormat::Unknown, Framegrabber::PixelFormat::Raw,
+                              Framegrabber::PixelFormat::Jpeg})
+    {
+        // No layout fits: the bytes are published unchanged as Mono8 rows.
+        FramegrabberDetail::CaptureFrameDescriptor descriptor;
+        descriptor.size = 12; descriptor.width = 6; descriptor.height = 2;
+        descriptor.stride = 6; descriptor.bitsPerPixel = 0;
+        descriptor.pixelFormat = format;
+        std::vector<std::uint8_t> bytes(12);
+        for (std::size_t i = 0; i < bytes.size(); ++i) bytes[i] = static_cast<std::uint8_t>(i + 1);
+        auto result = capture(descriptor, bytes, gate, holder);
+        assert(result.hasValue());
+        const auto frame = std::move(result).value();
+        const GraphicsImage& image = frame.firstImage()->payload;
+        assert(image.isValid() && image.pixelFormat == GraphicsImagePixelFormat::Mono8);
+        assert(image.width == 6 && image.height == 2 && image.stride == 6);
+        assert(std::equal(bytes.begin(), bytes.end(), image.data()));
+        assert(gate->anomalies.countOf(Reason::UnknownFormatRaw) == 1);
+    }
+
+    {
+        // A stride below the format's row size is widened row by row, never dropped.
+        FramegrabberDetail::CaptureFrameDescriptor descriptor;
+        descriptor.size = 6; descriptor.width = 4; descriptor.height = 2;
+        descriptor.stride = 3; descriptor.bitsPerPixel = 16;
+        descriptor.pixelFormat = Framegrabber::PixelFormat::Mono16;
+        auto result = capture(descriptor, {1, 2, 3, 4, 5, 6}, gate, holder);
+        assert(result.hasValue());
+        const auto frame = std::move(result).value();
+        const GraphicsImage& image = frame.firstImage()->payload;
+        assert(image.isValid() && image.width == 4 && image.stride == 8 && image.pixels.size() == 16U);
+        const std::uint8_t expected[16] = {1, 2, 3, 0, 0, 0, 0, 0, 4, 5, 6, 0, 0, 0, 0, 0};
+        assert(std::equal(expected, expected + 16, image.data()));
+        assert(gate->lastPlan.sourceStride == 3 && gate->lastPlan.destinationStride == 8);
+        assert(gate->anomalies.countOf(Reason::StridePadded) == 1);
+    }
+
+    {
+        // An odd YCbCr 4:2:2 width loses its last column instead of refusing the frame.
+        FramegrabberDetail::CaptureFrameDescriptor descriptor;
+        descriptor.size = 12; descriptor.width = 5; descriptor.height = 2;
+        descriptor.stride = 6; descriptor.bitsPerPixel = 16;
+        descriptor.pixelFormat = Framegrabber::PixelFormat::YCbCr422_8;
+        auto result = capture(descriptor, std::vector<std::uint8_t>(12, 9), gate, holder);
+        assert(result.hasValue());
+        const auto frame = std::move(result).value();
+        const GraphicsImage& image = frame.firstImage()->payload;
+        assert(image.isValid() && image.width == 4 && image.stride == 6);
+        assert(gate->anomalies.countOf(Reason::OddWidthTrimmed) == 1);
+    }
+
+    {
+        // Unusable geometry with data present falls back to Mono8 rows; a huge size stays addressable.
+        FramegrabberDetail::CaptureFrameDescriptor descriptor;
+        descriptor.size = 10; descriptor.width = 0; descriptor.height = -1;
+        descriptor.stride = 0; descriptor.bitsPerPixel = 16;
+        descriptor.pixelFormat = Framegrabber::PixelFormat::Mono16;
+        auto result = capture(descriptor, std::vector<std::uint8_t>(10, 5), gate, holder);
+        assert(result.hasValue());
+        const auto frame = std::move(result).value();
+        assert(frame.firstImage()->payload.isValid());
+        assert(gate->anomalies.countOf(Reason::InvalidGeometryRaw) == 1);
+        FramegrabberDetail::CaptureFrameDescriptor huge;
+        huge.size = static_cast<std::size_t>(5) << 30; huge.pixelFormat = Framegrabber::PixelFormat::Unknown;
+        const auto plan = FramegrabberGraphicsFrameAdapter::planImage(huge);
+        assert(plan.hasValue() && plan.value().strideBytes == 4096
+               && plan.value().bytes >= huge.size && plan.value().bytes < huge.size + 4096U);
+    }
+
+    {
+        // Every format with every awkward geometry plans: nothing is refused while bytes exist.
+        const std::size_t formatCount = GraphicsImagePixelFormatTable::kFormatCount;
+        for (std::size_t index = 0; index < formatCount; ++index)
+        {
+            for (const int width : {1, 2, 3, 5})
+            for (const int stride : {1, 3, 7, 64})
+            {
+                FramegrabberDetail::CaptureFrameDescriptor descriptor;
+                descriptor.width = width; descriptor.height = 3; descriptor.stride = stride;
+                descriptor.size = static_cast<std::size_t>(stride) * 3U;
+                descriptor.bitsPerPixel = static_cast<int>(index) % 70;
+                descriptor.pixelFormat = static_cast<Framegrabber::PixelFormat>(index % 70);
+                FramegrabberDetail::FrameAnomalies anomalies;
+                GraphicsImageFailure failure = GraphicsImageFailure::None;
+                const auto plan = FramegrabberGraphicsFrameAdapter::planImage(descriptor, &failure, &anomalies);
+                assert(plan.hasValue());
+                assert(failure == GraphicsImageFailure::None);
+                assert(GraphicsImageValidation::hasValidLayout(plan.value().format, plan.value().width,
+                    plan.value().height, plan.value().strideBytes, plan.value().bytes));
+            }
+        }
+    }
+
+    {
+        // One DMA's odd frame never costs another DMA its frame.
+        Framegrabber grabber(nullptr);
+        auto source = std::make_shared<GraphicsLocalFrameContextSource>();
+        int received[2] = {0, 0};
+        FramegrabberGraphicsFrameStream stream(&grabber, source,
+            [&](GraphicsFrame&&, unsigned dma) { assert(dma < 2); ++received[dma]; });
+        auto slot = FramegrabberDetail::CaptureTransactionAccess::snapshot(grabber);
+        FramegrabberDetail::CaptureFrameDescriptor odd;
+        odd.size = 7; odd.width = 3; odd.height = 2; odd.stride = 3; odd.bitsPerPixel = 0;
+        odd.pixelFormat = Framegrabber::PixelFormat::Unknown; odd.dmaIndex = 0;
+        FramegrabberDetail::CaptureFrameDescriptor good;
+        good.size = 4; good.width = 2; good.height = 2; good.stride = 2; good.bitsPerPixel = 8;
+        good.pixelFormat = Framegrabber::PixelFormat::Mono8; good.dmaIndex = 1;
+        TestCopyGate oddGate({1, 2, 3, 4, 5, 6, 7});
+        TestCopyGate goodGate({1, 2, 3, 4});
+        assert(slot->fn(odd, oddGate) == FramegrabberDetail::CaptureTransactionOutcome::Delivered);
+        assert(slot->fn(good, goodGate) == FramegrabberDetail::CaptureTransactionOutcome::Delivered);
+        assert(received[0] == 1 && received[1] == 1);
+        assert(oddGate.anomalies.total() == 1 && goodGate.anomalies.total() == 0);
+    }
     return 0;
 }

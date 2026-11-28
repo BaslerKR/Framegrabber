@@ -1,5 +1,9 @@
 #include "FramegrabberGraphicsFrameAdapter.h"
 
+#include <algorithm>
+#include <limits>
+#include <optional>
+
 namespace
 {
 [[nodiscard]] GraphicsImagePixelFormat graphicsPixelFormat(
@@ -112,53 +116,203 @@ GraphicsImageBitAlignment graphicsBitAlignment(const Framegrabber::BitAlignment 
     return ::graphicsBitAlignment(alignment);
 }
 
-GraphicsResult<GraphicsImageWriteLayout> planImage(
+namespace
+{
+constexpr std::size_t kRawRowBytes = 4096U;
+
+/** Layout fitted to one descriptor before the GraphicsEngine plan check. */
+struct FittedImage
+{
+    GraphicsImagePixelFormat format = GraphicsImagePixelFormat::Mono8;
+    int width = 0;
+    int height = 0;
+    std::size_t destinationStride = 0;
+    std::size_t sourceStride = 0;
+};
+
+[[nodiscard]] bool hasLayout(const GraphicsImagePixelFormat format) noexcept
+{
+    return GraphicsImageValidation::packedBitsPerPixel(format) != 0;
+}
+
+/** Nearest GraphicsEngine layout for a bit depth whose SDK format has no layout of its own. */
+[[nodiscard]] GraphicsImagePixelFormat nearestFormatForBits(const int bits) noexcept
+{
+    switch (bits)
+    {
+    case 1: return GraphicsImagePixelFormat::Binary;
+    case 8: return GraphicsImagePixelFormat::Mono8;
+    case 10: return GraphicsImagePixelFormat::Mono10Packed;
+    case 12: return GraphicsImagePixelFormat::Mono12Packed;
+    case 14: return GraphicsImagePixelFormat::Mono14Packed;
+    case 16: return GraphicsImagePixelFormat::Mono16;
+    case 24: return GraphicsImagePixelFormat::RGB24;
+    case 30: return GraphicsImagePixelFormat::RGB30;
+    case 32: return GraphicsImagePixelFormat::Mono32;
+    case 36: return GraphicsImagePixelFormat::RGB12Packed;
+    case 40: return GraphicsImagePixelFormat::RGBA10Packed;
+    case 42: return GraphicsImagePixelFormat::RGB14Packed;
+    case 48: return GraphicsImagePixelFormat::RGB48;
+    case 56: return GraphicsImagePixelFormat::RGBA14Packed;
+    case 64: return GraphicsImagePixelFormat::RGBA64;
+    default: return GraphicsImagePixelFormat::Unknown;
+    }
+}
+
+/** Raw bytes as Mono8 rows; rows follow the delivered stride when it is usable. */
+[[nodiscard]] std::optional<FittedImage> rawFit(
+    const FramegrabberDetail::CaptureFrameDescriptor& descriptor) noexcept
+{
+    const std::size_t size = descriptor.size;
+    if (size == 0U) return std::nullopt;
+    const auto intMax = static_cast<std::size_t>((std::numeric_limits<int>::max)());
+    std::size_t width = descriptor.stride > 0 && static_cast<std::size_t>(descriptor.stride) <= size
+        ? static_cast<std::size_t>(descriptor.stride)
+        : (std::min)(size, kRawRowBytes);
+    if (size / width + (size % width != 0U ? 1U : 0U) > intMax)
+    {
+        width = size / intMax + 1U;
+    }
+    if (width > intMax) return std::nullopt;
+    const std::size_t height = size / width + (size % width != 0U ? 1U : 0U);
+    FittedImage fit;
+    fit.format = GraphicsImagePixelFormat::Mono8;
+    fit.width = static_cast<int>(width);
+    fit.height = static_cast<int>(height);
+    fit.destinationStride = width;
+    fit.sourceStride = width;
+    return fit;
+}
+
+/** Plans @p fit through GraphicsEngine; the planned destination holds `stride * height` bytes. */
+[[nodiscard]] GraphicsResult<GraphicsImageWriteLayout> planFit(
+    const FittedImage& fit,
     const FramegrabberDetail::CaptureFrameDescriptor& descriptor,
     GraphicsImageFailure* const failure) noexcept
 {
-    const auto reject = [failure](const GraphicsImageFailure reason)
-        -> GraphicsResult<GraphicsImageWriteLayout> {
-        if (failure) *failure = reason;
+    const auto rows = static_cast<std::size_t>(fit.height);
+    if (fit.destinationStride == 0U
+        || fit.destinationStride > static_cast<std::size_t>((std::numeric_limits<int>::max)()))
+    {
+        if (failure) *failure = GraphicsImageFailure::InvalidStride;
         return GraphicsFrameError::InvalidInput;
-    };
-    if (descriptor.size == 0U)
-    {
-        return reject(GraphicsImageFailure::MissingBytes);
     }
-    if (descriptor.width <= 0 || descriptor.height <= 0)
+    if (rows != 0U && fit.destinationStride > (std::numeric_limits<std::size_t>::max)() / rows)
     {
-        return reject(GraphicsImageFailure::InvalidDimensions);
+        if (failure) *failure = GraphicsImageFailure::ExtentOverflow;
+        return GraphicsFrameError::InvalidInput;
     }
-    if (descriptor.stride <= 0)
-    {
-        return reject(GraphicsImageFailure::InvalidStride);
-    }
-
-    // planGraphicsImageWrite checks data != nullptr without dereferencing it, so a static
-    // non-null byte plans the destination without exposing any raw DMA pointer.
     alignas(16) static constexpr std::uint8_t kPlannedBytePlaceholder = 0U;
     GraphicsImageWriterSource source;
     source.data = &kPlannedBytePlaceholder;
-    source.size = descriptor.size;
-    source.width = descriptor.width;
-    source.height = descriptor.height;
-    source.stride = descriptor.stride;
-    source.pixelFormat = ::graphicsPixelFormat(descriptor.pixelFormat);
+    source.size = fit.destinationStride * rows;
+    source.width = fit.width;
+    source.height = fit.height;
+    source.stride = static_cast<int>(fit.destinationStride);
+    source.pixelFormat = fit.format;
     source.bitsPerPixel = descriptor.bitsPerPixel;
     source.sourceFormat = descriptor.fgFormat;
     source.bitAlignment = ::graphicsBitAlignment(descriptor.bitAlignment);
     source.frameSequence = descriptor.frameSeq;
     source.operation = GraphicsImageWriterOperation::Copy;
-    // An extent overflow is a property of this frame's geometry, not a Host storage refusal:
-    // it stays a per-frame invalid drop and must never read as Capacity.
-    GraphicsImageFailure planFailure = GraphicsImageFailure::None;
-    auto plan = planGraphicsImageWrite(source, &planFailure);
-    if (failure) *failure = planFailure;
-    if (!plan)
+    auto plan = planGraphicsImageWrite(source, failure);
+    if (!plan) return plan;
+    GraphicsImageWriteLayout layout = plan.value();
+    layout.sourceStride = fit.sourceStride;
+    return layout;
+}
+
+void noteAnomaly(
+    FramegrabberDetail::FrameAnomalies* const anomalies,
+    const FramegrabberDetail::FrameAnomalyReason reason,
+    const FramegrabberDetail::CaptureFrameDescriptor& descriptor,
+    const GraphicsImageWriteLayout& layout) noexcept
+{
+    if (!anomalies) return;
+    FramegrabberDetail::FrameAnomalyEvidence evidence;
+    evidence.reason = reason;
+    evidence.width = static_cast<std::uint32_t>(layout.width);
+    evidence.height = static_cast<std::uint32_t>(layout.height);
+    evidence.sourceStride = descriptor.stride > 0 ? static_cast<std::uint64_t>(descriptor.stride) : 0U;
+    evidence.plannedBytes = layout.bytes;
+    evidence.readableBytes = descriptor.size;
+    evidence.sourceFormat = descriptor.fgFormat;
+    anomalies->add(evidence);
+}
+}
+
+GraphicsResult<GraphicsImageWriteLayout> planImage(
+    const FramegrabberDetail::CaptureFrameDescriptor& descriptor,
+    GraphicsImageFailure* const failure,
+    FramegrabberDetail::FrameAnomalies* const anomalies) noexcept
+{
+    using Reason = FramegrabberDetail::FrameAnomalyReason;
+    if (failure) *failure = GraphicsImageFailure::None;
+    // Zero bytes is the only input without data to publish; everything else is fitted.
+    if (descriptor.size == 0U)
     {
+        if (failure) *failure = GraphicsImageFailure::MissingBytes;
         return GraphicsFrameError::InvalidInput;
     }
-    return plan;
+
+    const GraphicsImagePixelFormat declared = ::graphicsPixelFormat(descriptor.pixelFormat);
+    GraphicsImagePixelFormat format = declared;
+    bool formatMapped = false;
+    if (!hasLayout(format))
+    {
+        format = nearestFormatForBits(descriptor.bitsPerPixel);
+        formatMapped = hasLayout(format);
+    }
+
+    // First attempt: keep the delivered geometry in the (mapped) format, widening the stride or
+    // trimming a column only where the format demands it.
+    if (hasLayout(format) && descriptor.width > 0 && descriptor.height > 0 && descriptor.stride > 0)
+    {
+        FittedImage fit;
+        fit.format = format;
+        fit.width = descriptor.width;
+        fit.height = descriptor.height;
+        bool trimmed = false;
+        if (GraphicsImageValidation::requiresEvenWidth(format) && (fit.width & 1) != 0)
+        {
+            --fit.width;
+            trimmed = true;
+        }
+        const std::size_t minimumRow = fit.width > 0
+            ? GraphicsImageValidation::minimumRowBytes(format, fit.width) : 0U;
+        const auto sourceStride = static_cast<std::size_t>(descriptor.stride);
+        const bool padded = minimumRow != 0U && sourceStride < minimumRow;
+        fit.sourceStride = sourceStride;
+        fit.destinationStride = padded ? minimumRow : sourceStride;
+        if (minimumRow != 0U)
+        {
+            GraphicsImageFailure planFailure = GraphicsImageFailure::None;
+            const auto plan = planFit(fit, descriptor, &planFailure);
+            if (plan)
+            {
+                if (formatMapped) noteAnomaly(anomalies, Reason::UnknownFormatMapped, descriptor, plan.value());
+                if (trimmed) noteAnomaly(anomalies, Reason::OddWidthTrimmed, descriptor, plan.value());
+                if (padded) noteAnomaly(anomalies, Reason::StridePadded, descriptor, plan.value());
+                return plan;
+            }
+        }
+    }
+
+    // Last fit: no layout matches the delivered bytes, so publish them unchanged as Mono8 rows.
+    GraphicsImageFailure rawFailure = GraphicsImageFailure::ExtentOverflow;
+    const auto raw = rawFit(descriptor);
+    if (raw)
+    {
+        const auto plan = planFit(*raw, descriptor, &rawFailure);
+        if (plan)
+        {
+            noteAnomaly(anomalies, hasLayout(format) ? Reason::InvalidGeometryRaw : Reason::UnknownFormatRaw,
+                descriptor, plan.value());
+            return plan;
+        }
+    }
+    if (failure) *failure = rawFailure;
+    return GraphicsFrameError::InvalidInput;
 }
 
 GraphicsResult<GraphicsFrame> captureFrame(
@@ -199,7 +353,7 @@ GraphicsResult<GraphicsFrame> captureFrame(
     }
 
     GraphicsImageFailure planFailure = GraphicsImageFailure::None;
-    const auto plan = planImage(descriptor, &planFailure);
+    const auto plan = planImage(descriptor, &planFailure, &copyGate.anomalies);
     if (!plan)
     {
         if (outImageFailure) *outImageFailure = planFailure;
@@ -232,7 +386,12 @@ GraphicsResult<GraphicsFrame> captureFrame(
     }
 
     GraphicsWriteRegion<std::uint8_t> region = std::move(reserved).value();
-    if (!copyGate.copyAndVerify(region.data(), layout.bytes))
+    FramegrabberDetail::CaptureCopyPlan copyPlan;
+    copyPlan.capacity = layout.bytes;
+    copyPlan.destinationStride = static_cast<std::size_t>(layout.strideBytes);
+    copyPlan.rows = static_cast<std::size_t>(layout.height);
+    copyPlan.sourceStride = layout.sourceStride;
+    if (!copyGate.copyAndVerify(region.data(), copyPlan))
     {
         // RAII destroys region and builder without sealing or publishing.
         return GraphicsFrameError::InvalidInput;

@@ -12,6 +12,7 @@
 #include "basler_fg.h"
 #include "siso_genicam.h"
 
+#include "FramegrabberFrameAnomalies.h"
 #include "FramegrabberSystem.h"
 
 #include <atomic>
@@ -90,6 +91,8 @@ public:
         std::uint64_t overwritten = 0;
         std::uint64_t rejected = 0;
         std::uint64_t poolExhausted = 0;
+        /** Anomalies fitted into frames (short, padded, oversized or unknown-format transfers); nothing was dropped for them. */
+        FramegrabberDetail::FrameAnomalyTotals anomalies{};
     };
 
     /** @brief Reports the outcome of the last CoaXPress discovery. */

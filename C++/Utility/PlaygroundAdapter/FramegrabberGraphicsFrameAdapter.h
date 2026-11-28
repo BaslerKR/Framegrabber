@@ -19,18 +19,29 @@ namespace FramegrabberGraphicsFrameAdapter
 [[nodiscard]] GraphicsImageBitAlignment graphicsBitAlignment(
     Framegrabber::BitAlignment alignment) noexcept;
 
-/** Plans the destination layout for @p descriptor via planGraphicsImageWrite(). */
+/**
+ * @brief Fits @p descriptor into a GraphicsEngine image layout and plans it.
+ *
+ * Device data is never refused for a validation reason: an unknown format maps to the nearest
+ * GraphicsEngine format by bit depth (otherwise the raw bytes become Mono8), a stride below the
+ * format's row size is widened, an odd YCbCr 4:2:2 width loses its last column, and an unusable
+ * geometry falls back to Mono8 rows. Each fit is appended to @p anomalies. Only a descriptor
+ * with zero bytes, or one whose bytes cannot be addressed by an int-sized layout, fails.
+ * `sourceStride` of the returned layout is the row spacing to read the delivered bytes with.
+ */
 [[nodiscard]] GraphicsResult<GraphicsImageWriteLayout> planImage(
     const FramegrabberDetail::CaptureFrameDescriptor& descriptor,
-    GraphicsImageFailure* failure = nullptr) noexcept;
+    GraphicsImageFailure* failure = nullptr,
+    FramegrabberDetail::FrameAnomalies* anomalies = nullptr) noexcept;
 
 /**
  * @brief Executes the synchronous capture transaction for one DMA frame.
  *
- * Plans via planGraphicsImageWrite(), acquires one context from @p contextSource,
+ * Fits the layout via planImage(), acquires one context from @p contextSource,
  * reserves one region, performs the single SDK-to-region copy plus overwrite check
- * before seal(), and publishes one immutable GraphicsFrame. Aborts under RAII on
- * overwrite, refusal, invalid layout, or cancellation without publishing.
+ * before seal(), and publishes one immutable GraphicsFrame. The fits are appended to
+ * `copyGate.anomalies`. Aborts under RAII on overwrite, storage refusal, zero bytes,
+ * or cancellation without publishing.
  */
 [[nodiscard]] GraphicsResult<GraphicsFrame> captureFrame(
     GraphicsFrameContextSource& contextSource,

@@ -12,6 +12,7 @@
 #include <GenApi/GenApi.h>
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <cmath>
 #include <cstring>
@@ -621,6 +622,20 @@ struct Framegrabber::DmaChannel
     std::atomic<std::uint64_t> overwritten{0};
     std::atomic<std::uint64_t> rejected{0};
     std::atomic<std::uint64_t> poolExhausted{0};
+    std::array<std::atomic<std::uint64_t>, FramegrabberDetail::kFrameAnomalyReasonCount> anomalies;
+
+    DmaChannel()
+    {
+        for (auto& total : anomalies) total.store(0, std::memory_order_relaxed);
+    }
+
+    void copyAnomalies(FramegrabberDetail::FrameAnomalyTotals& out) const noexcept
+    {
+        for (std::size_t index = 0; index < anomalies.size(); ++index)
+        {
+            out[index] = anomalies[index].load(std::memory_order_relaxed);
+        }
+    }
 };
 
 struct Framegrabber::PreviousApplet
@@ -1957,13 +1972,24 @@ void Framegrabber::startChannel(const unsigned int dmaIndex, const std::size_t f
 
     const PixelFormat pixelFormat = toPixelFormat(sdkFormat);
     const int sdkPixelBits = Fg_getBitsPerPixel(sdkFormat);
-    const int pixelBits = sdkPixelBits > 0
+    const int reportedPixelBits = sdkPixelBits > 0
         ? sdkPixelBits
         : bitsPerPixel(pixelFormat);
-    const int pixelBytes = pixelBits > 0 ? (pixelBits + 7) / 8 : 0;
-    if (width <= 0 || height <= 0 || pixelBits <= 0 || pixelBytes <= 0)
+    // A format without a known depth is never refused: buffers are sized as raw bytes (one byte
+    // per pixel) and the frames are delivered with the SDK format code for the consumer to fit.
+    const int pixelBits = reportedPixelBits > 0 ? reportedPixelBits : 8;
+    const int pixelBytes = (pixelBits + 7) / 8;
+    if (reportedPixelBits <= 0)
     {
-        log("DMA(" + std::to_string(dmaIndex) + ") has an unsupported image format.", true);
+        log("DMA(" + std::to_string(dmaIndex) + ") has no known pixel layout for FG_FORMAT="
+                + std::to_string(sdkFormat) + "; delivering the raw bytes unchanged.",
+            true);
+    }
+    if (width <= 0 || height <= 0)
+    {
+        log("DMA(" + std::to_string(dmaIndex) + ") has an invalid image geometry: " + std::to_string(width)
+                + "x" + std::to_string(height) + ".",
+            true);
         return;
     }
 
@@ -1975,6 +2001,11 @@ void Framegrabber::startChannel(const unsigned int dmaIndex, const std::size_t f
     }
     const std::size_t rowBytes = static_cast<std::size_t>(width)
                                  * static_cast<std::size_t>(pixelBytes);
+    if (rowBytes > static_cast<std::size_t>((std::numeric_limits<int>::max)()))
+    {
+        log("DMA(" + std::to_string(dmaIndex) + ") image row size exceeds the supported stride range.", true);
+        return;
+    }
     if (static_cast<std::size_t>(height)
         > (std::numeric_limits<std::size_t>::max)() / rowBytes)
     {
@@ -2040,7 +2071,7 @@ void Framegrabber::startChannel(const unsigned int dmaIndex, const std::size_t f
     {
         channelPtr->thread = std::thread(
             [this, channelPtr, handle, frames, width, height, sdkFormat, pixelFormat, pixelBits,
-             pixelBytes, bitAlignment, frameBytes, bufferCount, managedMode]
+             reportedPixelBits, pixelBytes, bitAlignment, frameBytes, bufferCount, managedMode]
             {
                 const unsigned int dmaIndex = channelPtr->index;
                 {
@@ -2074,8 +2105,48 @@ void Framegrabber::startChannel(const unsigned int dmaIndex, const std::size_t f
 
                 frameindex_t lastPicture = 0;
                 std::size_t delivered = 0;
-                bool payloadGeometryWarningLogged = false;
+                bool zeroBytesWarningLogged = false;
                 bool storageWarningLogged = false;
+                // Counts one frame's fitted anomalies and logs the first and every hundredth
+                // occurrence per reason, like the other per-run warnings.
+                const auto countAnomalies = [this, channelPtr, dmaIndex](
+                    const FramegrabberDetail::FrameAnomalies& record)
+                {
+                    const auto countReason = [&](const FramegrabberDetail::FrameAnomalyReason reason,
+                                                 const std::uint64_t amount,
+                                                 const FramegrabberDetail::FrameAnomalyEvidence* evidence)
+                    {
+                        const auto before = channelPtr->anomalies[static_cast<std::size_t>(reason)]
+                            .fetch_add(amount, std::memory_order_relaxed);
+                        if (before != 0 && (before + amount) / 100U == before / 100U) return;
+                        std::string message = "DMA(" + std::to_string(dmaIndex) + ") fitted frame anomaly "
+                            + FramegrabberDetail::frameAnomalyName(reason) + " (count="
+                            + std::to_string(before + amount) + ")";
+                        if (evidence)
+                        {
+                            message += ": " + std::to_string(evidence->width) + "x"
+                                + std::to_string(evidence->height) + ", stride="
+                                + std::to_string(evidence->sourceStride) + ", planned="
+                                + std::to_string(evidence->plannedBytes) + " bytes, readable="
+                                + std::to_string(evidence->readableBytes) + " bytes, FG_FORMAT="
+                                + std::to_string(evidence->sourceFormat);
+                        }
+                        log(message + "; the frame is published as fitted.", true);
+                    };
+                    for (std::size_t index = 0; index < record.count; ++index)
+                    {
+                        countReason(record.entries[index].reason, 1U, &record.entries[index]);
+                    }
+                    if (record.overflow == 0) return;
+                    for (std::size_t index = 0; index < record.overflowByReason.size(); ++index)
+                    {
+                        if (record.overflowByReason[index] != 0)
+                        {
+                            countReason(static_cast<FramegrabberDetail::FrameAnomalyReason>(index),
+                                        record.overflowByReason[index], nullptr);
+                        }
+                    }
+                };
                 while (!channelPtr->stopRequested.load(std::memory_order_acquire))
                 {
                     const frameindex_t nextPicture =
@@ -2131,54 +2202,33 @@ void Framegrabber::startChannel(const unsigned int dmaIndex, const std::size_t f
                         static_cast<int>(dmaIndex),
                         channelPtr->memory,
                         picture);
-                    FramegrabberDetail::PayloadLayout payloadLayout;
-                    const auto layoutError = FramegrabberDetail::resolvePayloadLayout(
-                        transferLength, height, pixelBits, width, frameBytes, payloadLayout);
-                    if (transferResult != FG_OK
-                        || layoutError != FramegrabberDetail::PayloadLayoutError::None)
+                    FramegrabberDetail::FrameAnomalies layoutAnomalies;
+                    FramegrabberDetail::PayloadInput payloadInput;
+                    payloadInput.transferKnown = transferResult == FG_OK;
+                    payloadInput.transferLength = transferLength;
+                    payloadInput.height = height;
+                    payloadInput.pixelBits = pixelBits;
+                    payloadInput.configuredWidth = width;
+                    payloadInput.frameBytes = frameBytes;
+                    payloadInput.sourceFormat = sdkFormat;
+                    const FramegrabberDetail::PayloadLayout payloadLayout =
+                        FramegrabberDetail::resolvePayloadLayout(payloadInput, layoutAnomalies);
+                    if (!payloadLayout.hasData)
                     {
-                        if (transferResult == FG_OK
-                            && layoutError == FramegrabberDetail::PayloadLayoutError::StrideTooLarge)
-                        {
-                            log("DMA(" + std::to_string(dmaIndex)
-                                    + ") image stride exceeds the supported range.",
-                                true);
-                        }
-                        else if (transferResult == FG_OK
-                                 && layoutError == FramegrabberDetail::PayloadLayoutError::RowTooSmall)
-                        {
-                            log("DMA(" + std::to_string(dmaIndex)
-                                    + ") transfer row is smaller than one pixel.",
-                                true);
-                        }
-                        else
-                        {
-                            log("DMA(" + std::to_string(dmaIndex)
-                                    + ") reported an invalid transfer length: length="
-                                    + std::to_string(transferLength) + " frameBytes="
-                                    + std::to_string(frameBytes) + " width=" + std::to_string(width)
-                                    + " height=" + std::to_string(height) + " result="
-                                    + std::to_string(transferResult) + ".",
-                                true);
-                        }
+                        // The device delivered zero bytes: there is nothing to fit or publish.
                         channelPtr->rejected.fetch_add(1, std::memory_order_relaxed);
+                        if (!zeroBytesWarningLogged)
+                        {
+                            log("DMA(" + std::to_string(dmaIndex)
+                                    + ") delivered a frame with zero bytes; nothing to publish.",
+                                true);
+                            zeroBytesWarningLogged = true;
+                        }
                         continue;
                     }
                     const std::size_t payloadBytes = payloadLayout.bytes;
                     const std::size_t payloadStride = payloadLayout.stride;
                     const int imageWidth = payloadLayout.width;
-                    if (imageWidth < width && !payloadGeometryWarningLogged)
-                    {
-                        log("DMA(" + std::to_string(dmaIndex)
-                                + ") payload geometry differs from the configured geometry: "
-                                + std::to_string(width) + "x" + std::to_string(height)
-                                + " configured, " + std::to_string(imageWidth) + "x"
-                                + std::to_string(height) + " delivered (transfer="
-                                + std::to_string(payloadBytes) + " bytes, stride="
-                                + std::to_string(payloadStride) + "). Displaying the delivered ROI.",
-                            true);
-                        payloadGeometryWarningLogged = true;
-                    }
 
                     if (channelPtr->stopRequested.load(std::memory_order_acquire))
                     {
@@ -2212,7 +2262,7 @@ void Framegrabber::startChannel(const unsigned int dmaIndex, const std::size_t f
                         descriptor.width = imageWidth;
                         descriptor.height = height;
                         descriptor.stride = static_cast<int>(payloadStride);
-                        descriptor.bitsPerPixel = pixelBits;
+                        descriptor.bitsPerPixel = reportedPixelBits;
                         descriptor.bytesPerPixel = pixelBytes;
                         descriptor.fgFormat = sdkFormat;
                         descriptor.pixelFormat = pixelFormat;
@@ -2229,7 +2279,7 @@ void Framegrabber::startChannel(const unsigned int dmaIndex, const std::size_t f
                                         std::size_t bufferDepth,
                                         frameindex_t pic,
                                         const std::uint8_t* dmaSource,
-                                        std::size_t bytes,
+                                        std::size_t readableBytes,
                                         const std::atomic<bool>& stopFlag) noexcept
                                 : _handle(fgHandle)
                                 , _memory(dmaMemory)
@@ -2237,16 +2287,18 @@ void Framegrabber::startChannel(const unsigned int dmaIndex, const std::size_t f
                                 , _bufferCount(bufferDepth)
                                 , _picture(pic)
                                 , _source(dmaSource)
-                                , _bytes(bytes)
+                                , _readable(readableBytes)
                                 , _stopRequested(stopFlag)
                             {
                             }
 
                             bool copyAndVerify(
                                 std::uint8_t* destination,
-                                std::size_t capacity) noexcept override
+                                const FramegrabberDetail::CaptureCopyPlan& plan) noexcept override
                             {
-                                if (_attempted || !destination || capacity < _bytes)
+                                if (_attempted || !destination || plan.destinationStride == 0
+                                    || plan.rows == 0
+                                    || plan.rows > plan.capacity / plan.destinationStride)
                                 {
                                     return false;
                                 }
@@ -2256,7 +2308,10 @@ void Framegrabber::startChannel(const unsigned int dmaIndex, const std::size_t f
                                     _stopped = true;
                                     return false;
                                 }
-                                std::memcpy(destination, _source, _bytes);
+                                // Only bytes the SDK buffer holds are read; the rest is zero-filled.
+                                FramegrabberDetail::copyPayloadRows(
+                                    destination, plan.destinationStride, plan.rows, _source,
+                                    plan.sourceStride, _readable);
                                 if (_stopRequested.load(std::memory_order_acquire))
                                 {
                                     _stopped = true;
@@ -2291,7 +2346,7 @@ void Framegrabber::startChannel(const unsigned int dmaIndex, const std::size_t f
                             std::size_t _bufferCount;
                             frameindex_t _picture;
                             const std::uint8_t* _source;
-                            std::size_t _bytes;
+                            std::size_t _readable;
                             const std::atomic<bool>& _stopRequested;
                             bool _attempted = false;
                             bool _overwritten = false;
@@ -2305,8 +2360,9 @@ void Framegrabber::startChannel(const unsigned int dmaIndex, const std::size_t f
                             bufferCount,
                             picture,
                             source,
-                            payloadBytes,
+                            payloadLayout.readable,
                             channelPtr->stopRequested);
+                        copyGate.anomalies = layoutAnomalies;
 
                         using Outcome = FramegrabberDetail::CaptureTransactionOutcome;
                         Outcome outcome = Outcome::DroppedInvalidOrFailed;
@@ -2336,6 +2392,7 @@ void Framegrabber::startChannel(const unsigned int dmaIndex, const std::size_t f
                         {
                             break;
                         }
+                        countAnomalies(copyGate.anomalies);
                         if (copyGate.overwritten())
                         {
                             channelPtr->overwritten.fetch_add(1, std::memory_order_relaxed);
@@ -2379,7 +2436,10 @@ void Framegrabber::startChannel(const unsigned int dmaIndex, const std::size_t f
                     {
                         break;
                     }
-                    std::memcpy(ownedBytes.get(), source, payloadBytes);
+                    FramegrabberDetail::copyPayloadRows(
+                        ownedBytes.get(), payloadStride, static_cast<std::size_t>(height), source,
+                        payloadStride, payloadLayout.readable);
+                    countAnomalies(layoutAnomalies);
 
                     // ACQ_STANDARD does not protect frame buffers. The buffer of `picture`
                     // is reused by frame picture + bufferCount, whose transfer can start
@@ -2484,16 +2544,20 @@ void Framegrabber::finishChannel(DmaChannel& channel)
         statistics.overwritten = channel.overwritten.load(std::memory_order_relaxed);
         statistics.rejected = channel.rejected.load(std::memory_order_relaxed);
         statistics.poolExhausted = channel.poolExhausted.load(std::memory_order_relaxed);
+        channel.copyAnomalies(statistics.anomalies);
         _lastStatistics.push_back(statistics);
+        std::uint64_t fitted = 0;
+        for (const auto total : statistics.anomalies) fitted += total;
         if (statistics.skipped != 0 || statistics.overwritten != 0 || statistics.rejected != 0
-            || statistics.poolExhausted != 0)
+            || statistics.poolExhausted != 0 || fitted != 0)
         {
             log("DMA(" + std::to_string(channel.index) + ") run finished: delivered="
                 + std::to_string(statistics.delivered) + ", skipped="
                 + std::to_string(statistics.skipped) + ", overwritten="
                 + std::to_string(statistics.overwritten) + ", rejected="
                 + std::to_string(statistics.rejected) + ", poolExhausted="
-                + std::to_string(statistics.poolExhausted) + ".",
+                + std::to_string(statistics.poolExhausted) + ", anomalies="
+                + std::to_string(fitted) + ".",
                 statistics.overwritten != 0 || statistics.poolExhausted != 0);
         }
     }
@@ -2793,6 +2857,7 @@ std::vector<Framegrabber::ChannelStatistics> Framegrabber::acquisitionStatistics
         statistics.overwritten = channel->overwritten.load(std::memory_order_relaxed);
         statistics.rejected = channel->rejected.load(std::memory_order_relaxed);
         statistics.poolExhausted = channel->poolExhausted.load(std::memory_order_relaxed);
+        channel->copyAnomalies(statistics.anomalies);
         const auto existing = std::find_if(result.begin(), result.end(),
             [&statistics](const ChannelStatistics& item)
             {

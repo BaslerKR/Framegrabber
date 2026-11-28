@@ -1,5 +1,7 @@
 ## Unreleased
 
+- Stop rejecting DMA frames for validation reasons: a short, partial-row, oversized, padded, unreadable-length, odd-width or unknown-format transfer is fitted into a valid GraphicsEngine image (nearest format by bit depth, otherwise raw bytes as Mono8; zero-filled where bytes are missing; rows copied into a valid stride) and published, with each fit counted in a fixed-capacity per-frame anomaly record, `ChannelStatistics::anomalies` and rate-limited logging. Only a transfer with zero bytes is dropped. A Single now ends at once with the refusal reason when its frame is dropped for ClassRefused, Capacity or ClassNotPrepared instead of waiting for its 30 s deadline.
+
 - Drop a frame refused by the frame context (ClassRefused or Capacity) without latching a refusal so the run continues and the next frame asks again, and report an image extent overflow as a per-frame invalid drop instead of Capacity.
 
 - Migrate managed DMA capture to a synchronous admitted frame transaction with overwrite verification and cancellation before publication.

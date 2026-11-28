@@ -33,7 +33,9 @@ The module ships no Qt widget target. Enable `FRAMEGRABBER_BUILD_PLAYGROUND_PLUG
 
 The optional Playground adapter is disabled by default. Enable `FRAMEGRABBER_BUILD_PLAYGROUND_ADAPTER` only when the neutral GraphicsEngine contract target is available. Consumers that want owned frames include `Utility/PlaygroundAdapter/FramegrabberGraphicsFrameStream.h` and link `Framegrabber::PlaygroundAdapter`; pixel-format conversion stays in `FramegrabberGraphicsFrameAdapter`. The stream publishes one single-image GraphicsFrame for each accepted DMA image, using the DMA index as the source index. It does not assemble frames across DMA channels; the consumer owns multi-source presentation.
 
-The optional image rejection sink reports the first failed validation rule and numeric layout of an owned DMA image at the adapter. Single reports each rejected DMA image. Live reports the first and every hundredth occurrence per DMA source and reason in an acquisition. A rejected DMA transfer or an unavailable capture buffer is observed earlier by the producer counters.
+The optional image rejection sink reports the first failed rule and numeric layout of a DMA image the adapter could not publish. Device data is never rejected for a validation reason: the adapter fits it into a GraphicsEngine image and publishes it, and the only images that fail are a transfer with zero bytes, a frame storage refusal, or a copy that lost the overwrite check. Single reports each such image. Live reports the first and every hundredth occurrence per DMA source and reason in an acquisition.
+
+Every fit is recorded in a fixed-capacity per-frame anomaly record (`FramegrabberFrameAnomalies.h`, eight entries plus per-reason overflow counts, no allocation per frame) carried by the capture copy gate, counted per DMA in `ChannelStatistics::anomalies`, and logged for the first and every hundredth occurrence of each reason. The fits are: an unreadable or oversized `FG_TRANSFER_LEN` (the declared frame is assumed present, or only the DMA buffer is read), a short transfer, a partial row or a row below one pixel (planned at the declared geometry, bytes that exist copied, the rest zero-filled), padded or narrower rows (the delivered width is published), a pixel format without a GraphicsEngine layout (mapped to the nearest format by bit depth, otherwise the raw bytes as Mono8), a source stride below the format row size (rows copied into a wider stride), an odd YCbCr 4:2:2 width (last column trimmed) and an unusable geometry (raw bytes as Mono8 rows). A format with no known bit depth sizes the DMA buffers as one byte per pixel. A broken-looking image is intentional: the user judges it.
 
 The optional Playground device plugin is a separate MODULE. Enable `FRAMEGRABBER_BUILD_PLAYGROUND_PLUGIN` only when `Playground::DeviceRuntimeContract` and the adapter are available. The plugin creates no dock or session widget and links only the runtime contract, the adapter and Qt Core/Concurrent/Xml; no Qt Widgets, Resources widget/dialog library or OpenGL. Package identity lives in `Utility/PlaygroundAdapter/Package/Package.cmake` as quoted `set(PLAYGROUND_PLUGIN_* ...)` assignments; the MODULE must set `PLAYGROUND_PLUGIN_PACKAGE` and include `DeviceRuntime/Contract/DeviceRuntime.h`. The host emits `plugin.json` from that identity plus `DeviceRuntime.h`.
 
@@ -91,7 +93,7 @@ Acquisition uses `Fg_AcquireEx(..., ACQ_STANDARD, ...)` with `setDMABufferCount(
 - After each copy the worker reads `NUMBER_OF_GRABBED_IMAGES`. The buffer of frame `n` is reused by frame `n + bufferCount`. If that transfer may have started (`grabbed - n >= bufferCount - 1`), the copy is dropped and counted as `overwritten`, because it can contain data from the later frame.
 - A frame whose owned pool buffer is still retained by a consumer is dropped before the copy and counted as `poolExhausted`.
 - A custom frame-storage callback that throws or returns empty drops that frame and increments `poolExhausted`; the exception does not terminate the acquisition worker.
-- `acquisitionStatistics()` reports `delivered`, `skipped`, `overwritten`, `rejected` (invalid pointer or transfer length) and `poolExhausted` for each DMA during and after a run.
+- `acquisitionStatistics()` reports `delivered`, `skipped`, `overwritten`, `rejected` (missing image pointer or a transfer with zero bytes), `poolExhausted` and the per-reason fitted `anomalies` for each DMA during and after a run.
 - A wait result other than the short wait timeout (for example `FG_TRANSFER_NOT_ACTIVE` after the driver's `FG_TIMEOUT`) ends that DMA worker.
 
 Stopping follows the SDK order: the CXP camera stream (`Sgc_stopAcquisition`) stops first, then the DMA (`Fg_stopAcquireEx`). After that the buffers are freed (`Fg_FreeMemEx`).
@@ -179,7 +181,7 @@ Playground declares the standard `device.*` lifecycle tools from `IDeviceConnect
 | --- | --- |
 | `device.connection` | Canonical state; `targetId` is the loaded board and `displayName` names board and applet |
 | `device.disconnect` | Stops acquisition and releases the board (`Fg_FreeGrabber`) |
-| `device.single` | Waits up to 30 s for one frame on every DMA |
+| `device.single` | Waits up to 30 s for one frame on every DMA; a frame dropped for a storage refusal (class refused, capacity, class not prepared) ends it at once with the refusal reason |
 | `device.targets` | Lists the cached boards as connection targets |
 | `device.discover` | Unavailable: board discovery runs when the session is created |
 | `device.connect` | Loads the selected board's active, else power-up, applet as the opening action |

@@ -252,6 +252,8 @@ private:
         std::shared_ptr<ContextSourceState> contextState;
         std::mutex failureMutex;
         std::string failureMessage;
+        /** Set with the first refusal reason so a waiting Single completes without a deadline. */
+        std::atomic<bool> refused{false};
     };
 
     [[nodiscard]] std::shared_ptr<ContextSourceState> activeContextSource(std::string* error) const;

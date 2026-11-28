@@ -6,6 +6,7 @@
 #include "engine/GraphicsFrameBuilder.h"
 
 #include <QDir>
+#include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
 #include <QJsonArray>
@@ -28,6 +29,7 @@ class FramegrabberControllerTests final : public QObject
     Q_OBJECT
 private slots:
     void refusedFrameIsDroppedAndLaterFramePublishes();
+    void singleCompletesPromptlyWithTheRefusalReason();
     void declaresHierarchicalBoardConnection();
     void connectLoadsOpeningAppletAndOwnsDmaSources();
     void declaredActionsCarryPresentationAndPromptKinds();
@@ -186,9 +188,10 @@ void FramegrabberControllerTests::refusedFrameIsDroppedAndLaterFramePublishes()
         std::atomic<int> calls{0};
     };
     struct Gate final : FramegrabberDetail::CaptureCopyGate {
-        bool copyAndVerify(std::uint8_t* destination, std::size_t bytes) noexcept override {
+        bool copyAndVerify(std::uint8_t* destination,
+                           const FramegrabberDetail::CaptureCopyPlan& plan) noexcept override {
             ++calls;
-            std::fill_n(destination, bytes, std::uint8_t{7});
+            std::fill_n(destination, plan.capacity, std::uint8_t{7});
             return true;
         }
         int calls = 0;
@@ -232,6 +235,65 @@ void FramegrabberControllerTests::refusedFrameIsDroppedAndLaterFramePublishes()
     controller.start();
     QVERIFY(FramegrabberDetail::CaptureTransactionAccess::snapshot(grabber));
     controller.stop();
+}
+
+void FramegrabberControllerTests::singleCompletesPromptlyWithTheRefusalReason()
+{
+    struct Refusing final : GraphicsFrameContextSource {
+        explicit Refusing(const GraphicsFrameError error) : error(error) {}
+        GraphicsResult<GraphicsFrameContext> beginFrame(std::size_t) noexcept override { return error; }
+        const GraphicsFrameError error;
+    };
+    struct Gate final : FramegrabberDetail::CaptureCopyGate {
+        bool copyAndVerify(std::uint8_t*, const FramegrabberDetail::CaptureCopyPlan&) noexcept override {
+            return true;
+        }
+    };
+
+    // The Single deadline is 30 s; a refused frame must end it far sooner with the refusal reason.
+    const struct { GraphicsFrameError error; const char* reason; } cases[] = {
+        {GraphicsFrameError::ClassRefused, "class refused"},
+        {GraphicsFrameError::Capacity, "exceeds capacity"},
+        {GraphicsFrameError::ClassNotPrepared, "not prepared"}};
+    for (const auto& item : cases) {
+        Framegrabber grabber(nullptr);
+        FramegrabberTestBackend fake;
+        FramegrabberSourceController controller(&grabber);
+        FramegrabberControllerTestAccess::install(controller, fake);
+        const auto connection = connectBoard(controller);
+        QVERIFY2(connection.error.isEmpty(), qPrintable(connection.error));
+        QVERIFY(connection.result.state.has_value());
+        controller.setFrameConsumer([](SessionFrame&&, unsigned) {});
+        controller.setFrameContextSource(std::make_shared<Refusing>(item.error));
+
+        Sink<DeviceConnectionResult> single;
+        QElapsedTimer timer;
+        timer.start();
+        QCOMPARE(controller.requestSingle(connection.result.state->connectionId, single.completion()).error,
+            DeviceConnectionError::None);
+        // The fake grab flips the live state once the Single has installed its capture transaction.
+        QVERIFY(QTest::qWaitFor([&fake] {
+            std::lock_guard<std::mutex> lock(fake.state.mutex);
+            return fake.state.grabbing;
+        }, 5000));
+        auto slot = FramegrabberDetail::CaptureTransactionAccess::snapshot(grabber);
+        QVERIFY(slot && slot->fn);
+        FramegrabberDetail::CaptureFrameDescriptor descriptor;
+        descriptor.size = 4; descriptor.width = 2; descriptor.height = 2;
+        descriptor.stride = 2; descriptor.bitsPerPixel = 8;
+        descriptor.pixelFormat = Framegrabber::PixelFormat::Mono8;
+        Gate gate;
+        QCOMPARE(slot->fn(descriptor, gate), FramegrabberDetail::CaptureTransactionOutcome::DroppedStorageRefused);
+
+        QVERIFY(single.wait());
+        QVERIFY2(timer.elapsed() < 10000, "Single waited for its deadline after a refusal");
+        const auto result = single.take();
+        QCOMPARE(result.error, DeviceConnectionError::Unavailable);
+        QVERIFY2(QString::fromStdString(result.message).contains(QLatin1String(item.reason), Qt::CaseInsensitive),
+            qPrintable(QString::fromStdString(result.message)));
+        QVERIFY(!fake.state.grabbing);
+        controller.stop();
+    }
 }
 
 void FramegrabberControllerTests::declaresHierarchicalBoardConnection()

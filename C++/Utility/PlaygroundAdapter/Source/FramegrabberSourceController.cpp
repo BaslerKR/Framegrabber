@@ -18,6 +18,7 @@
 #include <cctype>
 #include <cstddef>
 #include <filesystem>
+#include <numeric>
 #include <thread>
 #include <utility>
 
@@ -175,7 +176,8 @@ QJsonObject stateSchema()
     const auto discovery = schema({{"result", integer()}, {"message", anyText()},
         {"topologyMismatch", flag()}}, {"result", "message", "topologyMismatch"});
     const auto statistics = schema({{"dma", integer()}, {"delivered", anyText()},
-        {"skipped", anyText()}, {"overwritten", anyText()}, {"rejected", anyText()}},
+        {"skipped", anyText()}, {"overwritten", anyText()}, {"rejected", anyText()},
+        {"anomalies", anyText()}},
         {"dma", "delivered", "skipped", "overwritten", "rejected"});
     return schema({{"connected", flag()}, {"live", flag()}, {"busy", flag()},
         {"connectionId", anyText()}, {"board", anyText()}, {"applet", applet},
@@ -456,10 +458,12 @@ void FramegrabberSourceController::rebuildGraphicsStream(
 
     auto cancelledFlag = std::shared_ptr<const std::atomic<bool>>(run, &run->cancelled);
     auto storageOutcome = [this, run](const GraphicsFrameError err) {
-        if (err == GraphicsFrameError::ClassRefused || err == GraphicsFrameError::Capacity)
+        if (err == GraphicsFrameError::ClassRefused || err == GraphicsFrameError::Capacity
+            || err == GraphicsFrameError::ClassNotPrepared)
         {
             // The refused frame is dropped and counted by the stream; the run keeps acquiring.
-            // The user-facing message and the log line are surfaced once per run.
+            // The user-facing message and the log line are surfaced once per run, and a waiting
+            // Single ends with this reason instead of waiting for its deadline.
             const std::string message = contextErrorMessage(err);
             bool firstRefusal = false;
             {
@@ -472,6 +476,7 @@ void FramegrabberSourceController::rebuildGraphicsStream(
             }
             if (firstRefusal)
             {
+                run->refused.store(true, std::memory_order_release);
                 FramegrabberSystem::syslog("Framegrabber frame storage refused: " + message, true);
             }
         }
@@ -482,6 +487,7 @@ void FramegrabberSourceController::rebuildGraphicsStream(
                 std::lock_guard<std::mutex> lock(run->failureMutex);
                 if (run->failureMessage.empty()) run->failureMessage = message;
             }
+            run->refused.store(true, std::memory_order_release);
             FramegrabberSystem::syslog(
                 "Framegrabber producer contract error: planned reserve exceeded frame context budget.",
                 true);
@@ -864,7 +870,9 @@ QJsonObject FramegrabberSourceController::controlState(const bool fromWorker) co
                 {"delivered", QString::number(channel.delivered)},
                 {"skipped", QString::number(channel.skipped)},
                 {"overwritten", QString::number(channel.overwritten)},
-                {"rejected", QString::number(channel.rejected)}});
+                {"rejected", QString::number(channel.rejected)},
+                {"anomalies", QString::number(std::accumulate(
+                    channel.anomalies.begin(), channel.anomalies.end(), std::uint64_t{0}))}});
         }
     }
     const auto stringOrEmpty = [connected](const std::function<std::string()>& getter) {
@@ -1319,7 +1327,10 @@ ApiResult<void> FramegrabberSourceController::admitControl(
                     const auto grabbing = [backend] {
                         return backend->isGrabbing && backend->isGrabbing();
                     };
-                    while (grabbing() && std::chrono::steady_clock::now() < deadline)
+                    // A frame dropped for a storage refusal ends the Single at once: it fails with
+                    // the refusal reason instead of waiting for the deadline.
+                    while (grabbing() && !run->refused.load(std::memory_order_acquire)
+                           && std::chrono::steady_clock::now() < deadline)
                         std::this_thread::sleep_for(std::chrono::milliseconds(10));
                     if (grabbing()) {
                         if (backend->stop) backend->stop();
