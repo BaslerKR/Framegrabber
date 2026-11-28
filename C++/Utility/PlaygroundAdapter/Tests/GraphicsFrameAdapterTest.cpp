@@ -60,6 +60,45 @@ public:
     std::size_t requested = 0;
 };
 
+class TrackedAllocation final : public GraphicsAllocation
+{
+public:
+    explicit TrackedAllocation(std::atomic<int>& live, std::byte* data)
+        : GraphicsAllocation(data, 64, GraphicsAllocationOrigin::Managed, 1,
+                             GraphicsAllocationState::Writable, 42), live(live), data(data) { ++live; }
+    ~TrackedAllocation() override { --live; delete[] data; }
+    void destroy() noexcept override { delete this; }
+    std::atomic<int>& live;
+    std::byte* data;
+};
+class TrackedAllocator final : public GraphicsFrameAllocator
+{
+public:
+    TrackedAllocator(GraphicsAllocationRef allocation, std::atomic<int>& contexts)
+        : allocation(std::move(allocation)), contexts(contexts) { ++contexts; }
+    ~TrackedAllocator() override { --contexts; }
+    GraphicsResult<GraphicsAllocationSlice> allocate(std::size_t bytes, std::size_t alignment) noexcept override
+    {
+        if (bytes > 64 || reinterpret_cast<std::uintptr_t>(allocation->base()) % alignment) return GraphicsFrameError::Capacity;
+        return GraphicsAllocationSlice{allocation, 0, bytes};
+    }
+    bool isManaged() const noexcept override { return true; }
+    std::uint64_t domainId() const noexcept override { return 42; }
+    GraphicsAllocationRef allocation;
+    std::atomic<int>& contexts;
+};
+class TrackedContextSource final : public GraphicsFrameContextSource
+{
+public:
+    std::atomic<int> liveAllocations{0}, contexts{0};
+    GraphicsResult<GraphicsFrameContext> beginFrame(std::size_t) noexcept override
+    {
+        auto* data = new std::byte[64];
+        auto backing = GraphicsAllocationRef::adoptNew(new TrackedAllocation(liveAllocations, data));
+        return GraphicsFrameContext(std::make_shared<TrackedAllocator>(std::move(backing), contexts));
+    }
+};
+
 } // namespace
 
 int main()
@@ -278,7 +317,7 @@ int main()
 
     {
         Framegrabber grabber(nullptr);
-        auto source = std::make_shared<GraphicsLocalFrameContextSource>();
+        auto source = std::make_shared<TrackedContextSource>();
         int delivered = 0, outcomes = 0;
         FramegrabberGraphicsFrameStream stream(&grabber, source,
             [&](GraphicsFrame&&, unsigned) { ++delivered; }, {},
@@ -289,9 +328,10 @@ int main()
         descriptor.stride = 2; descriptor.bitsPerPixel = 8;
         descriptor.pixelFormat = Framegrabber::PixelFormat::Mono8;
         TestCopyGate gate({1, 2, 3, 4});
-        gate.onCopy = [&] { stream.cancel(); };
+        gate.onCopy = [&] { assert(source->liveAllocations == 1 && source->contexts == 1); stream.cancel(); };
         assert(slot->fn(descriptor, gate) == FramegrabberDetail::CaptureTransactionOutcome::AbortedStop);
         assert(delivered == 0 && outcomes == 0 && gate.copyAttempts == 1);
+        assert(source->liveAllocations == 0 && source->contexts == 0);
     }
 
     {
