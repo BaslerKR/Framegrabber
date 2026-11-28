@@ -250,6 +250,28 @@ int main()
         assert(delivered == 1 && gate.copyAttempts == 1);
     }
 
+    {
+        Framegrabber grabber(nullptr);
+        auto oldSource = std::make_shared<RefusingSource>(GraphicsFrameError::NoReadyCredit);
+        auto newSource = std::make_shared<RefusingSource>(GraphicsFrameError::NoReadyCredit);
+        std::shared_ptr<const FramegrabberDetail::CaptureTransactionSlot> late;
+        int delivered = 0;
+        {
+            FramegrabberGraphicsFrameStream oldStream(&grabber, oldSource,
+                [&](GraphicsFrame&&, unsigned) { ++delivered; });
+            late = FramegrabberDetail::CaptureTransactionAccess::snapshot(grabber);
+        }
+        FramegrabberGraphicsFrameStream newStream(&grabber, newSource,
+            [&](GraphicsFrame&&, unsigned) { ++delivered; });
+        FramegrabberDetail::CaptureFrameDescriptor descriptor;
+        descriptor.size = 4; descriptor.width = 2; descriptor.height = 2;
+        descriptor.stride = 2; descriptor.bitsPerPixel = 8;
+        descriptor.pixelFormat = Framegrabber::PixelFormat::Mono8;
+        TestCopyGate gate({1, 2, 3, 4});
+        assert(late->fn(descriptor, gate) == FramegrabberDetail::CaptureTransactionOutcome::AbortedStop);
+        assert(oldSource->calls == 0 && newSource->calls == 0 && delivered == 0);
+    }
+
     auto captureNative = [&localSource](const Framegrabber::PixelFormat pixelFormat,
                                         const GraphicsImagePixelFormat expected,
                                         const int width,
