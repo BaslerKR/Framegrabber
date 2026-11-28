@@ -100,6 +100,8 @@ int main()
         assert(FramegrabberGraphicsFrameAdapter::imageFailure(image) == GraphicsImageFailure::None);
         assert(frame.metadata().sourceName == "Framegrabber");
         assert(frame.metadata().frameIndex == 9U);
+        // The pre-migration stream set no frameId or clock.
+        assert(frame.metadata().frameId.empty());
 
         auto checked = image;
         checked.stride = 1;
