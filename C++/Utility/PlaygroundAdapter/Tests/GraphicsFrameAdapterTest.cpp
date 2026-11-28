@@ -42,6 +42,21 @@ private:
     bool _rejectOverwrite = false;
 };
 
+class RefusingSource final : public GraphicsFrameContextSource
+{
+public:
+    explicit RefusingSource(GraphicsFrameError error) : error(error) {}
+    GraphicsResult<GraphicsFrameContext> beginFrame(std::size_t bytes) noexcept override
+    {
+        ++calls;
+        requested = bytes;
+        return error;
+    }
+    GraphicsFrameError error;
+    int calls = 0;
+    std::size_t requested = 0;
+};
+
 } // namespace
 
 int main()
@@ -174,6 +189,20 @@ int main()
         auto result = FramegrabberGraphicsFrameAdapter::captureFrame(localSource, descriptor, gate);
         assert(!result.hasValue());
         assert(gate.copyAttempts == 1);
+    }
+
+    for (const auto error : {GraphicsFrameError::NoReadyCredit, GraphicsFrameError::ClassRefused})
+    {
+        FramegrabberDetail::CaptureFrameDescriptor descriptor;
+        descriptor.size = 4; descriptor.width = 2; descriptor.height = 2;
+        descriptor.stride = 2; descriptor.bitsPerPixel = 8;
+        descriptor.pixelFormat = Framegrabber::PixelFormat::Mono8;
+        RefusingSource source(error);
+        TestCopyGate gate({1, 2, 3, 4});
+        auto result = FramegrabberGraphicsFrameAdapter::captureFrame(source, descriptor, gate);
+        assert(!result.hasValue() && result.error() == error);
+        assert(source.calls == 1 && source.requested == 4);
+        assert(gate.copyAttempts == 0);
     }
 
     auto captureNative = [&localSource](const Framegrabber::PixelFormat pixelFormat,
